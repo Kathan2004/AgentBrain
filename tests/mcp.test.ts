@@ -106,8 +106,8 @@ describe("MCP server", () => {
     const brief = await client.call("agentbrain_brief");
     expect(brief.text).toContain("1. Refresh-token rotation");
 
-    // Reading alone doesn't claim the task.
-    expect(activeTask(repo).agent.id).toBe("codex");
+    // The task was handed off, so whoever reads its brief picks it up.
+    expect(activeTask(repo)).toMatchObject({ status: "running", agent: { id: "claude-code" } });
 
     const update = await client.call("agentbrain_update", {
       done: ["1"],
@@ -129,6 +129,28 @@ describe("MCP server", () => {
     const cpDir = path.join(repo, ".agentbrain/tasks", after.id, "checkpoints");
     const latest = fs.readdirSync(cpDir).filter((f) => f.endsWith(".json")).sort().at(-1)!;
     expect(readJson(path.join(cpDir, latest)).stopReason).toBe("claude-code: MCP session ended");
+  });
+
+  it("does not take a task another agent is actively running just by reading it", async () => {
+    const repo = project();
+    ab(repo, ["task", "update", "--agent", "cursor", "--session", "c1", "--next", "Busy"]);
+    const client = connect({ root: repo });
+    await client.initialize("Visual Studio Code");
+    await client.call("agentbrain_brief");
+    expect(activeTask(repo).agent).toEqual({ id: "cursor", sessionId: "c1" });
+    await client.close();
+  });
+
+  it("warns an agent that finishes while planned items are still open", async () => {
+    const repo = project();
+    const client = connect({ root: repo });
+    await client.initialize("Visual Studio Code");
+    const result = await client.call("agentbrain_update", { done: ["Rotated tokens on every use"], status: "review" });
+    expect(result.text).toContain("WARNING: you marked the task review but 1 item(s) are still listed");
+    expect(result.text).toContain("1. Refresh-token rotation");
+    const fixed = await client.call("agentbrain_update", { done: ["1"] });
+    expect(fixed.text).toContain("Remaining: none.");
+    await client.close();
   });
 
   it("does not hand off on disconnect if the agent already finished", async () => {

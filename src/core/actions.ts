@@ -4,8 +4,9 @@ import { getGitState } from "./git.js";
 import { makeCheckpoint, renderHandoff, type Checkpoint } from "./handoff.js";
 import { tasksDir } from "./paths.js";
 import { compilePatterns, redact, redactAll } from "./redact.js";
+import { describeActivity, taskActivity } from "./stall.js";
 import { SCHEMA_VERSION, isTaskStatus, TASK_STATUSES } from "./state.js";
-import type { AgentRef, TaskState, TaskStatus } from "./state.js";
+import type { AgentRef, AgentSessionState, TaskState, TaskStatus } from "./state.js";
 import {
   getProject,
   getSession,
@@ -140,14 +141,11 @@ export function updateTask(root: string, taskId: string, patch: TaskPatch): Task
   else if (task.nextAction && task.completed.includes(task.nextAction)) task.nextAction = undefined;
   if (patch.agent) {
     task.agent = patch.agent;
-    if (patch.agent.sessionId && !getSession(root, patch.agent.id, patch.agent.sessionId)) {
-      saveSession(root, {
-        schemaVersion: SCHEMA_VERSION,
-        agentId: patch.agent.id,
-        sessionId: patch.agent.sessionId,
-        taskId: task.id,
-        startedAt: new Date().toISOString(),
-      });
+    if (patch.agent.sessionId) {
+      const session = getSession(root, patch.agent.id, patch.agent.sessionId);
+      if (!session || session.taskId !== task.id) {
+        recordSession(root, { id: patch.agent.id, sessionId: patch.agent.sessionId }, task.id);
+      }
     }
   }
 
@@ -157,6 +155,35 @@ export function updateTask(root: string, taskId: string, patch: TaskPatch): Task
   }
   saveTask(root, task);
   return task;
+}
+
+/**
+ * Creates or updates a session record without losing its history: the start
+ * time is kept and every task the session touches is remembered.
+ */
+function recordSession(
+  root: string,
+  agent: Required<AgentRef>,
+  taskId: string,
+  changes: Partial<Pick<AgentSessionState, "endedAt" | "stopReason" | "checkpointId">> = {},
+): void {
+  const existing = getSession(root, agent.id, agent.sessionId);
+  const taskIds = [...new Set([...(existing?.taskIds ?? (existing ? [existing.taskId] : [])), taskId])];
+  const session: AgentSessionState = {
+    schemaVersion: SCHEMA_VERSION,
+    agentId: agent.id,
+    sessionId: agent.sessionId,
+    taskId,
+    taskIds,
+    startedAt: existing?.startedAt ?? new Date().toISOString(),
+    ...(existing?.checkpointId ? { checkpointId: existing.checkpointId } : {}),
+    ...changes,
+  };
+  if (!changes.endedAt) {
+    delete session.endedAt;
+    delete session.stopReason;
+  }
+  saveSession(root, session);
 }
 
 export interface CheckpointResult {
@@ -186,16 +213,9 @@ export function writeCheckpoint(
   fs.writeFileSync(markdownFile, renderHandoff(task, checkpoint), "utf8");
 
   if (agent?.sessionId) {
-    const now = new Date().toISOString();
-    const existing = getSession(root, agent.id, agent.sessionId);
-    saveSession(root, {
-      schemaVersion: SCHEMA_VERSION,
-      agentId: agent.id,
-      sessionId: agent.sessionId,
-      taskId: task.id,
-      startedAt: existing?.startedAt ?? now,
-      ...(status === "handoff" ? { endedAt: now } : {}),
-      ...(status === "handoff" && reason ? { stopReason: reason } : {}),
+    const ending = status === "handoff" ? { endedAt: new Date().toISOString(), ...(reason ? { stopReason: reason } : {}) } : {};
+    recordSession(root, { id: agent.id, sessionId: agent.sessionId }, task.id, {
+      ...ending,
       checkpointId: checkpoint.checkpointId,
     });
   }
@@ -216,13 +236,7 @@ export function takeOver(root: string, taskId: string, agent: Required<AgentRef>
   task.status = "running";
   task.agent = agent;
   saveTask(root, task);
-  saveSession(root, {
-    schemaVersion: SCHEMA_VERSION,
-    agentId: agent.id,
-    sessionId: agent.sessionId,
-    taskId: task.id,
-    startedAt: new Date().toISOString(),
-  });
+  recordSession(root, agent, task.id);
   return task;
 }
 
@@ -267,7 +281,11 @@ export function briefContext(root: string, taskId: string): string {
     : `You are continuing AgentBrain task ${task.id}. This is your task: earlier sessions (in this or ` +
       "another coding agent) did the work below. Pick up exactly where it left off, as if you had done it " +
       "yourself; do not ask the developer to re-explain.";
-  return `${intro}\n${context}`;
+  const warning = describeActivity(taskActivity(root, task, getProject(root).stallMinutes));
+  const note = warning
+    ? `\n> Note: ${warning} If you are taking over, continue from the next action; your first update makes the task yours.\n`
+    : "";
+  return `${intro}\n${note}${context}`;
 }
 
 export function buildPrompt(root: string, taskId: string, cli: string): string {

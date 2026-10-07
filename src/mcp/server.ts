@@ -67,7 +67,8 @@ const TOOLS = [
     name: "agentbrain_update",
     description:
       "Record progress on the task after each meaningful step, so any agent can continue if you are cut off. " +
-      "Items in done/fixed/unblock may be numbers referring to the numbered lists in the brief.",
+      "Close planned items by putting their numbers from the Remaining list in done (numbers refer to the latest " +
+      "brief or update result); only use todo for genuinely new steps.",
     inputSchema: {
       type: "object",
       properties: {
@@ -422,7 +423,11 @@ export class AgentBrainMcpServer {
             return `Task ${asked.id} is already ${asked.status}. The task in progress is ${waiting.id}; continue that one:\n\n${this.brief(waiting.id)}`;
           }
         }
-        return this.brief(args.task_id);
+        // A handed-off task is waiting for whoever picks it up: reading its brief
+        // claims it. A task another agent is actively running is left alone.
+        const taskId = resolveTaskId(root, args.task_id, this.agent.id);
+        if (getTask(root, taskId).status === "handoff") this.claim(root, taskId);
+        return this.brief(taskId);
       }
       case "agentbrain_list_tasks": {
         const root = this.requireRoot();
@@ -463,8 +468,9 @@ export class AgentBrainMcpServer {
           agent: this.agent,
         };
         const task = updateTask(root, taskId, patch);
-        return `Recorded. ${task.id} is ${task.status}; ${task.completed.length} done, ${task.remaining.length} remaining.` +
-          (task.nextAction ? ` Next: ${task.nextAction}` : "");
+        return `Recorded. ${task.id} is ${task.status}; ${task.completed.length} done.` +
+          (task.nextAction ? ` Next: ${task.nextAction}` : "") +
+          remainingFeedback(task.status, task.remaining);
       }
       case "agentbrain_checkpoint":
       case "agentbrain_handoff": {
@@ -485,6 +491,20 @@ export class AgentBrainMcpServer {
         throw new UserError(`Unknown tool ${name}`);
     }
   }
+}
+
+/**
+ * Agents tend to describe finished work in their own words and leave the
+ * planned items open, so every update shows them what is still listed.
+ */
+export function remainingFeedback(status: string, remaining: string[]): string {
+  if (!remaining.length) return "\nRemaining: none.";
+  const list = remaining.map((item, i) => `${i + 1}. ${item}`).join("\n");
+  const finishing = status === "review" || status === "done";
+  return finishing
+    ? `\nWARNING: you marked the task ${status} but ${remaining.length} item(s) are still listed as remaining:\n${list}\n` +
+        "If they are finished, call agentbrain_update with done set to their numbers; otherwise set status back to running."
+    : `\nRemaining (mark finished ones with done: [numbers]; don't re-add them as todo):\n${list}`;
 }
 
 class MethodNotFound extends Error {}

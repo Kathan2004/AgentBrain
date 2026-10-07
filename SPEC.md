@@ -421,8 +421,18 @@ exits without handing off (usage limit, crash, Ctrl-C). Planned: checkpoint
 after test runs and on a timer. MCP server integration is done and verified
 live with Copilot in VS Code; Git post-commit checkpoints are done.
 
-### V0.4
-Headless execution via ACP; Git worktree isolation; agent selection/routing.
+### V0.5 — done
+Stall warnings (no activity, unrecorded work, unclaimed handoffs), `agentbrain
+log` timeline, `agentbrain doctor`, MCP live refresh (tools/list_changed),
+compact briefs for long histories.
+
+Known limitation: file activity is per working tree, not per task. When two
+agents work on different tasks in one checkout, a warning for one task can be
+caused by the other agent's edits. Worktree isolation (below) fixes this.
+
+### Next
+Headless execution via ACP; Git worktree isolation per task; agent
+selection/routing.
 
 ### V1.0
 Stable project-state specification and extensible agent ecosystem.

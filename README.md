@@ -20,6 +20,7 @@ git clone <this repo> && cd agentbrain
 npm install
 npm run build
 npm link          # puts `agentbrain` on your PATH
+agentbrain doctor # checks the installation and project integration
 ```
 
 Requires Node 20+ and Git.
@@ -140,12 +141,25 @@ agentbrain handoff --reason "switching to Cursor for the UI work"
 agentbrain resume          # prints the brief — paste it into any agent
 ```
 
+### When an agent goes quiet
+
+`agentbrain status` (and every brief) warns when:
+
+- the agent that owns a running task has shown no activity for 10 minutes —
+  no AgentBrain updates and no file changes; it may have stopped or be waiting
+  on an approval prompt;
+- an agent keeps changing files but hasn't recorded progress for 10 minutes;
+- files changed after a handoff but no agent has taken the task over.
+
+Set `"stallMinutes"` in `.agentbrain/project.json` to change the threshold.
+
 ### Everything else
 
 ```bash
-agentbrain status                 # active task, progress, last checkpoint
+agentbrain status                 # active task, progress, last checkpoint, stall warnings
 agentbrain checkpoint             # snapshot without stopping
 agentbrain connect                # configure MCP, rules, and the Git hook
+agentbrain doctor                 # check setup and print fixes for anything missing
 agentbrain mcp                    # run the MCP server (normally started by an agent)
 agentbrain hooks install          # install automatic post-commit checkpoints
 agentbrain task list / task use <id>

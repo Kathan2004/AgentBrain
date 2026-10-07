@@ -16,15 +16,18 @@ import {
   writeCheckpoint,
 } from "../core/actions.js";
 import { CONNECT_TARGETS, connectAgents } from "../core/connect.js";
-import { runMcpServer } from "../mcp/server.js";
+import { runDoctor } from "../core/doctor.js";
+import { remainingFeedback, runMcpServer } from "../mcp/server.js";
 import { installPostCommitHook, postCommit, uninstallPostCommitHook } from "../core/githooks.js";
 import { brainDir, findRoot } from "../core/paths.js";
 import { RULES_TARGETS, writeRules } from "../core/rules.js";
 import { getProject, getTask, initStore, listSessions, listTasks } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
+import { describeActivity, taskActivity } from "../core/stall.js";
+import { taskTimeline } from "../core/timeline.js";
 
 const USAGE = `
-AgentBrain 0.4 — move coding tasks between AI agents without losing state
+AgentBrain 0.5 — move coding tasks between AI agents without losing state
 
 Setup
   agentbrain init                         Create .agentbrain/ in the current directory
@@ -32,6 +35,7 @@ Setup
                                           (${RULES_TARGETS.map((t) => t.id).join(", ")})
   agentbrain connect [--only <ids>]       Give every agent live AgentBrain state via MCP
                                           (${CONNECT_TARGETS.map((t) => t.id).join(", ")}) + rules + Git hook
+  agentbrain doctor                         Check setup and print fixes for anything missing
   agentbrain mcp [--root <dir>]           Run the MCP server (started by agents, not by hand)
   agentbrain hooks install                 Install the automatic post-commit checkpoint hook
   agentbrain hooks uninstall               Remove the automatic post-commit checkpoint hook
@@ -55,6 +59,7 @@ Switching agents
                                           Snapshot state and mark the task ready for another agent
   agentbrain resume [task-id] [--agent <id>]
                                           Print the continuation brief; --agent takes over the task
+  agentbrain log [task-id]                 Show the task timeline
   agentbrain agents                       Show supported agents and recorded sessions
 
 Agents: ${BUILTIN_AGENTS.map((a) => a.id).join(", ")}
@@ -174,6 +179,16 @@ function status(): void {
   if (last) {
     console.log(`Last checkpoint: ${last.checkpointId} (${last.status}, ${last.timestamp}${last.stopReason ? `, ${last.stopReason}` : ""})`);
   }
+  const warning = describeActivity(taskActivity(cwd, task, project.stallMinutes));
+  if (warning) {
+    console.log(`\n⚠ ${warning}`);
+    console.log("  Check on it, or take over: agentbrain run <agent>   or   agentbrain resume --agent <id>");
+  }
+  // Other running tasks can stall too.
+  for (const other of tasks.filter((t) => t.id !== task.id && t.status === "running")) {
+    const otherWarning = describeActivity(taskActivity(cwd, other, project.stallMinutes));
+    if (otherWarning) console.log(`\n⚠ ${other.id}: ${otherWarning}`);
+  }
 }
 
 function update(): void {
@@ -191,7 +206,7 @@ function update(): void {
     next: flags.next,
     agent: flags.agent || process.env.AGENTBRAIN_AGENT ? agentFromFlags(taskId) : undefined,
   });
-  console.log(`✓ Updated ${task.id} (${task.status})`);
+  console.log(`✓ Updated ${task.id} (${task.status})${remainingFeedback(task.status, task.remaining).replaceAll("agentbrain_update with done set to their numbers", "agentbrain task update --done <n>").replaceAll("done: [numbers]", "--done <n>")}`);
 }
 
 function snapshot(kind: "checkpoint" | "handoff", id?: string): void {
@@ -333,6 +348,20 @@ function agents(): void {
   }
 }
 
+function localTime(timestamp: string): string {
+  const date = new Date(timestamp);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function log(id?: string): void {
+  const cwd = root();
+  const taskId = resolveTaskId(cwd, id);
+  for (const event of taskTimeline(cwd, taskId)) {
+    console.log(`${localTime(event.timestamp)} ${event.agent.padEnd(12)} ${event.event.padEnd(10)} ${event.reason}`);
+  }
+}
+
 function rules(): void {
   const cwd = root();
   const only = flags.only?.split(",").map((x) => x.trim()).filter(Boolean);
@@ -348,6 +377,17 @@ function hooks(action: "install" | "uninstall"): void {
   const file = action === "install" ? installPostCommitHook(root()) : uninstallPostCommitHook(root());
   console.log(`✓ ${action === "install" ? "Installed" : "Uninstalled"} Git hook`);
   console.log(`  ${file}`);
+}
+
+function doctor(): void {
+  const checks = runDoctor(process.cwd());
+  for (const check of checks) {
+    console.log(`${check.ok ? "✓" : "✗"} ${check.name}  ${check.detail}`);
+    if (!check.ok && check.fix) console.log(`    fix: ${check.fix}`);
+  }
+  if (checks.some((check) => !check.ok && ["Node.js", "Git repository", "AgentBrain initialized"].includes(check.name))) {
+    process.exitCode = 1;
+  }
 }
 
 /** MCP config for every agent, plus instruction files and the commit hook. */
@@ -407,6 +447,8 @@ async function main(): Promise<void> {
     snapshot(command, subcommand);
   } else if (command === "resume") {
     resume(subcommand);
+  } else if (command === "log") {
+    log(subcommand);
   } else if (command === "run") {
     // `run <agent> [task]`, or `run [task] -- <command>` for a custom agent.
     if (passthrough.length) await run(undefined, subcommand);
@@ -421,6 +463,8 @@ async function main(): Promise<void> {
     await runMcpServer(flags.root ?? process.cwd());
   } else if (command === "hooks" && (subcommand === "install" || subcommand === "uninstall")) {
     hooks(subcommand);
+  } else if (command === "doctor") {
+    doctor();
   } else if (command === "hook" && subcommand === "post-commit") {
     postCommit(process.cwd());
   } else {

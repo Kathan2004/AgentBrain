@@ -9,6 +9,8 @@ export interface ProjectState {
   activeTaskId?: string;
   /** Extra regexes (JavaScript syntax) whose matches are redacted from stored state. */
   redactPatterns?: string[];
+  /** Minutes without activity before a running task counts as stalled (default 10). */
+  stallMinutes?: number;
 }
 
 export function writeJson(file: string, value: unknown): void {

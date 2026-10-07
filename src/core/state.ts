@@ -43,7 +43,10 @@ export interface AgentSessionState {
   schemaVersion: typeof SCHEMA_VERSION;
   agentId: string;
   sessionId: string;
+  /** Task the session is working on now. */
   taskId: string;
+  /** Every task this session has worked on (one MCP connection can move between tasks). */
+  taskIds?: string[];
   startedAt: string;
   endedAt?: string;
   stopReason?: string;
