@@ -7,6 +7,8 @@ export interface ProjectState {
   schemaVersion: "0.1";
   initializedAt: string;
   activeTaskId?: string;
+  /** Extra regexes (JavaScript syntax) whose matches are redacted from stored state. */
+  redactPatterns?: string[];
 }
 
 export function writeJson(file: string, value: unknown): void {
@@ -63,10 +65,17 @@ export function listTasks(cwd: string): TaskState[] {
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
-export function saveCheckpoint(cwd: string, taskId: string, checkpoint: unknown): string {
-  const id = (checkpoint as { checkpointId: string }).checkpointId;
+/**
+ * Stores a checkpoint. IDs are `cp-<ms>`; if two land in the same millisecond
+ * the ID is bumped (mutating `checkpoint`) so neither is overwritten.
+ */
+export function saveCheckpoint(cwd: string, taskId: string, checkpoint: { checkpointId: string }): string {
   const dir = checkpointsDir(cwd, taskId);
-  const file = path.join(dir, `${id}.json`);
+  let n = Number(checkpoint.checkpointId.slice(3));
+  while (fs.existsSync(path.join(dir, `${checkpoint.checkpointId}.json`))) {
+    checkpoint.checkpointId = `cp-${++n}`;
+  }
+  const file = path.join(dir, `${checkpoint.checkpointId}.json`);
   writeJson(file, checkpoint);
   return file;
 }
@@ -89,4 +98,18 @@ export function latestHandoffFile(cwd: string, taskId: string): string | null {
     .sort()
     .at(-1);
   return latest ? path.join(dir, latest) : null;
+}
+
+export function listSessions(cwd: string): AgentSessionState[] {
+  const agentsRoot = path.join(brainDir(cwd), "agents");
+  if (!fs.existsSync(agentsRoot)) return [];
+  const sessions: AgentSessionState[] = [];
+  for (const agent of fs.readdirSync(agentsRoot, { withFileTypes: true })) {
+    const dir = path.join(agentsRoot, agent.name, "sessions");
+    if (!agent.isDirectory() || !fs.existsSync(dir)) continue;
+    for (const file of fs.readdirSync(dir).filter((f) => f.endsWith(".json"))) {
+      sessions.push(readJson<AgentSessionState>(path.join(dir, file)));
+    }
+  }
+  return sessions.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
 }

@@ -6,7 +6,7 @@ export interface Checkpoint {
   checkpointId: string;
   taskId: string;
   timestamp: string;
-  status: "handoff";
+  status: "checkpoint" | "handoff";
   agent: AgentRef;
   stopReason?: string;
   git: GitState;
@@ -25,6 +25,8 @@ export interface CheckpointOptions {
   /** Agent handing off. Defaults to the task's current agent, then "manual". */
   agent?: AgentRef;
   stopReason?: string;
+  /** "handoff" (default) when the agent is stopping; "checkpoint" to snapshot mid-task. */
+  status?: Checkpoint["status"];
 }
 
 export function makeCheckpoint(
@@ -39,7 +41,7 @@ export function makeCheckpoint(
     checkpointId,
     taskId: task.id,
     timestamp: new Date().toISOString(),
-    status: "handoff",
+    status: options.status ?? "handoff",
     agent: options.agent ?? task.agent ?? { id: "manual" },
     ...(options.stopReason ? { stopReason: options.stopReason } : {}),
     git,
@@ -70,7 +72,8 @@ export function renderHandoff(task: TaskState, checkpoint: Checkpoint): string {
 ${task.objective}
 
 ## Status
-${checkpoint.status} — handed off by ${agent}${checkpoint.stopReason ? `\nReason: ${checkpoint.stopReason}` : ""}
+${checkpoint.status}
+Last agent: ${agent}${checkpoint.stopReason ? `\nStop reason: ${checkpoint.stopReason}` : ""}
 
 ## Progress
 

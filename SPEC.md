@@ -208,6 +208,33 @@ The adapter layer must not leak provider-specific concepts into the core state m
 
 Where an interoperability protocol such as ACP is available, AgentBrain should prefer the standard protocol over a proprietary integration.
 
+### Implemented integrations (v0.2)
+
+AgentBrain integrates with agents in two ways, neither of which requires
+vendor-specific code in the core:
+
+1. **Process adapters** (`agentbrain run <agent>`): the agent's own terminal
+   UI is launched on the user's terminal with the AgentBrain continuation brief
+   as its opening message. Built in: Claude Code, Codex CLI, Gemini CLI, Cursor
+   CLI, Copilot CLI, Aider. Any other CLI: `agentbrain run --agent <id> -- <cmd>
+   {prompt}`. The agent process gets `AGENTBRAIN_AGENT`, `AGENTBRAIN_SESSION`,
+   `AGENTBRAIN_TASK`, `AGENTBRAIN_ROOT` and `AGENTBRAIN_PROMPT_FILE`.
+2. **Instruction files** (`agentbrain rules`): for agents that live inside an
+   IDE (Cursor, Copilot in VS Code, Windsurf, ...) and cannot be launched by
+   AgentBrain. `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
+   `.cursor/rules/agentbrain.mdc` and `.github/copilot-instructions.md` tell
+   the agent to `resume`, record progress with `task update`, and `handoff`.
+
+In both cases the agent writes state back through the CLI, so the next switch
+is as lossless as the current one.
+
+**Why not ACP yet.** ACP makes AgentBrain the agent's *client*: it would have
+to render the agent's streaming output, answer permission prompts and serve
+file reads — i.e. become an editor-like UI, which is a non-goal. Developers
+already have those UIs (the agent's own TUI, or their IDE). An ACP adapter
+remains the right choice for headless/background execution and is planned
+for that case; it fits the existing `AgentAdapter` interface.
+
 ## 11. Git behavior
 
 V0.1 treats Git as the source of truth for source code.
@@ -271,15 +298,35 @@ Writes `<checkpoint-id>.json` and `<checkpoint-id>.md` under the task's
 agentbrain resume [task-id] [--agent <id>] [--session <id>]
 ```
 
-Prints the latest handoff. With `--agent`, the new agent takes over: the task
+Prints the continuation brief: the live task and Git state, attributed to the
+last handoff, plus instructions for recording progress. With `--agent`, the new agent takes over: the task
 becomes `running` and a session record is opened under `agents/`.
 
 All commands except `init` work from any subdirectory of the project.
 
-### List agents (not yet implemented)
+### Run an agent
 
 ```bash
-agentbrain agents
+agentbrain run <agent> [task-id]                       # claude-code, codex, gemini, cursor, copilot, aider
+agentbrain run [task-id] --agent <id> -- <cmd> {prompt}  # anything else
+```
+
+Takes over the task, launches the agent with the continuation brief, and when
+the agent exits writes a handoff checkpoint unless the agent already handed
+off or moved the task to `review`/`done`.
+
+### Checkpoint without stopping
+
+```bash
+agentbrain checkpoint [task-id] [--reason <text>]
+```
+
+### Agents, sessions and instruction files
+
+```bash
+agentbrain agents        # installed terminal agents + recorded sessions
+agentbrain rules         # write agent instruction files (--only cursor,copilot)
+agentbrain task use <id> # switch the active task
 ```
 
 ## 13. Security principles
@@ -294,6 +341,13 @@ Therefore:
 - environment variables and secret files must be excluded
 - generated handoffs must be reviewed before being sent to another external agent
 - `.agentbrain` should support secret redaction rules
+
+Implemented: all free text (objective, progress items, decisions, failures,
+blockers, next action, stop reasons) is redacted before it is stored. Built-in
+patterns cover private keys, AWS/GitHub/OpenAI/Anthropic/Slack/Google keys,
+JWTs, `password=`-style assignments and credentials in URLs. Add project
+patterns as `"redactPatterns": ["regex", ...]` in `.agentbrain/project.json`.
+File *contents* are never read or stored — only changed file paths.
 
 ## 14. V0.1 acceptance tests
 
@@ -312,17 +366,21 @@ V0.1 is successful when:
 
 ## 15. Roadmap
 
-### V0.1
-Portable state + handoff.
+### V0.1 — done
+Portable state + handoff: init, tasks, Git-aware checkpoints, Markdown handoff,
+resume, secret redaction.
 
-### V0.2
-First production-quality agent adapters and Git worktree isolation.
+### V0.2 — done
+First agent integrations: `agentbrain run` process adapters, `agentbrain rules`
+instruction files for IDE agents, agent session records.
 
-### V0.3
-Agent selection/routing.
+### V0.3 — partly done
+Automatic checkpointing. Done: auto-handoff when an agent launched by `run`
+exits without handing off (usage limit, crash, Ctrl-C). Planned: checkpoint
+after test runs and on a timer.
 
 ### V0.4
-Automated task delegation and verification loops.
+Headless execution via ACP; Git worktree isolation; agent selection/routing.
 
 ### V1.0
 Stable project-state specification and extensible agent ecosystem.
