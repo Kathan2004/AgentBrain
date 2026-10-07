@@ -24,11 +24,12 @@ import {
   type TaskPatch,
 } from "../core/actions.js";
 import { findRoot } from "../core/paths.js";
+import { taskForDir } from "../core/worktree.js";
 import { getProject, getTask, listTasks } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-const SERVER_VERSION = "0.4.0";
+const SERVER_VERSION = "0.6.0";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 interface Message {
@@ -150,8 +151,12 @@ export class AgentBrainMcpServer {
   private watcher: fs.FSWatcher | null = null;
   private lastToolsKey = "";
 
+  /** The folder the agent has open: a task worktree, or the main checkout. */
+  private readonly workdir: string;
+
   constructor(private readonly options: McpServerOptions = {}) {
-    this.root = options.root ? findRoot(options.root) : findRoot(process.cwd());
+    this.workdir = options.root ?? process.cwd();
+    this.root = findRoot(this.workdir);
     this.out = options.output ?? process.stdout;
     this.log = options.log ?? ((m) => process.stderr.write(`[agentbrain-mcp] ${m}\n`));
   }
@@ -317,7 +322,8 @@ export class AgentBrainMcpServer {
   private pendingTask(): ReturnType<typeof getTask> | null {
     if (!this.root) return null;
     try {
-      const active = getProject(this.root).activeTaskId;
+      const here = taskForDir(this.root, this.workdir);
+      const active = here?.id ?? getProject(this.root).activeTaskId;
       if (!active) return null;
       const task = getTask(this.root, active);
       return ["idle", "running", "checkpoint", "handoff", "blocked"].includes(task.status) ? task : null;
@@ -378,8 +384,9 @@ export class AgentBrainMcpServer {
     if (!this.root) return protocol;
     try {
       const project = getProject(this.root);
-      if (!project.activeTaskId) return `${protocol}\n\nThere is no active task yet.`;
-      const task = getTask(this.root, project.activeTaskId);
+      const taskId = taskForDir(this.root, this.workdir)?.id ?? project.activeTaskId;
+      if (!taskId) return `${protocol}\n\nThere is no active task yet.`;
+      const task = getTask(this.root, taskId);
       if (task.status === "done") return `${protocol}\n\nThe last task (${task.id}) is done; no task is in progress.`;
       return `${protocol}\n\nState when this session connected (call agentbrain_brief for the latest):\n\n${briefContext(this.root, task.id)}`;
     } catch (error) {
@@ -389,7 +396,7 @@ export class AgentBrainMcpServer {
 
   private brief(taskId?: string): string {
     const root = this.requireRoot();
-    return briefContext(root, resolveTaskId(root, taskId, this.agent.id));
+    return briefContext(root, resolveTaskId(root, taskId, this.agent.id, this.workdir));
   }
 
   /** First write by this connection takes the task over (status running, session recorded). */
@@ -425,7 +432,7 @@ export class AgentBrainMcpServer {
         }
         // A handed-off task is waiting for whoever picks it up: reading its brief
         // claims it. A task another agent is actively running is left alone.
-        const taskId = resolveTaskId(root, args.task_id, this.agent.id);
+        const taskId = resolveTaskId(root, args.task_id, this.agent.id, this.workdir);
         if (getTask(root, taskId).status === "handoff") this.claim(root, taskId);
         return this.brief(taskId);
       }
@@ -453,7 +460,7 @@ export class AgentBrainMcpServer {
       }
       case "agentbrain_update": {
         const root = this.requireRoot();
-        const taskId = resolveTaskId(root, args.task_id, this.agent.id);
+        const taskId = resolveTaskId(root, args.task_id, this.agent.id, this.workdir);
         this.claim(root, taskId);
         const patch: TaskPatch = {
           status: args.status,
@@ -475,7 +482,7 @@ export class AgentBrainMcpServer {
       case "agentbrain_checkpoint":
       case "agentbrain_handoff": {
         const root = this.requireRoot();
-        const taskId = resolveTaskId(root, args.task_id, this.agent.id);
+        const taskId = resolveTaskId(root, args.task_id, this.agent.id, this.workdir);
         this.claim(root, taskId);
         const status = name === "agentbrain_handoff" ? "handoff" : "checkpoint";
         const result = writeCheckpoint(root, taskId, {

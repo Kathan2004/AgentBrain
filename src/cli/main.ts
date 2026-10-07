@@ -24,10 +24,12 @@ import { RULES_TARGETS, writeRules } from "../core/rules.js";
 import { getProject, getTask, initStore, listSessions, listTasks } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 import { describeActivity, taskActivity } from "../core/stall.js";
+import { addWorktree, mergeWorktree, removeWorktree, taskWorkdir } from "../core/worktree.js";
 import { taskTimeline } from "../core/timeline.js";
+import { pruneTask } from "../core/prune.js";
 
 const USAGE = `
-AgentBrain 0.5 — move coding tasks between AI agents without losing state
+AgentBrain 0.6 — move coding tasks between AI agents without losing state
 
 Setup
   agentbrain init                         Create .agentbrain/ in the current directory
@@ -43,7 +45,14 @@ Setup
 Tasks
   agentbrain task create <objective>      Create a task and make it active
   agentbrain task list
+  agentbrain task create <objective> --worktree
+                                          Same, in its own Git worktree (parallel agents never collide)
   agentbrain task use <task-id>           Make a task active
+  agentbrain worktree add [task-id]       Give a task its own worktree (.agentbrain/worktrees/<id>)
+  agentbrain worktree remove [task-id] [--force]
+                                          Remove it; the agentbrain/<id> branch is kept
+  agentbrain worktree merge [task-id]     Merge its branch into the current branch, then remove it
+  agentbrain worktree list
   agentbrain task update [--task <id>] [--status <s>] [--done <x>]... [--todo <x>]...
         [--decision <x>]... [--failure <x>]... [--fixed <x|n>]... [--blocker <x>]... [--unblock <x|n>]...
         [--next <action>] [--agent <id>] [--session <id>]
@@ -60,6 +69,8 @@ Switching agents
   agentbrain resume [task-id] [--agent <id>]
                                           Print the continuation brief; --agent takes over the task
   agentbrain log [task-id]                 Show the task timeline
+  agentbrain prune [task-id] [--keep N] [--all] [--dry-run]
+                                          Remove old checkpoint history
   agentbrain agents                       Show supported agents and recorded sessions
 
 Agents: ${BUILTIN_AGENTS.map((a) => a.id).join(", ")}
@@ -103,6 +114,11 @@ function parseCli() {
         only: { type: "string" },
         cli: { type: "string" },
         root: { type: "string" },
+        keep: { type: "string" },
+        all: { type: "boolean" },
+        "dry-run": { type: "boolean" },
+        worktree: { type: "boolean" },
+        force: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -169,6 +185,7 @@ function status(): void {
   console.log(`\n${task.id} — ${task.objective}`);
   console.log(`Status: ${task.status}`);
   console.log(`Agent: ${describeAgent(task.agent)}`);
+  if (task.worktree) console.log(`Worktree: ${task.worktree.path} (${task.worktree.branch})`);
   console.log(`Completed:\n${bullets(task.completed)}`);
   console.log(`Remaining:\n${task.remaining.length ? task.remaining.map((x, i) => `  ${i + 1}. ${x}`).join("\n") : "  (none)"}`);
   if (task.blockers?.length) console.log(`Blockers:\n${bullets(task.blockers)}`);
@@ -193,7 +210,7 @@ function status(): void {
 
 function update(): void {
   const cwd = root();
-  const taskId = resolveTaskId(cwd, flags.task, callerId());
+  const taskId = resolveTaskId(cwd, flags.task, callerId(), process.cwd());
   const task = updateTask(cwd, taskId, {
     status: flags.status,
     done: flags.done,
@@ -211,7 +228,7 @@ function update(): void {
 
 function snapshot(kind: "checkpoint" | "handoff", id?: string): void {
   const cwd = root();
-  const taskId = resolveTaskId(cwd, id, callerId());
+  const taskId = resolveTaskId(cwd, id, callerId(), process.cwd());
   const result = writeCheckpoint(cwd, taskId, {
     agent: agentFromFlags(taskId),
     reason: flags.reason,
@@ -228,7 +245,7 @@ function snapshot(kind: "checkpoint" | "handoff", id?: string): void {
 
 function resume(id?: string): void {
   const cwd = root();
-  const taskId = resolveTaskId(cwd, id);
+  const taskId = resolveTaskId(cwd, id, undefined, process.cwd());
   // Taking over is opt-in: without --agent, resume only prints the brief.
   const agent = flags.agent ? agentFromFlags() : undefined;
   if (agent?.sessionId) takeOver(cwd, taskId, { id: agent.id, sessionId: agent.sessionId });
@@ -254,8 +271,9 @@ async function run(agentName: string | undefined, taskArg: string | undefined): 
     throw new Error(`"${adapter.definition.command}" was not found on PATH. Install ${adapter.definition.name} first.`);
   }
 
-  const taskId = resolveTaskId(cwd, taskArg);
+  const taskId = resolveTaskId(cwd, taskArg, undefined, process.cwd());
   const previous = getTask(cwd, taskId).agent;
+  const workdir = taskWorkdir(cwd, getTask(cwd, taskId));
   const agent = { id: adapter.id, sessionId: flags.session ?? `s-${Date.now()}` };
   takeOver(cwd, taskId, agent);
 
@@ -274,7 +292,7 @@ async function run(agentName: string | undefined, taskArg: string | undefined): 
   const ignore = () => {};
   process.on("SIGINT", ignore);
   const session = await adapter.resume({
-    cwd,
+    cwd: workdir,
     taskId,
     objective: getTask(cwd, taskId).objective,
     handoff: prompt,
@@ -362,6 +380,21 @@ function log(id?: string): void {
   }
 }
 
+function prune(id?: string): void {
+  const cwd = root();
+  if (flags.all && id) throw new Error("Use either a task id or --all, not both.");
+  const keepText = flags.keep ?? "20";
+  if (!/^\d+$/.test(keepText)) throw new Error("--keep must be a whole number greater than 0.");
+  const keep = Number.parseInt(keepText, 10);
+  if (keep < 1) throw new Error("--keep must be a whole number greater than 0.");
+  const taskIds = flags.all ? listTasks(cwd).map((task) => task.id) : [resolveTaskId(cwd, id)];
+  for (const taskId of taskIds) {
+    const result = pruneTask(cwd, taskId, keep, flags["dry-run"]);
+    const action = flags["dry-run"] ? "would delete" : "deleted";
+    console.log(`${taskId}: ${action} ${result.deleted.length} checkpoint${result.deleted.length === 1 ? "" : "s"} (kept ${result.kept.length})`);
+  }
+}
+
 function rules(): void {
   const cwd = root();
   const only = flags.only?.split(",").map((x) => x.trim()).filter(Boolean);
@@ -388,6 +421,12 @@ function doctor(): void {
   if (checks.some((check) => !check.ok && ["Node.js", "Git repository", "AgentBrain initialized"].includes(check.name))) {
     process.exitCode = 1;
   }
+}
+
+function printWorktree(task: ReturnType<typeof getTask>): void {
+  console.log(`✓ Worktree for ${task.id} on branch ${task.worktree!.branch}`);
+  console.log(`  ${task.worktree!.path}`);
+  console.log(`  Agents launched with \`agentbrain run <agent> ${task.id}\` work there; commands run inside it apply to this task.`);
 }
 
 /** MCP config for every agent, plus instruction files and the commit hook. */
@@ -428,9 +467,11 @@ async function main(): Promise<void> {
   } else if (command === "status") {
     status();
   } else if (command === "task" && subcommand === "create") {
-    const task = createTask(root(), rest.join(" "));
+    const cwd = root();
+    const task = createTask(cwd, rest.join(" "));
     console.log(`✓ Created ${task.id}`);
     console.log(`  ${task.objective}`);
+    if (flags.worktree) printWorktree(addWorktree(cwd, task.id));
   } else if (command === "task" && subcommand === "update") {
     update();
   } else if (command === "task" && subcommand === "use") {
@@ -449,6 +490,8 @@ async function main(): Promise<void> {
     resume(subcommand);
   } else if (command === "log") {
     log(subcommand);
+  } else if (command === "prune") {
+    prune(subcommand);
   } else if (command === "run") {
     // `run <agent> [task]`, or `run [task] -- <command>` for a custom agent.
     if (passthrough.length) await run(undefined, subcommand);
@@ -457,6 +500,30 @@ async function main(): Promise<void> {
     agents();
   } else if (command === "rules") {
     rules();
+  } else if (command === "worktree" && subcommand === "add") {
+    const cwd = root();
+    printWorktree(addWorktree(cwd, resolveTaskId(cwd, rest[0], undefined, process.cwd())));
+  } else if (command === "worktree" && subcommand === "remove") {
+    const cwd = root();
+    const { task, unmerged } = removeWorktree(cwd, resolveTaskId(cwd, rest[0], undefined, process.cwd()), flags.force);
+    console.log(`✓ Removed the worktree for ${task.id}; branch agentbrain/${task.id} is kept.`);
+    if (unmerged) console.log(`  ${unmerged} commit(s) not merged yet: git merge agentbrain/${task.id}`);
+  } else if (command === "worktree" && subcommand === "merge") {
+    const cwd = root();
+    const { task, merged, conflicts } = mergeWorktree(cwd, resolveTaskId(cwd, rest[0], undefined, process.cwd()));
+    if (conflicts.length) {
+      console.log(`✗ Merging agentbrain/${task.id} hit conflicts; the merge is left in progress:`);
+      for (const file of conflicts) console.log(`  - ${file}`);
+      console.log("  Resolve them and commit (or git merge --abort). The worktree is kept.");
+      process.exitCode = 1;
+    } else {
+      console.log(`✓ Merged ${merged} commit(s) from agentbrain/${task.id} and removed its worktree.`);
+    }
+  } else if (command === "worktree" && subcommand === "list") {
+    const cwd = root();
+    for (const task of listTasks(cwd).filter((t) => t.worktree)) {
+      console.log(`${task.id}\t${task.status}\t${task.worktree!.branch}\t${task.worktree!.path}`);
+    }
   } else if (command === "connect") {
     connect();
   } else if (command === "mcp") {

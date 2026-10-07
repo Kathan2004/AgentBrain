@@ -3,6 +3,7 @@ import path from "node:path";
 import { latestCheckpoint } from "./actions.js";
 import { getGitState } from "./git.js";
 import type { AgentRef, TaskState } from "./state.js";
+import { taskWorkdir } from "./worktree.js";
 
 export const DEFAULT_STALL_MINUTES = 10;
 
@@ -43,10 +44,12 @@ export function taskActivity(
     .map((t) => new Date(t).getTime());
   const lastRecorded = new Date(Math.max(...recorded, 0));
 
+  // Per-task: a task with its own worktree only sees its own agent's edits.
+  const workdir = taskWorkdir(root, task);
   let latestFile = 0;
-  for (const file of getGitState(root).changedFiles) {
+  for (const file of getGitState(workdir).changedFiles) {
     try {
-      latestFile = Math.max(latestFile, fs.statSync(path.join(root, file)).mtimeMs);
+      latestFile = Math.max(latestFile, fs.statSync(path.join(workdir, file)).mtimeMs);
     } catch {
       // deleted files have no mtime
     }

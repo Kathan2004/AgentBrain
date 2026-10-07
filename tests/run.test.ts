@@ -120,7 +120,7 @@ describe("agentbrain run", () => {
       .split("\n\n")
       .map((invocation) => invocation.split("\n"));
     expect(invocations).toHaveLength(2);
-    expect(invocations[0]).toEqual(["--reuse-window", fs.realpathSync(repo)]);
+    expect(invocations[0]).toEqual([fs.realpathSync(repo)]);
 
     const chatArgs = invocations[1];
     expect(chatArgs.slice(0, 6)).toEqual([

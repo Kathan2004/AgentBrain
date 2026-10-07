@@ -27,7 +27,9 @@ export const BUILTIN_AGENTS: ProcessAgentDefinition[] = [
     command: "code",
     fallbacks: ["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"],
     detached: true,
-    prepare: (cwd) => ["--reuse-window", cwd],
+    // Focuses the window that has this folder open, or opens a new one (a task
+    // worktree is a different folder; never replace the developer's window).
+    prepare: (cwd) => [cwd],
     args: (_p, file, cwd) =>
       // With the MCP server connected, Copilot reads live state itself: send
       // what a developer would type. Otherwise attach the brief.

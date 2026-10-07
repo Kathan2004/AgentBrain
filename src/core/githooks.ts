@@ -4,6 +4,7 @@ import path from "node:path";
 import { writeCheckpoint } from "./actions.js";
 import { findRoot } from "./paths.js";
 import { getProject, getTask } from "./store.js";
+import { taskForDir } from "./worktree.js";
 
 const START = "# agentbrain:start";
 const END = "# agentbrain:end";
@@ -47,12 +48,13 @@ export function postCommit(cwd: string): void {
   try {
     const root = findRoot(cwd);
     if (!root) return;
-    const project = getProject(root);
-    if (!project.activeTaskId) return;
-    const task = getTask(root, project.activeTaskId);
-    if (task.status !== "running") return;
-    const sha = git(root, ["rev-parse", "--short", "HEAD"]);
-    const subject = git(root, ["log", "-1", "--pretty=%s"]);
+    // A commit in a task's worktree belongs to that task; otherwise the active one.
+    const owner = taskForDir(root, cwd);
+    const activeId = getProject(root).activeTaskId;
+    const task = owner ?? (activeId ? getTask(root, activeId) : null);
+    if (!task || task.status !== "running") return;
+    const sha = git(cwd, ["rev-parse", "--short", "HEAD"]);
+    const subject = git(cwd, ["log", "-1", "--pretty=%s"]);
     writeCheckpoint(root, task.id, { reason: `commit ${sha}: ${subject}`, status: "checkpoint" });
   } catch {
     // A commit must never depend on AgentBrain being available or healthy.

@@ -5,15 +5,26 @@ export function brainDir(cwd: string): string {
   return path.join(cwd, ".agentbrain");
 }
 
-/** Walks up from `start` to the nearest directory containing `.agentbrain/`. */
+/**
+ * Walks up from `start` to the directory holding the project's `.agentbrain/`.
+ *
+ * Task worktrees live in `.agentbrain/worktrees/<task-id>` and share the main
+ * checkout's state, so a `.agentbrain/` found inside a worktree (a stale copy,
+ * if the repo commits its state) is skipped in favour of the outer one.
+ */
 export function findRoot(start: string): string | null {
   let dir = path.resolve(start);
   for (;;) {
-    if (fs.existsSync(path.join(brainDir(dir), "project.json"))) return dir;
+    const inWorktree = dir.split(path.sep).join("/").includes("/.agentbrain/worktrees/");
+    if (!inWorktree && fs.existsSync(path.join(brainDir(dir), "project.json"))) return dir;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
+}
+
+export function worktreesDir(root: string): string {
+  return path.join(brainDir(root), "worktrees");
 }
 
 /** IDs become path segments, so keep them to a safe character set. */

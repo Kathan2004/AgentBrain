@@ -141,6 +141,21 @@ agentbrain handoff --reason "switching to Cursor for the UI work"
 agentbrain resume          # prints the brief — paste it into any agent
 ```
 
+### Parallel agents: one worktree per task
+
+```bash
+agentbrain task create "Add prune command" --worktree   # .agentbrain/worktrees/<id>, branch agentbrain/<id>
+agentbrain run vscode <task-id>                         # the agent works only in that folder
+agentbrain worktree merge <task-id>                     # merge the branch back, remove the worktree
+```
+
+Every worktree shares the project's AgentBrain state, and commands, the MCP
+server and the commit hook inside a worktree apply to that worktree's task.
+Git state, changed files and stall warnings are per task, so two agents on two
+tasks never see, or trip over, each other's edits. `worktree merge` stops on
+conflicts and leaves them for you; `worktree remove` refuses to discard
+uncommitted work unless you pass `--force`.
+
 ### When an agent goes quiet
 
 `agentbrain status` (and every brief) warns when:
@@ -158,6 +173,9 @@ Set `"stallMinutes"` in `.agentbrain/project.json` to change the threshold.
 ```bash
 agentbrain status                 # active task, progress, last checkpoint, stall warnings
 agentbrain checkpoint             # snapshot without stopping
+agentbrain log                    # timeline of agent sessions and checkpoints
+agentbrain worktree list          # task worktrees and their branches
+agentbrain prune [task-id]        # remove old checkpoints (use --keep N, --all, or --dry-run)
 agentbrain connect                # configure MCP, rules, and the Git hook
 agentbrain doctor                 # check setup and print fixes for anything missing
 agentbrain mcp                    # run the MCP server (normally started by an agent)

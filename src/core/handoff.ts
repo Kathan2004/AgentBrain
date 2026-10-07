@@ -109,6 +109,7 @@ ${list(checkpoint.blockers)}
 - HEAD: ${checkpoint.git.head ?? "(no commits yet)"}
 - Working tree dirty: ${checkpoint.git.dirty ? "yes" : "no"}
 
+${task.worktree ? `- Working directory: ${task.worktree.path} (own worktree; work and commit only there)\n` : ""}
 ### Changed Files
 ${checkpoint.git.changedFiles.length ? recent(checkpoint.git.changedFiles, BRIEF_LIMITS.changedFiles, "git status") : "- None"}
 

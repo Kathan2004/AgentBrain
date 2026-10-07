@@ -5,6 +5,7 @@ import { makeCheckpoint, renderHandoff, type Checkpoint } from "./handoff.js";
 import { tasksDir } from "./paths.js";
 import { compilePatterns, redact, redactAll } from "./redact.js";
 import { describeActivity, taskActivity } from "./stall.js";
+import { taskForDir, taskWorkdir } from "./worktree.js";
 import { SCHEMA_VERSION, isTaskStatus, TASK_STATUSES } from "./state.js";
 import type { AgentRef, AgentSessionState, TaskState, TaskStatus } from "./state.js";
 import {
@@ -22,15 +23,17 @@ import {
 
 /** Uses the explicit id if given, otherwise the project's active task. */
 /**
- * Explicit id, else the running task this agent owns (so an agent's commands
+ * Explicit id, else the task whose worktree `dir` is in, else the running task this agent owns (so an agent's commands
  * follow its own task even after the developer switches the active one), else
  * the project's active task.
  */
-export function resolveTaskId(root: string, id?: string, agentId?: string): string {
-  const owned = !id && agentId
+export function resolveTaskId(root: string, id?: string, agentId?: string, dir?: string): string {
+  // Inside a task's worktree, that task is the obvious one.
+  const here = !id && dir ? taskForDir(root, dir) : null;
+  const owned = !id && !here && agentId
     ? listTasks(root).filter((t) => t.status === "running" && t.agent?.id === agentId)
     : [];
-  const taskId = id ?? (owned.length === 1 ? owned[0].id : getProject(root).activeTaskId);
+  const taskId = id ?? here?.id ?? (owned.length === 1 ? owned[0].id : getProject(root).activeTaskId);
   if (!taskId) throw new Error('No active task. Create one with: agentbrain task create "<objective>"');
   return taskId;
 }
@@ -207,7 +210,7 @@ export function writeCheckpoint(
   const status = options.status ?? "handoff";
   const agent = options.agent ?? task.agent;
   const reason = options.reason === undefined ? undefined : redact(options.reason, redactor(root));
-  const checkpoint = makeCheckpoint(task, getGitState(root), { agent, stopReason: reason, status });
+  const checkpoint = makeCheckpoint(task, getGitState(taskWorkdir(root, task)), { agent, stopReason: reason, status });
   const jsonFile = saveCheckpoint(root, task.id, checkpoint);
   const markdownFile = jsonFile.replace(/\.json$/, ".md");
   fs.writeFileSync(markdownFile, renderHandoff(task, checkpoint), "utf8");
@@ -269,7 +272,7 @@ export function latestCheckpoint(root: string, taskId: string): Checkpoint | nul
 export function briefContext(root: string, taskId: string): string {
   const task = getTask(root, taskId);
   const last = latestCheckpoint(root, taskId);
-  const live = makeCheckpoint(task, getGitState(root), {
+  const live = makeCheckpoint(task, getGitState(taskWorkdir(root, task)), {
     status: last?.status === "handoff" ? "handoff" : "checkpoint",
     agent: last?.agent ?? task.agent,
     stopReason: last?.status === "handoff" ? last.stopReason : undefined,

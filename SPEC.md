@@ -426,13 +426,16 @@ Stall warnings (no activity, unrecorded work, unclaimed handoffs), `agentbrain
 log` timeline, `agentbrain doctor`, MCP live refresh (tools/list_changed),
 compact briefs for long histories.
 
-Known limitation: file activity is per working tree, not per task. When two
-agents work on different tasks in one checkout, a warning for one task can be
-caused by the other agent's edits. Worktree isolation (below) fixes this.
+Known limitation: file activity is per working tree, not per task (fixed in
+V0.6 for tasks with their own worktree).
+
+### V0.6 — done
+Git worktree per task (`--worktree`, `worktree add|merge|remove|list`) with
+shared state; per-task Git state, stall detection, task resolution, commit
+hook and agent launch; `agentbrain prune`.
 
 ### Next
-Headless execution via ACP; Git worktree isolation per task; agent
-selection/routing.
+Headless execution via ACP; agent selection/routing.
 
 ### V1.0
 Stable project-state specification and extensible agent ecosystem.
