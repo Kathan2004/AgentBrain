@@ -256,12 +256,26 @@ is as lossless as the current one.
   handoff checkpoint. `agentbrain connect` also writes the MCP registrations
   for supported clients, the instruction files, and the post-commit hook.
 
-**Why not ACP yet.** ACP makes AgentBrain the agent's *client*: it would have
-to render the agent's streaming output, answer permission prompts and serve
-file reads — i.e. become an editor-like UI, which is a non-goal. Developers
-already have those UIs (the agent's own TUI, or their IDE). An ACP adapter
-remains the right choice for headless/background execution and is planned
-for that case; it fits the existing `AgentAdapter` interface.
+4. **Headless ACP** (`agentbrain run <agent> --headless`): AgentBrain is the
+   Agent Client Protocol client for an ACP agent and runs it with no UI. ACP is
+   used only here: interactively, developers already have a UI (the agent's
+   own TUI or their IDE), and AgentBrain must not become an editor.
+
+   - The task gets its own worktree unless `--in-place`; the agent's `cwd` is
+     that worktree and `fs/read_text_file` / `fs/write_text_file` are confined
+     to it. No terminal capability is offered.
+   - `session/request_permission` is answered by policy: `read`, `edit`,
+     `search`, `think` allowed by default; other kinds rejected unless listed
+     in `--allow`.
+   - `session/new` passes AgentBrain's MCP server with the run's identity
+     (`agentbrain mcp --root <worktree> --agent <id> --session <id>`). That
+     server does not hand off on disconnect; the runner does, with the stop
+     reason.
+   - Prompts: brief + headless rules, then `continue` while the agent keeps
+     recording progress, up to `--max-turns` (default 3). `--timeout` sends
+     `session/cancel` and stops the agent.
+   - A run always ends with the task in review/done or handed off, and a
+     transcript at `.agentbrain/agents/<id>/sessions/<session>.log`.
 
 ## 11. Git behavior
 
@@ -434,8 +448,11 @@ Git worktree per task (`--worktree`, `worktree add|merge|remove|list`) with
 shared state; per-task Git state, stall detection, task resolution, commit
 hook and agent launch; `agentbrain prune`.
 
+### V0.7 — done
+Headless runs over ACP; README/CLI docs guard test.
+
 ### Next
-Headless execution via ACP; agent selection/routing.
+Agent selection/routing; trying headless runs against real ACP agents.
 
 ### V1.0
 Stable project-state specification and extensible agent ecosystem.

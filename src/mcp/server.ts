@@ -29,7 +29,7 @@ import { getProject, getTask, listTasks } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-const SERVER_VERSION = "0.6.0";
+const SERVER_VERSION = "0.7.0";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 interface Message {
@@ -133,6 +133,8 @@ const TOOLS = [
 export interface McpServerOptions {
   /** Project root; if omitted, resolved from cwd or the client's MCP roots. */
   root?: string;
+  /** Fixed identity (set by `agentbrain run --headless`), instead of deriving it from the client name. */
+  agent?: Required<AgentRef>;
   input?: NodeJS.ReadableStream;
   output?: NodeJS.WritableStream;
   log?: (message: string) => void;
@@ -215,7 +217,8 @@ export class AgentBrainMcpServer {
     if (this.closed) return;
     this.closed = true;
     this.watcher?.close();
-    if (!this.root) return;
+    // Under `run --headless` the runner owns the session and hands off itself, with a better reason.
+    if (!this.root || this.options.agent) return;
     for (const taskId of this.claimed) {
       try {
         const task = getTask(this.root, taskId);
@@ -277,7 +280,7 @@ export class AgentBrainMcpServer {
   private async handle(method: string, params: any): Promise<unknown> {
     switch (method) {
       case "initialize": {
-        this.agent = { id: agentIdFromClient(params.clientInfo?.name), sessionId: `mcp-${Date.now()}` };
+        this.agent = this.options.agent ?? { id: agentIdFromClient(params.clientInfo?.name), sessionId: `mcp-${Date.now()}` };
         this.clientSupportsRoots = Boolean(params.capabilities?.roots);
         const requested = String(params.protocolVersion ?? "");
         return {
@@ -518,10 +521,10 @@ class MethodNotFound extends Error {}
 class UserError extends Error {}
 
 /** `agentbrain mcp [--root <dir>]` */
-export async function runMcpServer(root?: string): Promise<void> {
+export async function runMcpServer(root?: string, agent?: Required<AgentRef>): Promise<void> {
   // Some clients pass "${workspaceFolder}" through uninterpolated.
   const usable = root && !root.includes("${") && fs.existsSync(root) ? root : undefined;
-  const server = new AgentBrainMcpServer({ root: usable });
+  const server = new AgentBrainMcpServer({ root: usable, agent });
   const stop = () => {
     server.close("MCP server stopped");
     process.exit(0);

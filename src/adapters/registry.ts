@@ -60,6 +60,21 @@ function hasMcp(cwd: string): boolean {
   }
 }
 
+/**
+ * Agents that speak the Agent Client Protocol, for `agentbrain run <agent> --headless`.
+ * Commands follow each adapter's documented usage; not exercised in CI against the real tools.
+ */
+export const ACP_AGENTS = [
+  { id: "claude-code", name: "Claude Code (claude-code-acp)", command: "claude-code-acp", args: [] as string[] },
+  { id: "gemini", name: "Gemini CLI (ACP mode)", command: "gemini", args: ["--experimental-acp"] },
+  { id: "codex", name: "Codex (codex-acp)", command: "codex-acp", args: [] as string[] },
+];
+
+export function acpAgent(name: string) {
+  const id = ALIASES[name] ?? name;
+  return ACP_AGENTS.find((a) => a.id === id) ?? null;
+}
+
 const ALIASES: Record<string, string> = {
   claude: "claude-code",
   "cursor-agent": "cursor",

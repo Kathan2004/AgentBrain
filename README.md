@@ -156,6 +156,24 @@ tasks never see, or trip over, each other's edits. `worktree merge` stops on
 conflicts and leaves them for you; `worktree remove` refuses to discard
 uncommitted work unless you pass `--force`.
 
+### Headless: no window at all
+
+```bash
+agentbrain run claude-code <task-id> --headless --timeout 30
+```
+
+Runs an agent that speaks the Agent Client Protocol (`claude-code-acp`,
+`gemini --experimental-acp`, `codex-acp`, or any ACP command after `--`) with
+no UI, in the task's own worktree. AgentBrain answers the agent's requests on
+your behalf: file reads and writes only inside that worktree; edits allowed,
+but shell commands, deletes and network calls rejected unless you pass
+`--allow read,edit,execute,...`. The agent records progress through
+AgentBrain's MCP server, gets "continue" while it is making progress
+(`--max-turns`, default 3), and the run always ends with the task in review or
+handed off, plus a transcript you can read afterwards.
+
+Tested with a stand-in ACP agent; not yet run against the real ones.
+
 ### When an agent goes quiet
 
 `agentbrain status` (and every brief) warns when:
@@ -174,6 +192,8 @@ Set `"stallMinutes"` in `.agentbrain/project.json` to change the threshold.
 agentbrain status                 # active task, progress, last checkpoint, stall warnings
 agentbrain checkpoint             # snapshot without stopping
 agentbrain log                    # timeline of agent sessions and checkpoints
+agentbrain worktree add [task-id] # give a task its own Git worktree
+agentbrain worktree remove [task-id] # remove a task worktree
 agentbrain worktree list          # task worktrees and their branches
 agentbrain prune [task-id]        # remove old checkpoints (use --keep N, --all, or --dry-run)
 agentbrain connect                # configure MCP, rules, and the Git hook

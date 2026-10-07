@@ -3,7 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { findOnPath } from "../adapters/process.js";
-import { BUILTIN_AGENTS, builtinAdapter, customAdapter } from "../adapters/registry.js";
+import { ACP_AGENTS, BUILTIN_AGENTS, acpAgent, builtinAdapter, customAdapter } from "../adapters/registry.js";
+import { TOOL_KINDS, type ToolKind } from "../adapters/acp.js";
+import { runHeadless } from "../core/headless.js";
 import {
   buildPrompt,
   closeSession,
@@ -29,7 +31,7 @@ import { taskTimeline } from "../core/timeline.js";
 import { pruneTask } from "../core/prune.js";
 
 const USAGE = `
-AgentBrain 0.6 — move coding tasks between AI agents without losing state
+AgentBrain 0.7 — move coding tasks between AI agents without losing state
 
 Setup
   agentbrain init                         Create .agentbrain/ in the current directory
@@ -62,6 +64,9 @@ Switching agents
   agentbrain run <agent> [task-id]        Launch a terminal agent on the task; auto-handoff on exit
   agentbrain run [task-id] --agent <id> -- <command> [args...]
                                           Launch any other agent ({prompt}, {prompt_file} expand)
+  agentbrain run <agent> [task-id] --headless [--allow <kinds>] [--max-turns N] [--timeout <min>]
+                                          Run an ACP agent with no UI in the task's worktree
+                                          (agents: ${ACP_AGENTS.map((a) => a.id).join(", ")}; default allow: read,edit,search,think)
   agentbrain checkpoint [task-id] [--reason <text>]
                                           Snapshot state; task keeps running
   agentbrain handoff [task-id] [--agent <id>] [--session <id>] [--reason <text>]
@@ -118,6 +123,11 @@ function parseCli() {
         all: { type: "boolean" },
         "dry-run": { type: "boolean" },
         worktree: { type: "boolean" },
+        headless: { type: "boolean" },
+        allow: { type: "string" },
+        "max-turns": { type: "string" },
+        timeout: { type: "string" },
+        "in-place": { type: "boolean" },
         force: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
@@ -252,7 +262,61 @@ function resume(id?: string): void {
   console.log(buildPrompt(cwd, taskId, cliCommand()));
 }
 
+function positiveInt(name: string, value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!/^\d+$/.test(value) || Number(value) < 1) throw new Error(`--${name} must be a whole number greater than 0.`);
+  return Number(value);
+}
+
+function positiveNumber(name: string, value: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`--${name} must be a number greater than 0.`);
+  return n;
+}
+
+/** `agentbrain run <agent> [task] --headless`: drive an ACP agent with no UI. */
+async function runHeadlessCli(agentName: string | undefined, taskArg: string | undefined): Promise<void> {
+  const cwd = root();
+  const def = passthrough.length
+    ? { id: flags.agent ?? path.basename(passthrough[0]), name: passthrough[0], command: passthrough[0], args: passthrough.slice(1) }
+    : agentName
+      ? acpAgent(agentName)
+      : null;
+  if (!def) {
+    throw new Error(
+      `${agentName ? `"${agentName}" has no ACP adapter. ` : ""}Headless agents: ${ACP_AGENTS.map((a) => a.id).join(", ")}. ` +
+        "For any other ACP agent: agentbrain run [task] --headless --agent <id> -- <command> [args...]",
+    );
+  }
+  if (!findOnPath(def.command)) throw new Error(`"${def.command}" was not found on PATH. Install ${def.name} first.`);
+
+  const allowed = flags.allow
+    ? flags.allow.split(",").map((k) => k.trim()).filter(Boolean)
+    : undefined;
+  const unknown = (allowed ?? []).filter((k) => !(TOOL_KINDS as readonly string[]).includes(k));
+  if (unknown.length) throw new Error(`Unknown tool kind(s): ${unknown.join(", ")}. Use: ${TOOL_KINDS.join(", ")}`);
+
+  const taskId = resolveTaskId(cwd, taskArg, undefined, process.cwd());
+  const onPath = findOnPath("agentbrain") !== null;
+  console.error(`▶ ${def.name} → ${taskId} (headless)`);
+  const result = await runHeadless(cwd, taskId, def, {
+    cli: onPath ? { command: "agentbrain", args: [] } : { command: process.execPath, args: [fs.realpathSync(process.argv[1])] },
+    allowed: allowed as ToolKind[] | undefined,
+    maxTurns: positiveInt("max-turns", flags["max-turns"], 3),
+    timeoutMinutes: flags.timeout === undefined ? undefined : positiveNumber("timeout", flags.timeout),
+    inPlace: flags["in-place"],
+    onEvent: (event) => {
+      if (event.kind === "tool" || event.kind === "permission" || event.kind === "fs") console.error(`  ${event.kind}: ${event.text}`);
+    },
+  });
+  console.error(`\n✓ ${result.turns} turn(s), stop reason: ${result.stopReason}; task is ${result.status}`);
+  console.error(`  worktree:   ${result.workdir}`);
+  console.error(`  transcript: ${result.transcript}`);
+  if (result.status !== "done" && result.status !== "review") process.exitCode = 1;
+}
+
 async function run(agentName: string | undefined, taskArg: string | undefined): Promise<void> {
+  if (flags.headless) return runHeadlessCli(agentName, taskArg);
   const cwd = root();
   const adapter = passthrough.length
     ? customAdapter(passthrough, flags.agent)
@@ -527,7 +591,10 @@ async function main(): Promise<void> {
   } else if (command === "connect") {
     connect();
   } else if (command === "mcp") {
-    await runMcpServer(flags.root ?? process.cwd());
+    await runMcpServer(
+      flags.root ?? process.cwd(),
+      flags.agent && flags.session ? { id: flags.agent, sessionId: flags.session } : undefined,
+    );
   } else if (command === "hooks" && (subcommand === "install" || subcommand === "uninstall")) {
     hooks(subcommand);
   } else if (command === "doctor") {
