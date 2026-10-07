@@ -5,3 +5,6 @@ coverage/
 .env.*
 .DS_Store
 *.log
+
+# AgentBrain state for working on AgentBrain itself
+.agentbrain/

@@ -21,7 +21,7 @@ import { getProject, getTask, initStore, listSessions, listTasks } from "../core
 import type { AgentRef } from "../core/state.js";
 
 const USAGE = `
-AgentBrain 0.2 — move coding tasks between AI agents without losing state
+AgentBrain 0.3 — move coding tasks between AI agents without losing state
 
 Setup
   agentbrain init                         Create .agentbrain/ in the current directory
@@ -33,7 +33,7 @@ Tasks
   agentbrain task list
   agentbrain task use <task-id>           Make a task active
   agentbrain task update [--task <id>] [--status <s>] [--done <x>]... [--todo <x>]...
-        [--decision <x>]... [--failure <x>]... [--blocker <x>]... [--unblock <x>]...
+        [--decision <x>]... [--failure <x>]... [--fixed <x|n>]... [--blocker <x>]... [--unblock <x|n>]...
         [--next <action>] [--agent <id>] [--session <id>]
   agentbrain status
 
@@ -82,6 +82,7 @@ function parseCli() {
         failure: { type: "string", multiple: true },
         blocker: { type: "string", multiple: true },
         unblock: { type: "string", multiple: true },
+        fixed: { type: "string", multiple: true },
         next: { type: "string" },
         agent: { type: "string" },
         session: { type: "string" },
@@ -146,9 +147,11 @@ function status(): void {
   console.log(`Status: ${task.status}`);
   console.log(`Agent: ${describeAgent(task.agent)}`);
   console.log(`Completed:\n${bullets(task.completed)}`);
-  console.log(`Remaining:\n${bullets(task.remaining)}`);
+  console.log(`Remaining:\n${task.remaining.length ? task.remaining.map((x, i) => `  ${i + 1}. ${x}`).join("\n") : "  (none)"}`);
   if (task.blockers?.length) console.log(`Blockers:\n${bullets(task.blockers)}`);
-  if (task.failures.length) console.log(`Known failures:\n${bullets(task.failures)}`);
+  if (task.failures.length) {
+    console.log(`Known failures:\n${task.failures.map((x, i) => `  ${i + 1}. ${x}`).join("\n")}`);
+  }
   if (task.nextAction) console.log(`Next: ${task.nextAction}`);
   if (last) {
     console.log(`Last checkpoint: ${last.checkpointId} (${last.status}, ${last.timestamp}${last.stopReason ? `, ${last.stopReason}` : ""})`);
@@ -165,6 +168,7 @@ function update(): void {
     failures: flags.failure,
     blockers: flags.blocker,
     unblock: flags.unblock,
+    fixed: flags.fixed,
     next: flags.next,
     agent: flags.agent || process.env.AGENTBRAIN_AGENT ? agentFromFlags() : undefined,
   });
@@ -227,7 +231,8 @@ async function run(agentName: string | undefined, taskArg: string | undefined): 
   console.error(
     `▶ ${adapter.definition.name} → ${taskId}` +
       (previous && previous.id !== agent.id ? ` (taking over from ${previous.id})` : "") +
-      `\n  session ${agent.sessionId}; AgentBrain will checkpoint when it exits.\n`,
+      `\n  session ${agent.sessionId}` +
+      (adapter.definition.detached ? "\n" : "; AgentBrain will checkpoint when it exits.\n"),
   );
 
   // Ctrl-C belongs to the agent. AgentBrain stays alive to checkpoint afterwards.
@@ -263,6 +268,14 @@ async function run(agentName: string | undefined, taskArg: string | undefined): 
     process.off("SIGINT", ignore);
     process.off("SIGTERM", forward);
     process.off("SIGHUP", forward);
+  }
+
+  if (adapter.definition.detached && exitCode === 0) {
+    console.error(
+      `\n✓ ${adapter.definition.name} is open and owns the task (session ${agent.sessionId}).` +
+        "\n  It records progress and hands off through AgentBrain; check with: agentbrain status",
+    );
+    return;
   }
 
   // If the agent didn't hand off (or finish) itself — usage limit, crash, closed

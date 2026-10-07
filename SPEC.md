@@ -216,9 +216,12 @@ vendor-specific code in the core:
 1. **Process adapters** (`agentbrain run <agent>`): the agent's own terminal
    UI is launched on the user's terminal with the AgentBrain continuation brief
    as its opening message. Built in: Claude Code, Codex CLI, Gemini CLI, Cursor
-   CLI, Copilot CLI, Aider. Any other CLI: `agentbrain run --agent <id> -- <cmd>
-   {prompt}`. The agent process gets `AGENTBRAIN_AGENT`, `AGENTBRAIN_SESSION`,
-   `AGENTBRAIN_TASK`, `AGENTBRAIN_ROOT` and `AGENTBRAIN_PROMPT_FILE`.
+    CLI, Copilot CLI, Aider, and VS Code Copilot agent mode (`vscode`). The VS
+    Code launcher opens the project with `code`, attaches the brief with
+    `--add-file`, and is detached: its successful exit does not trigger an
+    automatic handoff. Any other CLI: `agentbrain run --agent <id> -- <cmd>
+    {prompt}`. The agent process gets `AGENTBRAIN_AGENT`, `AGENTBRAIN_SESSION`,
+    `AGENTBRAIN_TASK`, `AGENTBRAIN_ROOT` and `AGENTBRAIN_PROMPT_FILE`.
 2. **Instruction files** (`agentbrain rules`): for agents that live inside an
    IDE (Cursor, Copilot in VS Code, Windsurf, ...) and cannot be launched by
    AgentBrain. `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
@@ -307,13 +310,15 @@ All commands except `init` work from any subdirectory of the project.
 ### Run an agent
 
 ```bash
-agentbrain run <agent> [task-id]                       # claude-code, codex, gemini, cursor, copilot, aider
+agentbrain run <agent> [task-id]                       # claude-code, codex, gemini, cursor, copilot, aider, vscode
 agentbrain run [task-id] --agent <id> -- <cmd> {prompt}  # anything else
 ```
 
 Takes over the task, launches the agent with the continuation brief, and when
 the agent exits writes a handoff checkpoint unless the agent already handed
-off or moved the task to `review`/`done`.
+off or moved the task to `review`/`done`. Detached launchers such as `vscode`
+leave the task running after a successful launcher exit; the launched agent
+owns progress and handoff from that point.
 
 ### Checkpoint without stopping
 

@@ -97,6 +97,66 @@ describe("agentbrain run", () => {
     expect(task).toMatchObject({ status: "review", agent: { id: "mine" } });
   });
 
+  it("launches VS Code agent mode with the brief attached and stays running", () => {
+    const log = `${repo}-code-args.txt`;
+    stubAgent(bin, "code", `
+      printf '%s\\n' "$@" >> ${JSON.stringify(log)}
+      printf '\\n' >> ${JSON.stringify(log)}
+      printf '%s' "\${AGENTBRAIN_AGENT:-unset}" > ${JSON.stringify(log + ".env")}
+    `);
+
+    const result = spawnSync("node", [CLI, "run", "vscode"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, ...env },
+    });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("is open and owns the task");
+    expect(result.stderr).not.toContain("Auto-handoff");
+
+    const invocations = fs
+      .readFileSync(log, "utf8")
+      .trim()
+      .split("\n\n")
+      .map((invocation) => invocation.split("\n"));
+    expect(invocations).toHaveLength(2);
+    expect(invocations[0]).toEqual(["--reuse-window", fs.realpathSync(repo)]);
+
+    const chatArgs = invocations[1];
+    expect(chatArgs.slice(0, 6)).toEqual([
+      "chat",
+      "--mode",
+      "agent",
+      "--reuse-window",
+      "--add-file",
+      expect.any(String),
+    ]);
+    const promptFile = chatArgs[5];
+    expect(promptFile).toContain(`${path.sep}.agentbrain${path.sep}agents${path.sep}vscode${path.sep}sessions${path.sep}`);
+    expect(fs.readFileSync(promptFile, "utf8")).toContain("Implement OAuth login");
+    expect(chatArgs.at(-1)).toContain("attached file is your up-to-date brief");
+    expect(activeTask(repo)).toMatchObject({ status: "running", agent: { id: "vscode" } });
+    // VS Code outlives the session, so it must not inherit a session identity.
+    expect(fs.readFileSync(`${log}.env`, "utf8")).toBe("unset");
+  });
+
+  it("accepts remaining-item numbers for --done", () => {
+    ab(repo, ["task", "update", "--todo", "Write tests", "--todo", "Update docs"], env);
+    ab(repo, ["task", "update", "--done", "3", "--done", "#1"], env);
+    const task = activeTask(repo);
+    expect(task.completed).toEqual(["Update docs", "Implement OAuth login"]);
+    expect(task.remaining).toEqual(["Write tests"]);
+    expect(ab(repo, ["status"], env).stdout).toContain("  1. Write tests");
+  });
+
+  it("clears fixed failures and resolved blockers by number or text", () => {
+    ab(repo, ["task", "update", "--failure", "Login 500s", "--failure", "Flaky test", "--blocker", "Need API key"], env);
+    ab(repo, ["task", "update", "--fixed", "2", "--unblock", "Need API key"], env);
+    const task = activeTask(repo);
+    expect(task.failures).toEqual(["Login 500s"]);
+    expect(task.blockers).toEqual([]);
+  });
+
   it("clears a next action once it is completed", () => {
     ab(repo, ["task", "update", "--todo", "Add tests", "--next", "Add tests"], env);
     ab(repo, ["task", "update", "--done", "Add tests"], env);

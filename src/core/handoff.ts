@@ -81,13 +81,13 @@ Last agent: ${agent}${checkpoint.stopReason ? `\nStop reason: ${checkpoint.stopR
 ${list(checkpoint.progress.completed)}
 
 ### Remaining
-${list(checkpoint.progress.remaining)}
+${checkpoint.progress.remaining.length ? checkpoint.progress.remaining.map((x, i) => `${i + 1}. ${x}`).join("\n") : "- None recorded"}
 
 ## Decisions
 ${list(checkpoint.decisions)}
 
 ## Known Failures
-${list(checkpoint.failures)}
+${checkpoint.failures.length ? checkpoint.failures.map((x, i) => `${i + 1}. ${x}`).join("\n") : "- None recorded"}
 
 ## Blockers
 ${list(checkpoint.blockers)}

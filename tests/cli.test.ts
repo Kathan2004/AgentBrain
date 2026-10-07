@@ -10,7 +10,9 @@ const CLI = path.resolve("dist/cli/main.js");
 const schema = JSON.parse(fs.readFileSync("schemas/checkpoint.schema.json", "utf8"));
 
 function run(cwd: string, ...args: string[]): string {
-  return execFileSync("node", [CLI, ...args], { cwd, encoding: "utf8" });
+  // Scrub agent identity so the tests behave the same inside an `agentbrain run` session.
+  const env = { ...process.env, AGENTBRAIN_AGENT: "", AGENTBRAIN_SESSION: "" };
+  return execFileSync("node", [CLI, ...args], { cwd, encoding: "utf8", env });
 }
 
 function readJson(file: string) {

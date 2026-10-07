@@ -18,11 +18,38 @@ export const BUILTIN_AGENTS: ProcessAgentDefinition[] = [
   { id: "gemini", name: "Gemini CLI", command: "gemini", args: (p) => ["--prompt-interactive", p] },
   { id: "cursor", name: "Cursor CLI", command: "cursor-agent", args: (p) => [p] },
   { id: "copilot", name: "GitHub Copilot CLI", command: "copilot", args: (p) => ["--interactive", p] },
+  {
+    // GitHub Copilot agent mode in VS Code, via the official `code chat` CLI.
+    // The brief is attached as a file; the chat message stays short.
+    id: "vscode",
+    name: "GitHub Copilot in VS Code",
+    command: "code",
+    fallbacks: ["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"],
+    detached: true,
+    prepare: (cwd) => ["--reuse-window", cwd],
+    args: (_p, file) => [
+      "chat",
+      "--mode",
+      "agent",
+      "--reuse-window",
+      "--add-file",
+      file,
+      "AgentBrain has assigned you the current task. The attached file is your up-to-date brief " +
+        "(objective, progress, decisions, failures, Git state, next action). Continue from the next action. " +
+        "Do not run `agentbrain resume`; the task is already yours. Record progress with `agentbrain task update` " +
+        "after each step, and run `agentbrain handoff --reason \"<why>\"` before you stop.",
+    ],
+  },
   // Aider has no "interactive with an opening message" flag; load the prompt as read-only context.
   { id: "aider", name: "Aider", command: "aider", args: (_p, file) => ["--read", file] },
 ];
 
-const ALIASES: Record<string, string> = { claude: "claude-code", "cursor-agent": "cursor" };
+const ALIASES: Record<string, string> = {
+  claude: "claude-code",
+  "cursor-agent": "cursor",
+  code: "vscode",
+  "copilot-vscode": "vscode",
+};
 
 export function builtinAdapter(name: string): ProcessAdapter | null {
   const id = ALIASES[name] ?? name;

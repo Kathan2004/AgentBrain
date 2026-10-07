@@ -73,8 +73,10 @@ export interface TaskPatch {
   decisions?: string[];
   failures?: string[];
   blockers?: string[];
-  /** Blockers to remove (exact match). */
+  /** Blockers to remove (text or 1-based number). */
   unblock?: string[];
+  /** Known failures that are now fixed (text or 1-based number). */
+  fixed?: string[];
   next?: string;
   agent?: AgentRef;
 }
@@ -91,15 +93,22 @@ export function updateTask(root: string, taskId: string, patch: TaskPatch): Task
     }
     task.status = patch.status;
   }
-  for (const item of clean(patch.done)) {
+  // `--done 2` refers to the second remaining item, as numbered in `status` and the brief.
+  const byNumber = (list: string[]) => (item: string) => {
+    const n = /^#?(\d+)$/.exec(item.trim());
+    return n && Number(n[1]) >= 1 && Number(n[1]) <= list.length ? list[Number(n[1]) - 1] : item;
+  };
+  const done = clean(patch.done).map(byNumber(task.remaining));
+  const fixed = new Set(clean(patch.fixed).map(byNumber(task.failures)));
+  const unblockSet = new Set(clean(patch.unblock).map(byNumber(task.blockers ?? [])));
+  for (const item of done) {
     task.remaining = task.remaining.filter((r) => r !== item);
     if (!task.completed.includes(item)) task.completed.push(item);
   }
   for (const item of clean(patch.todo)) if (!task.remaining.includes(item)) task.remaining.push(item);
   task.decisions.push(...clean(patch.decisions));
-  task.failures.push(...clean(patch.failures));
-  const unblock = new Set(clean(patch.unblock));
-  task.blockers = [...(task.blockers ?? []), ...clean(patch.blockers)].filter((b) => !unblock.has(b));
+  task.failures = [...task.failures.filter((f) => !fixed.has(f)), ...clean(patch.failures)];
+  task.blockers = [...(task.blockers ?? []).filter((b) => !unblockSet.has(b)), ...clean(patch.blockers)];
   if (patch.next !== undefined) task.nextAction = redact(patch.next, extra);
   else if (task.nextAction && task.completed.includes(task.nextAction)) task.nextAction = undefined;
   if (patch.agent) {
@@ -234,7 +243,7 @@ progress after each meaningful step — not only at the end:
       --decision "<decision and why>" --failure "<what failed and how>" \\
       --next "<the very next action>"
 
-Flags are repeatable. Use --blocker "<text>" if you are stuck on something only the developer can resolve.
+Flags are repeatable. \`--done <n>\` marks remaining item n (as numbered above) complete; \`--fixed <n>\` clears known failure n once fixed. Use --blocker "<text>" if you are stuck on something only the developer can resolve.
 
 - When the objective is complete and verified: ${cli} task update --status review --next "Review the changes"
 - If you must stop before finishing:          ${cli} handoff --reason "<why>"

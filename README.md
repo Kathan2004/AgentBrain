@@ -50,9 +50,21 @@ agentbrain task update --done "OAuth callback" --todo "Refresh-token rotation" \
   --decision "httpOnly cookies, not localStorage" --next "Implement rotation"
 ```
 
+`status` and the brief number the remaining items and known failures, so
+`--done 2` completes remaining item 2 and `--fixed 1` clears failure 1.
+
 When the agent exits without handing off (usage limit, crash, Ctrl-C, closed
 terminal), AgentBrain records a handoff with the reason. Built in: `claude`,
 `codex`, `gemini`, `cursor` (cursor-agent), `copilot` (Copilot CLI), `aider`.
+VS Code's GitHub Copilot agent mode is also available as a detached launcher:
+
+```bash
+agentbrain run vscode
+```
+
+This opens the project in VS Code, starts Copilot agent mode, and attaches the
+continuation brief as a file. VS Code owns the task after its launcher exits;
+the agent records progress and hands off through AgentBrain.
 Anything else:
 
 ```bash

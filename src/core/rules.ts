@@ -46,6 +46,7 @@ to re-explain. If there is no active task and the developer gave you a new one, 
 
     ${cli} task update --done "<finished step>" --todo "<new step>" --decision "<decision and why>" --failure "<what failed>" --next "<next action>"
 
+- \`--done <n>\` marks remaining item n (as numbered in the brief) complete; \`--fixed <n>\` clears known failure n once it is fixed.
 - Objective complete and verified: \`${cli} task update --status review --next "Review the changes"\`
 - Stopping early, or the developer is switching agents: \`${cli} handoff --reason "<why>"\`
 

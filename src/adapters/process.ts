@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentAdapter, AgentCapabilities, AgentContext, AgentSession, ExitInfo } from "./types.js";
@@ -24,6 +24,14 @@ export interface ProcessAgentDefinition {
   command: string;
   /** Absolute paths to try when `command` is not on PATH (e.g. CLIs bundled in desktop apps). */
   fallbacks?: string[];
+  /**
+   * The launcher returns as soon as the agent is open (e.g. `code chat`), so
+   * process exit does not mean the agent stopped. No auto-handoff on exit; the
+   * agent hands off itself via the AgentBrain instructions.
+   */
+  detached?: boolean;
+  /** Runs before the agent (same executable), e.g. to open the project window. */
+  prepare?(cwd: string): string[];
   /** Builds argv (without the command) from the prompt text and prompt file. */
   args(prompt: string, promptFile: string): string[];
 }
@@ -58,10 +66,30 @@ export class ProcessAdapter implements AgentAdapter {
     return this.resolve() !== null;
   }
 
+  /**
+   * Environment for the agent. Detached launchers hand off to a long-lived app
+   * (VS Code) that would keep AGENTBRAIN_* in every terminal it opens, long
+   * after this session ends, so they get none of it.
+   */
+  private env(context: AgentContext): NodeJS.ProcessEnv {
+    if (!this.definition.detached) return { ...process.env, ...context.env };
+    return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("AGENTBRAIN_")));
+  }
+
   async start(context: AgentContext): Promise<AgentSession> {
-    const child = spawn(this.resolve() ?? this.definition.command, this.definition.args(context.handoff, context.promptFile), {
+    const executable = this.resolve() ?? this.definition.command;
+    const env = this.env(context);
+    if (this.definition.prepare) {
+      const result = spawnSync(executable, this.definition.prepare(context.cwd), {
+        cwd: context.cwd,
+        env,
+        stdio: "inherit",
+      });
+      if (result.error) throw result.error;
+    }
+    const child = spawn(executable, this.definition.args(context.handoff, context.promptFile), {
       cwd: context.cwd,
-      env: { ...process.env, ...context.env },
+      env,
       stdio: "inherit",
     });
     const sessionId = context.env.AGENTBRAIN_SESSION ?? `s-${Date.now()}`;
