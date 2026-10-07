@@ -174,6 +174,16 @@ handed off, plus a transcript you can read afterwards.
 
 Tested with a stand-in ACP agent; not yet run against the real ones.
 
+### Live web dashboard
+
+```bash
+agentbrain ui                 # open the local task dashboard on port 4747
+agentbrain ui --port 5050     # choose a port (a busy default port is replaced automatically)
+```
+
+The dashboard shows every task, agent progress, diffs, timelines, and live
+headless transcripts. It runs on localhost and requires its private URL token.
+
 ### When an agent goes quiet
 
 `agentbrain status` (and every brief) warns when:
@@ -186,6 +196,16 @@ Tested with a stand-in ACP agent; not yet run against the real ones.
 
 Set `"stallMinutes"` in `.agentbrain/project.json` to change the threshold.
 
+### Live view
+
+Run `agentbrain` with no arguments for a live terminal view of every task and
+agent: status lights (running, stalled, handed off, in review), the brief, the
+uncommitted diff in each task's worktree, the timeline, routing suggestions,
+and the live output of background (headless) agents. Select with the arrow
+keys or the mouse. `o` opens the task's folder in VS Code without stopping
+anything; `m` sends a message to a background agent (it becomes the agent's
+next turn in the same session); `s` stops it.
+
 ### Everything else
 
 ```bash
@@ -193,6 +213,8 @@ agentbrain status                 # active task, progress, last checkpoint, stal
 agentbrain checkpoint             # snapshot without stopping
 agentbrain log                    # timeline of agent sessions and checkpoints
 agentbrain route [task-id]        # which agent should take the task next, with reasons
+agentbrain attach <session-id>    # watch a background (headless) agent live and message it
+agentbrain stop <session-id>      # stop a background agent; its task is handed off
 agentbrain export [task-id]       # export a portable Markdown brief and history
 agentbrain worktree add [task-id] # give a task its own Git worktree
 agentbrain worktree remove [task-id] # remove a task worktree

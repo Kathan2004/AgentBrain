@@ -1,12 +1,14 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { findOnPath } from "../adapters/process.js";
 import { ACP_AGENTS, BUILTIN_AGENTS, acpAgent, builtinAdapter, customAdapter } from "../adapters/registry.js";
 import { TOOL_KINDS, type ToolKind } from "../adapters/acp.js";
-import { runHeadless } from "../core/headless.js";
+import { requestStop, runHeadless, sendToSession, sessionControl } from "../core/headless.js";
 import { routeTask } from "../core/routing.js";
+import { runTui } from "../ui/tui.js";
 import {
   buildPrompt,
   closeSession,
@@ -24,16 +26,20 @@ import { remainingFeedback, runMcpServer } from "../mcp/server.js";
 import { installPostCommitHook, postCommit, uninstallPostCommitHook } from "../core/githooks.js";
 import { brainDir, findRoot } from "../core/paths.js";
 import { RULES_TARGETS, writeRules } from "../core/rules.js";
-import { getProject, getTask, initStore, listSessions, listTasks } from "../core/store.js";
+import { findSession, getProject, getTask, initStore, listSessions, listTasks, sessionAlive } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 import { describeActivity, taskActivity } from "../core/stall.js";
 import { addWorktree, mergeWorktree, removeWorktree, taskWorkdir } from "../core/worktree.js";
 import { taskTimeline } from "../core/timeline.js";
 import { pruneTask } from "../core/prune.js";
 import { exportTask } from "../core/export.js";
+import { startUiServer } from "../ui/server.js";
 
 const USAGE = `
-AgentBrain 0.8 — move coding tasks between AI agents without losing state
+AgentBrain 0.9 — move coding tasks between AI agents without losing state
+
+Live view
+  agentbrain                              Every task and agent, live (keyboard and mouse)
 
 Setup
   agentbrain init                         Create .agentbrain/ in the current directory
@@ -63,6 +69,7 @@ Tasks
   agentbrain status
 
 Switching agents
+  agentbrain ui [--port N]                  Open the local live task dashboard
   agentbrain export [task-id] [--out <file>]
                                           Export a portable Markdown brief and history
   agentbrain run <agent> [task-id]        Launch a terminal agent on the task; auto-handoff on exit
@@ -73,6 +80,10 @@ Switching agents
                                           (agents: ${ACP_AGENTS.map((a) => a.id).join(", ")}; default allow: read,edit,search,think)
   agentbrain route [task-id] [--run]      Suggest which agent should take the task, with reasons;
                                           --run launches the top suggestion
+  agentbrain run <agent> [task-id] --headless --detach [--linger <min>]
+                                          Same, in the background; --linger keeps the agent for follow-ups
+  agentbrain attach <session-id>          Watch a headless agent live and send it messages
+  agentbrain stop <session-id>            Stop a headless agent; the task is handed off
   agentbrain checkpoint [task-id] [--reason <text>]
                                           Snapshot state; task keeps running
   agentbrain handoff [task-id] [--agent <id>] [--session <id>] [--reason <text>]
@@ -136,6 +147,9 @@ function parseCli() {
         "max-turns": { type: "string" },
         timeout: { type: "string" },
         "in-place": { type: "boolean" },
+        detach: { type: "boolean" },
+        linger: { type: "string" },
+        port: { type: "string" },
         force: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
@@ -304,8 +318,34 @@ async function runHeadlessCli(agentName: string | undefined, taskArg: string | u
   const unknown = (allowed ?? []).filter((k) => !(TOOL_KINDS as readonly string[]).includes(k));
   if (unknown.length) throw new Error(`Unknown tool kind(s): ${unknown.join(", ")}. Use: ${TOOL_KINDS.join(", ")}`);
 
-  const taskId = resolveTaskId(cwd, taskArg, undefined, process.cwd());
+  const taskId = resolveTaskId(cwd, taskArg ?? flags.task, undefined, process.cwd());
   const onPath = findOnPath("agentbrain") !== null;
+
+  if (flags.detach) {
+    // Re-run this command in the background with a known session id, output to a file.
+    const sessionId = flags.session ?? `acp-${Date.now()}`;
+    const control = sessionControl(cwd, def.id, sessionId);
+    fs.mkdirSync(path.dirname(control.output), { recursive: true });
+    const out = fs.openSync(control.output, "a");
+    // Pin task and session so the background run can't drift to whatever becomes active.
+    const args = process.argv.slice(2).filter((a) => a !== "--detach");
+    const dd = args.indexOf("--");
+    const pin = ["--task", taskId, "--session", sessionId];
+    const childArgs = dd === -1 ? [...args, ...pin] : [...args.slice(0, dd), ...pin, ...args.slice(dd)];
+    const child = spawn(process.execPath, [fs.realpathSync(process.argv[1]), ...childArgs], {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: ["ignore", out, out],
+      env: { ...process.env, AGENTBRAIN_AGENT: "", AGENTBRAIN_SESSION: "" },
+    });
+    child.unref();
+    console.log(`▶ ${def.name} is working on ${taskId} in the background (session ${sessionId}).`);
+    console.log(`  watch and talk to it:  agentbrain attach ${sessionId}`);
+    console.log(`  everything at a glance: agentbrain`);
+    console.log(`  stop it:               agentbrain stop ${sessionId}`);
+    return;
+  }
+
   console.error(`▶ ${def.name} → ${taskId} (headless)`);
   const result = await runHeadless(cwd, taskId, def, {
     cli: onPath ? { command: "agentbrain", args: [] } : { command: process.execPath, args: [fs.realpathSync(process.argv[1])] },
@@ -313,6 +353,8 @@ async function runHeadlessCli(agentName: string | undefined, taskArg: string | u
     maxTurns: positiveInt("max-turns", flags["max-turns"], 3),
     timeoutMinutes: flags.timeout === undefined ? undefined : positiveNumber("timeout", flags.timeout),
     inPlace: flags["in-place"],
+    sessionId: flags.session,
+    lingerMinutes: flags.linger === undefined ? undefined : positiveNumber("linger", flags.linger),
     onEvent: (event) => {
       if (event.kind === "tool" || event.kind === "permission" || event.kind === "fs") console.error(`  ${event.kind}: ${event.text}`);
     },
@@ -445,6 +487,54 @@ async function route(id?: string): Promise<void> {
   }
 }
 
+/** `agentbrain attach <session>`: watch a headless agent live and talk to it, without restarting it. */
+async function attach(sessionId?: string): Promise<void> {
+  const cwd = root();
+  if (!sessionId) throw new Error("Usage: agentbrain attach <session-id>   (see `agentbrain` or `agentbrain agents`)");
+  const session = findSession(cwd, sessionId);
+  if (!session?.transcript) throw new Error(`No headless session ${sessionId}.`);
+  const control = sessionControl(cwd, session.agentId, sessionId);
+  console.log(`Attached to ${session.agentId} on ${session.taskId}. Type a message and press Enter to send it as the agent's next turn.`);
+  console.log("/stop stops the run; Ctrl-C detaches and leaves it running.\n");
+
+  let offset = 0;
+  const pump = () => {
+    if (!fs.existsSync(control.transcript)) return;
+    const text = fs.readFileSync(control.transcript, "utf8");
+    if (text.length > offset) process.stdout.write(text.slice(offset));
+    offset = text.length;
+  };
+  pump();
+  const timer = setInterval(() => {
+    pump();
+    const latest = findSession(cwd, sessionId);
+    if (latest && !sessionAlive(latest)) {
+      pump();
+      console.log(`\n— session ended${latest.stopReason ? `: ${latest.stopReason}` : ""}`);
+      clearInterval(timer);
+      process.exit(0);
+    }
+  }, 500);
+
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({ input: process.stdin });
+  rl.on("line", (line) => {
+    const text = line.trim();
+    if (!text) return;
+    if (text === "/stop") {
+      requestStop(cwd, session.agentId, sessionId);
+      console.log("— stop requested");
+    } else {
+      sendToSession(cwd, session.agentId, sessionId, text);
+      console.log("— sent; the agent gets it as its next turn");
+    }
+  });
+  rl.on("close", () => {
+    clearInterval(timer);
+    process.exit(0);
+  });
+}
+
 function agents(): void {
   console.log("Terminal agents (agentbrain run <id>):");
   for (const def of BUILTIN_AGENTS) {
@@ -523,6 +613,19 @@ function hooks(action: "install" | "uninstall"): void {
   console.log(`  ${file}`);
 }
 
+async function ui(): Promise<void> {
+  const text = flags.port ?? "4747";
+  if (!/^\d+$/.test(text)) throw new Error("--port must be a number.");
+  const port = Number(text);
+  if (port < 0 || port > 65535) throw new Error("--port must be between 0 and 65535.");
+  const server = await startUiServer(root(), { port });
+  console.log(server.url);
+  const close = () => { void server.close().finally(() => process.exit(0)); };
+  process.once("SIGINT", close);
+  process.once("SIGTERM", close);
+  await new Promise<void>(() => {});
+}
+
 function doctor(): void {
   const checks = runDoctor(process.cwd());
   for (const check of checks) {
@@ -568,7 +671,13 @@ function connect(): void {
 
 async function main(): Promise<void> {
   const [command, subcommand, ...rest] = positionals;
-  if (flags.help || !command) usage(flags.help ? 0 : 1);
+  if (flags.help) usage(0);
+  // Bare `agentbrain` in a terminal opens the live view of every task and agent.
+  if (!command) {
+    if (!process.stdout.isTTY || !process.stdin.isTTY) usage(1);
+    await runTui(root());
+    return;
+  }
 
   if (command === "init") {
     initStore(process.cwd());
@@ -609,6 +718,14 @@ async function main(): Promise<void> {
     // `run <agent> [task]`, or `run [task] -- <command>` for a custom agent.
     if (passthrough.length) await run(undefined, subcommand);
     else await run(subcommand, rest[0]);
+  } else if (command === "attach") {
+    await attach(subcommand);
+  } else if (command === "stop") {
+    const cwd = root();
+    const session = subcommand ? findSession(cwd, subcommand) : null;
+    if (!session) throw new Error("Usage: agentbrain stop <session-id>");
+    requestStop(cwd, session.agentId, session.sessionId);
+    console.log(`✓ Asked ${session.agentId} (${session.sessionId}) to stop; it will hand off the task.`);
   } else if (command === "route") {
     await route(subcommand);
   } else if (command === "agents") {
@@ -650,6 +767,8 @@ async function main(): Promise<void> {
     hooks(subcommand);
   } else if (command === "doctor") {
     doctor();
+  } else if (command === "ui") {
+    await ui();
   } else if (command === "hook" && subcommand === "post-commit") {
     postCommit(process.cwd());
   } else {

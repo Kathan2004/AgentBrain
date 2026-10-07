@@ -108,6 +108,22 @@ export function getSession(cwd: string, agentId: string, sessionId: string): Age
   return fs.existsSync(file) ? readJson<AgentSessionState>(file) : null;
 }
 
+/** Finds a session by id across all agents. */
+export function findSession(cwd: string, sessionId: string): AgentSessionState | null {
+  return listSessions(cwd).find((s) => s.sessionId === sessionId) ?? null;
+}
+
+/** Is the process that runs a headless session still alive? */
+export function sessionAlive(session: AgentSessionState): boolean {
+  if (!session.pid || session.endedAt) return false;
+  try {
+    process.kill(session.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Path of the newest handoff Markdown for a task, or null if none exists. */
 export function latestHandoffFile(cwd: string, taskId: string): string | null {
   const dir = checkpointsDir(cwd, taskId);

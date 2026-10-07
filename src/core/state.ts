@@ -61,4 +61,8 @@ export interface AgentSessionState {
   endedAt?: string;
   stopReason?: string;
   checkpointId?: string;
+  /** Set for `run --headless` sessions, so live views can find and talk to them. */
+  mode?: "headless";
+  pid?: number;
+  transcript?: string;
 }

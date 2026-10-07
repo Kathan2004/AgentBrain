@@ -27,7 +27,7 @@ function setup() {
   return { repo, taskId, run, task, report };
 }
 
-describe("headless ACP runs", () => {
+describe("headless ACP runs", { timeout: 90_000 }, () => {
   it("drives an ACP agent end to end in the task's own worktree", () => {
     const { repo, run, task, report } = setup();
     const result = run();
@@ -93,8 +93,8 @@ describe("headless ACP runs", () => {
 
   it("cancels a run that exceeds --timeout", () => {
     const { run, task, report } = setup();
-    const result = run(["--timeout", "0.05"], { FAKE_MODE: "hang" });
-    expect(result.stderr).toContain("timed out after 0.05 min");
+    const result = run(["--timeout", "0.15"], { FAKE_MODE: "hang" });
+    expect(result.stderr).toContain("timed out after 0.15 min");
     expect(report().cancelled).toBe(true);
     expect(task().status).toBe("handoff");
   });
@@ -104,4 +104,46 @@ describe("headless ACP runs", () => {
     expect(() => ab(repo, ["run", "aider", "--headless"])).toThrow("has no ACP adapter");
     expect(() => ab(repo, ["run", "--headless", "--allow", "everything", "--", "node", FAKE])).toThrow("Unknown tool kind");
   });
+});
+
+describe("background headless runs", () => {
+  it("runs detached, takes developer messages in the same session, and can be stopped", async () => {
+    const { repo, taskId, task } = setup();
+    const bin = path.join(repo, "..", path.basename(repo) + "-bin");
+    const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, FAKE_REPORT: `${repo}-report.json`, FAKE_STATUS: "running" };
+    const start = spawnSync("node", [CLI, "run", "--headless", "--detach", "--linger", "1", "--agent", "fake", "--", "node", FAKE], {
+      cwd: repo, encoding: "utf8", env,
+    });
+    expect(start.status).toBe(0);
+    const sessionId = /session (acp-\d+)/.exec(start.stdout)![1];
+    expect(start.stdout).toContain(`agentbrain attach ${sessionId}`);
+
+    const sessionFile = path.join(repo, ".agentbrain/agents/fake/sessions", `${sessionId}.json`);
+    const transcript = path.join(repo, ".agentbrain/agents/fake/sessions", `${sessionId}.log`);
+    const waitFor = async (check: () => boolean, ms = 20_000) => {
+      const until = Date.now() + ms;
+      while (!check()) {
+        if (Date.now() > until) throw new Error("timed out waiting");
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    };
+    // It's running in the background and waiting for follow-ups (linger).
+    await waitFor(() => fs.existsSync(transcript) && fs.readFileSync(transcript, "utf8").includes("waiting up to 1 min"));
+    const session = readJson(sessionFile);
+    expect(session).toMatchObject({ mode: "headless", taskId });
+    expect(session.pid).toBeGreaterThan(0);
+
+    // A message becomes the next turn of the same agent session.
+    ab(repo, ["task", "list"]); // any CLI use is fine while it runs
+    fs.appendFileSync(path.join(repo, ".agentbrain/agents/fake/sessions", `${sessionId}.inbox`), `${JSON.stringify({ text: "Also add a comment" })}\n`);
+    await waitFor(() => fs.readFileSync(transcript, "utf8").includes("developer: Also add a comment"));
+    await waitFor(() => readJson(`${repo}-report.json`).prompts.some((p: string) => p.includes("Also add a comment")));
+    const prompts: string[] = readJson(`${repo}-report.json`).prompts;
+    expect(prompts.at(-1)).toContain("Message from the developer:\n\nAlso add a comment");
+
+    // Stop it from outside; the task is handed off with the reason.
+    expect(ab(repo, ["stop", sessionId]).stdout).toContain("Asked fake");
+    await waitFor(() => task().status === "handoff");
+    expect(fs.readFileSync(transcript, "utf8")).toContain("stopped by the developer");
+  }, 60_000);
 });

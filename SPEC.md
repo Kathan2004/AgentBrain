@@ -455,6 +455,14 @@ Headless runs over ACP; README/CLI docs guard test.
 `agentbrain route` (suggestions from usage limits, track record and
 preferences; task status history), `agentbrain export`.
 
+### V0.9 — done
+Live views: `agentbrain` (terminal: keyboard and mouse) and `agentbrain ui`
+(local web page: localhost only, per-run token, Host/Origin checks), both
+rendering one snapshot of tasks, sessions, per-worktree diffs, stall
+warnings and headless transcripts. Background headless runs (`--detach`,
+`--linger`), `attach`, `stop`, and developer messages delivered as the
+agent's next turn in the same ACP session.
+
 ### Next
 Trying headless runs against real ACP agents.
 
