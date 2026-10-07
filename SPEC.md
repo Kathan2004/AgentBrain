@@ -1,0 +1,328 @@
+# AgentBrain V0.1 Specification
+
+## 1. Problem
+
+AI coding agents maintain fragmented context. When a developer changes agents because of usage limits, failure, preference, or task specialization, the developer often has to reconstruct:
+
+- what the task was
+- what has already been changed
+- why architectural decisions were made
+- what failed
+- what remains
+- what the next agent should do
+
+AgentBrain makes this state portable.
+
+## 2. Product thesis
+
+AgentBrain is a local-first project execution-state and handoff layer for AI coding agents.
+
+It does not attempt to replace coding agents. It makes their work transferable.
+
+## 3. Goals
+
+### V0.1 goals
+
+1. Initialize an AgentBrain-enabled repository.
+2. Represent project, task, and agent state.
+3. Capture a Git-aware checkpoint.
+4. Generate a portable handoff document.
+5. Resume a task using the handoff state.
+6. Keep the state human-readable and Git-friendly.
+7. Keep agent integrations behind adapters.
+
+## 4. Non-goals
+
+V0.1 will not:
+
+- host or train AI models
+- provide an IDE
+- provide a cloud service
+- run an autonomous agent swarm
+- implement a new agent communication protocol
+- require a vector database
+- attempt to synchronize complete agent conversation histories
+- automatically merge arbitrary concurrent agent changes
+
+## 5. Terminology
+
+### Project State
+
+Durable information about the repository:
+
+- architecture
+- conventions
+- constraints
+- important decisions
+
+### Task State
+
+The current development objective:
+
+- objective
+- subtasks
+- progress
+- blockers
+- verification
+
+### Agent State
+
+Information specific to an agent session:
+
+- agent identifier
+- session identifier
+- current action
+- modified files
+- stopping reason
+- checkpoint
+
+### Checkpoint
+
+A snapshot of task execution state designed to allow another agent to continue.
+
+### Handoff
+
+A checkpoint packaged as actionable continuation context for another agent.
+
+## 6. State machine
+
+```text
+IDLE
+  |
+  v
+RUNNING
+  |
+  +----> CHECKPOINT ----> HANDOFF ----> RUNNING
+  |
+  +----> REVIEW --------> DONE
+  |
+  +----> BLOCKED
+  |
+  +----> FAILED
+```
+
+### State meanings
+
+- `IDLE`: no active execution.
+- `RUNNING`: an agent is actively working.
+- `CHECKPOINT`: execution state is being captured.
+- `HANDOFF`: state is ready for another agent.
+- `REVIEW`: implementation awaits verification.
+- `BLOCKED`: progress cannot continue without an external decision/input.
+- `FAILED`: execution ended unsuccessfully.
+- `DONE`: task is verified complete.
+
+## 7. Directory layout
+
+```text
+.agentbrain/
+├── project.json
+├── tasks/
+│   └── <task-id>/
+│       ├── task.json
+│       └── checkpoints/
+│           └── <checkpoint-id>.json
+└── agents/
+    └── <agent-id>/
+        └── sessions/
+            └── <session-id>.json
+```
+
+## 8. Checkpoint schema
+
+A checkpoint must contain:
+
+- schema version
+- checkpoint ID
+- task ID
+- timestamp
+- repository revision
+- active agent
+- current status
+- completed work
+- remaining work
+- modified files
+- decisions
+- known failures
+- verification results
+- next recommended action
+
+Example:
+
+```json
+{
+  "schemaVersion": "0.1",
+  "checkpointId": "cp-001",
+  "taskId": "task-001",
+  "status": "handoff",
+  "agent": {
+    "id": "claude-code",
+    "sessionId": "abc123"
+  },
+  "git": {
+    "head": "abc1234",
+    "dirty": true
+  },
+  "progress": {
+    "completed": ["OAuth callback"],
+    "remaining": ["refresh-token rotation"]
+  },
+  "nextAction": "Implement refresh-token rotation"
+}
+```
+
+## 9. Handoff rules
+
+A handoff must be deterministic enough that a second agent can act without the original conversation.
+
+The generated handoff should prioritize:
+
+1. objective
+2. current state
+3. completed work
+4. remaining work
+5. constraints
+6. decisions
+7. failures
+8. relevant files
+9. verification
+10. next action
+
+The handoff should avoid copying irrelevant conversation history.
+
+## 10. Agent adapter interface
+
+Conceptually:
+
+```ts
+interface AgentAdapter {
+  id: string;
+  capabilities(): AgentCapabilities;
+  start(context: AgentContext): Promise<AgentSession>;
+  resume(context: AgentContext): Promise<AgentSession>;
+  stop(session: AgentSession): Promise<void>;
+}
+```
+
+The adapter layer must not leak provider-specific concepts into the core state model.
+
+Where an interoperability protocol such as ACP is available, AgentBrain should prefer the standard protocol over a proprietary integration.
+
+## 11. Git behavior
+
+V0.1 treats Git as the source of truth for source code.
+
+AgentBrain records Git metadata in checkpoints but does not replace Git.
+
+A checkpoint should record:
+
+- HEAD commit
+- branch
+- dirty/clean state
+- relevant changed files
+
+V0.1 should not automatically commit user code.
+
+## 12. CLI
+
+### Initialize
+
+```bash
+agentbrain init
+```
+
+### Status
+
+```bash
+agentbrain status
+```
+
+### Create task
+
+```bash
+agentbrain task create "Implement OAuth authentication"
+```
+
+### List / update tasks
+
+```bash
+agentbrain task list
+agentbrain task update --agent claude-code --done "OAuth callback" \
+  --todo "Refresh-token rotation" --decision "Use httpOnly cookies" \
+  --failure "Expired token test fails" --next "Implement refresh-token rotation"
+```
+
+`task update` is how an agent (or the developer) records progress. `--done`,
+`--todo`, `--decision`, `--failure` and `--blocker` are repeatable. `--done`
+moves a matching item out of `remaining`. `--status` sets any task status.
+
+### Checkpoint / handoff
+
+```bash
+agentbrain handoff [task-id] [--agent <id>] [--session <id>] [--reason <text>]
+```
+
+Writes `<checkpoint-id>.json` and `<checkpoint-id>.md` under the task's
+`checkpoints/`, marks the task `handoff`, and closes the agent session record.
+
+### Resume
+
+```bash
+agentbrain resume [task-id] [--agent <id>] [--session <id>]
+```
+
+Prints the latest handoff. With `--agent`, the new agent takes over: the task
+becomes `running` and a session record is opened under `agents/`.
+
+All commands except `init` work from any subdirectory of the project.
+
+### List agents (not yet implemented)
+
+```bash
+agentbrain agents
+```
+
+## 13. Security principles
+
+AgentBrain may process source code and agent context.
+
+Therefore:
+
+- state is local by default
+- no source code is uploaded without explicit user configuration
+- credentials must never be written to state
+- environment variables and secret files must be excluded
+- generated handoffs must be reviewed before being sent to another external agent
+- `.agentbrain` should support secret redaction rules
+
+## 14. V0.1 acceptance tests
+
+V0.1 is successful when:
+
+1. `agentbrain init` creates a valid state directory.
+2. A task can be created.
+3. Git state is captured.
+4. A checkpoint can be generated.
+5. A handoff can be generated from a checkpoint.
+6. A fresh process can read the handoff.
+7. A second agent adapter can consume the resulting context.
+8. No secrets are included in generated state.
+9. Existing source code is not modified by checkpoint creation.
+10. The entire workflow works offline except for the external agent itself.
+
+## 15. Roadmap
+
+### V0.1
+Portable state + handoff.
+
+### V0.2
+First production-quality agent adapters and Git worktree isolation.
+
+### V0.3
+Agent selection/routing.
+
+### V0.4
+Automated task delegation and verification loops.
+
+### V1.0
+Stable project-state specification and extensible agent ecosystem.

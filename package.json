@@ -1,0 +1,26 @@
+{
+  "name": "agentbrain",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first continuity and handoff layer for AI coding agents",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && vitest run",
+    "smoke": "tsc && bash tests/smoke.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "eslint": "^9.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0"
+  },
+  "bin": {
+    "agentbrain": "./dist/cli/main.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
