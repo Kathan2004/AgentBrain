@@ -30,4 +30,23 @@ describe("handoff", () => {
     expect(handoff).toContain("Add tests");
     expect(handoff).toContain("Use JWT");
   });
+
+  it("keeps the brief short after a long history", () => {
+    const completed = Array.from({ length: 20 }, (_, i) => `step ${i + 1}`);
+    const task = {
+      id: "task-2",
+      objective: "Long task",
+      status: "running" as const,
+      completed,
+      remaining: ["step 21"],
+      decisions: [],
+      failures: [],
+    };
+    const checkpoint = makeCheckpoint(task, { head: "abc", branch: "main", dirty: false, changedFiles: [] });
+    const md = renderHandoff(task, checkpoint);
+    expect(md).toContain("(8 earlier items in task.json)");
+    expect(md).toContain("- step 20");
+    expect(md).not.toContain("- step 1\n");
+    expect(checkpoint.progress.completed).toHaveLength(20);
+  });
 });

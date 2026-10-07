@@ -231,6 +231,31 @@ vendor-specific code in the core:
 In both cases the agent writes state back through the CLI, so the next switch
 is as lossless as the current one.
 
+3. **MCP server** (`agentbrain connect`): a stdio MCP server gives compatible
+  agents live access to the project state. At initialization it provides the
+  current brief as server instructions, so a new chat can continue without a
+  pasted handoff. It exposes these tools:
+
+  - `agentbrain_brief`
+  - `agentbrain_update`
+  - `agentbrain_handoff`
+  - `agentbrain_checkpoint`
+  - `agentbrain_create_task`
+  - `agentbrain_list_tasks`
+
+  Not every client shows server instructions to the model, so the task in
+  progress (id, objective, next action) is also embedded in the
+  `agentbrain_brief` tool description, which every client does show. A bare
+  "continue" must never start a new task: `agentbrain_create_task` refuses while
+  another task is unfinished and returns that task's brief instead, unless the
+  agent passes `confirm_new: true`. (Found in the first live run: Copilot
+  turned "continue" into a new task.)
+
+  The first write from a connection claims the task for that agent. If the
+  connection closes while it still owns a running task, the server writes a
+  handoff checkpoint. `agentbrain connect` also writes the MCP registrations
+  for supported clients, the instruction files, and the post-commit hook.
+
 **Why not ACP yet.** ACP makes AgentBrain the agent's *client*: it would have
 to render the agent's streaming output, answer permission prompts and serve
 file reads — i.e. become an editor-like UI, which is a non-goal. Developers
@@ -252,6 +277,17 @@ A checkpoint should record:
 - relevant changed files
 
 V0.1 should not automatically commit user code.
+
+### Automatic commit checkpoints
+
+`agentbrain hooks install` installs a marked `post-commit` block in Git's hooks
+directory, including the configured `core.hooksPath`, and preserves unrelated
+hook content. Reinstalling is idempotent; `agentbrain hooks uninstall` removes
+only the marked block. When the project has an active running task, the hook
+invokes `agentbrain hook post-commit`, which writes a `checkpoint` with reason
+`commit <short-sha>: <subject>`. If AgentBrain is unavailable, uninitialized,
+or the task is not running, it does nothing. Hook failures are always ignored so
+commits cannot fail or be delayed by AgentBrain.
 
 ## 12. CLI
 
@@ -382,7 +418,8 @@ instruction files for IDE agents, agent session records.
 ### V0.3 — partly done
 Automatic checkpointing. Done: auto-handoff when an agent launched by `run`
 exits without handing off (usage limit, crash, Ctrl-C). Planned: checkpoint
-after test runs and on a timer.
+after test runs and on a timer. MCP server integration is done and verified
+live with Copilot in VS Code; Git post-commit checkpoints are done.
 
 ### V0.4
 Headless execution via ACP; Git worktree isolation; agent selection/routing.

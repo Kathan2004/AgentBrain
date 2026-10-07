@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "agentbrain": {
+      "type": "stdio",
+      "command": "agentbrain",
+      "args": [
+        "mcp",
+        "--root",
+        "${workspaceFolder}"
+      ]
+    }
+  }
+}

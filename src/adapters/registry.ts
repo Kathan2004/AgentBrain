@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { ProcessAdapter, type ProcessAgentDefinition } from "./process.js";
 
@@ -27,22 +28,35 @@ export const BUILTIN_AGENTS: ProcessAgentDefinition[] = [
     fallbacks: ["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"],
     detached: true,
     prepare: (cwd) => ["--reuse-window", cwd],
-    args: (_p, file) => [
-      "chat",
-      "--mode",
-      "agent",
-      "--reuse-window",
-      "--add-file",
-      file,
-      "AgentBrain has assigned you the current task. The attached file is your up-to-date brief " +
-        "(objective, progress, decisions, failures, Git state, next action). Continue from the next action. " +
-        "Do not run `agentbrain resume`; the task is already yours. Record progress with `agentbrain task update` " +
-        "after each step, and run `agentbrain handoff --reason \"<why>\"` before you stop.",
-    ],
+    args: (_p, file, cwd) =>
+      // With the MCP server connected, Copilot reads live state itself: send
+      // what a developer would type. Otherwise attach the brief.
+      hasMcp(cwd)
+        ? ["chat", "--mode", "agent", "--reuse-window", "continue"]
+        : [
+            "chat",
+            "--mode",
+            "agent",
+            "--reuse-window",
+            "--add-file",
+            file,
+            "AgentBrain has assigned you the current task. The attached file is your up-to-date brief " +
+              "(objective, progress, decisions, failures, Git state, next action). Continue from the next action. " +
+              "Do not run `agentbrain resume`; the task is already yours. Record progress with `agentbrain task update` " +
+              "after each step, and run `agentbrain handoff --reason \"<why>\"` before you stop.",
+          ],
   },
   // Aider has no "interactive with an opening message" flag; load the prompt as read-only context.
   { id: "aider", name: "Aider", command: "aider", args: (_p, file) => ["--read", file] },
 ];
+
+function hasMcp(cwd: string): boolean {
+  try {
+    return Boolean(JSON.parse(fs.readFileSync(path.join(cwd, ".vscode/mcp.json"), "utf8")).servers?.agentbrain);
+  } catch {
+    return false;
+  }
+}
 
 const ALIASES: Record<string, string> = {
   claude: "claude-code",

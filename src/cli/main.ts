@@ -15,18 +15,26 @@ import {
   useTask,
   writeCheckpoint,
 } from "../core/actions.js";
+import { CONNECT_TARGETS, connectAgents } from "../core/connect.js";
+import { runMcpServer } from "../mcp/server.js";
+import { installPostCommitHook, postCommit, uninstallPostCommitHook } from "../core/githooks.js";
 import { brainDir, findRoot } from "../core/paths.js";
 import { RULES_TARGETS, writeRules } from "../core/rules.js";
 import { getProject, getTask, initStore, listSessions, listTasks } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 
 const USAGE = `
-AgentBrain 0.3 — move coding tasks between AI agents without losing state
+AgentBrain 0.4 — move coding tasks between AI agents without losing state
 
 Setup
   agentbrain init                         Create .agentbrain/ in the current directory
   agentbrain rules [--only <ids>]         Write AgentBrain instructions for IDE/terminal agents
                                           (${RULES_TARGETS.map((t) => t.id).join(", ")})
+  agentbrain connect [--only <ids>]       Give every agent live AgentBrain state via MCP
+                                          (${CONNECT_TARGETS.map((t) => t.id).join(", ")}) + rules + Git hook
+  agentbrain mcp [--root <dir>]           Run the MCP server (started by agents, not by hand)
+  agentbrain hooks install                 Install the automatic post-commit checkpoint hook
+  agentbrain hooks uninstall               Remove the automatic post-commit checkpoint hook
 
 Tasks
   agentbrain task create <objective>      Create a task and make it active
@@ -89,6 +97,7 @@ function parseCli() {
         reason: { type: "string" },
         only: { type: "string" },
         cli: { type: "string" },
+        root: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -106,11 +115,20 @@ function root(): string {
   return found;
 }
 
+/** Agent id the caller claims, for picking that agent's own task. */
+function callerId(): string | undefined {
+  return flags.agent ?? (process.env.AGENTBRAIN_AGENT || undefined);
+}
+
 /** Agent identity from flags, falling back to the environment `agentbrain run` sets. */
-function agentFromFlags(): AgentRef | undefined {
+function agentFromFlags(targetTask?: string): AgentRef | undefined {
   if (flags.agent) return { id: flags.agent, sessionId: flags.session ?? `s-${Date.now()}` };
   if (flags.session) throw new Error("--session requires --agent.");
   const envAgent = process.env.AGENTBRAIN_AGENT;
+  // An identity inherited from a long-lived app (e.g. VS Code launched by an
+  // earlier `agentbrain run`) belongs to that run's task; don't apply it elsewhere.
+  const envTask = process.env.AGENTBRAIN_TASK;
+  if (envAgent && envTask && targetTask && envTask !== targetTask) return undefined;
   if (envAgent) return { id: envAgent, sessionId: process.env.AGENTBRAIN_SESSION ?? `s-${Date.now()}` };
   return undefined;
 }
@@ -160,7 +178,8 @@ function status(): void {
 
 function update(): void {
   const cwd = root();
-  const task = updateTask(cwd, resolveTaskId(cwd, flags.task), {
+  const taskId = resolveTaskId(cwd, flags.task, callerId());
+  const task = updateTask(cwd, taskId, {
     status: flags.status,
     done: flags.done,
     todo: flags.todo,
@@ -170,15 +189,16 @@ function update(): void {
     unblock: flags.unblock,
     fixed: flags.fixed,
     next: flags.next,
-    agent: flags.agent || process.env.AGENTBRAIN_AGENT ? agentFromFlags() : undefined,
+    agent: flags.agent || process.env.AGENTBRAIN_AGENT ? agentFromFlags(taskId) : undefined,
   });
   console.log(`✓ Updated ${task.id} (${task.status})`);
 }
 
 function snapshot(kind: "checkpoint" | "handoff", id?: string): void {
   const cwd = root();
-  const result = writeCheckpoint(cwd, resolveTaskId(cwd, id), {
-    agent: agentFromFlags(),
+  const taskId = resolveTaskId(cwd, id, callerId());
+  const result = writeCheckpoint(cwd, taskId, {
+    agent: agentFromFlags(taskId),
     reason: flags.reason,
     status: kind,
   });
@@ -324,6 +344,38 @@ function rules(): void {
   }
 }
 
+function hooks(action: "install" | "uninstall"): void {
+  const file = action === "install" ? installPostCommitHook(root()) : uninstallPostCommitHook(root());
+  console.log(`✓ ${action === "install" ? "Installed" : "Uninstalled"} Git hook`);
+  console.log(`  ${file}`);
+}
+
+/** MCP config for every agent, plus instruction files and the commit hook. */
+function connect(): void {
+  const cwd = root();
+  const onPath = findOnPath("agentbrain") !== null;
+  const command = onPath ? "agentbrain" : process.execPath;
+  const args = onPath ? ["mcp"] : [fs.realpathSync(process.argv[1]), "mcp"];
+  const only = flags.only?.split(",").map((x) => x.trim()).filter(Boolean);
+
+  console.log("MCP (live state in every new agent session):");
+  for (const r of connectAgents(cwd, command, args, only)) {
+    console.log(`  ${r.action === "skipped" ? "!" : "✓"} ${r.agent.padEnd(26)} ${r.file} (${r.action})${r.note ? `\n      ${r.note}` : ""}`);
+  }
+  if (!only?.length) {
+    console.log(`  → Codex (user-level config): codex mcp add agentbrain -- ${[command, ...args].join(" ")}`);
+    console.log("\nInstruction files (fallback for agents without MCP):");
+    for (const { file, action } of writeRules(cwd, cliCommand())) console.log(`  ✓ ${file} (${action})`);
+    try {
+      console.log(`\nGit hook (checkpoint on every commit):\n  ✓ ${installPostCommitHook(cwd)}`);
+    } catch {
+      console.log("\nGit hook: skipped (not a Git repository)");
+    }
+  }
+  if (!onPath) console.log("\nNote: `agentbrain` is not on PATH, so configs use absolute paths (not portable).");
+  console.log("\nRestart open agent sessions (or reload the VS Code / Cursor window) to pick up the MCP server.");
+}
+
 async function main(): Promise<void> {
   const [command, subcommand, ...rest] = positionals;
   if (flags.help || !command) usage(flags.help ? 0 : 1);
@@ -363,6 +415,14 @@ async function main(): Promise<void> {
     agents();
   } else if (command === "rules") {
     rules();
+  } else if (command === "connect") {
+    connect();
+  } else if (command === "mcp") {
+    await runMcpServer(flags.root ?? process.cwd());
+  } else if (command === "hooks" && (subcommand === "install" || subcommand === "uninstall")) {
+    hooks(subcommand);
+  } else if (command === "hook" && subcommand === "post-commit") {
+    postCommit(process.cwd());
   } else {
     usage();
   }

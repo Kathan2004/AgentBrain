@@ -33,7 +33,7 @@ export interface ProcessAgentDefinition {
   /** Runs before the agent (same executable), e.g. to open the project window. */
   prepare?(cwd: string): string[];
   /** Builds argv (without the command) from the prompt text and prompt file. */
-  args(prompt: string, promptFile: string): string[];
+  args(prompt: string, promptFile: string, cwd: string): string[];
 }
 
 /**
@@ -87,7 +87,7 @@ export class ProcessAdapter implements AgentAdapter {
       });
       if (result.error) throw result.error;
     }
-    const child = spawn(executable, this.definition.args(context.handoff, context.promptFile), {
+    const child = spawn(executable, this.definition.args(context.handoff, context.promptFile, context.cwd), {
       cwd: context.cwd,
       env,
       stdio: "inherit",

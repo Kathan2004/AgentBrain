@@ -10,6 +10,7 @@ import {
   getProject,
   getSession,
   getTask,
+  listTasks,
   latestHandoffFile,
   readJson,
   saveCheckpoint,
@@ -19,8 +20,16 @@ import {
 } from "./store.js";
 
 /** Uses the explicit id if given, otherwise the project's active task. */
-export function resolveTaskId(root: string, id?: string): string {
-  const taskId = id ?? getProject(root).activeTaskId;
+/**
+ * Explicit id, else the running task this agent owns (so an agent's commands
+ * follow its own task even after the developer switches the active one), else
+ * the project's active task.
+ */
+export function resolveTaskId(root: string, id?: string, agentId?: string): string {
+  const owned = !id && agentId
+    ? listTasks(root).filter((t) => t.status === "running" && t.agent?.id === agentId)
+    : [];
+  const taskId = id ?? (owned.length === 1 ? owned[0].id : getProject(root).activeTaskId);
   if (!taskId) throw new Error('No active task. Create one with: agentbrain task create "<objective>"');
   return taskId;
 }
@@ -94,18 +103,36 @@ export function updateTask(root: string, taskId: string, patch: TaskPatch): Task
     task.status = patch.status;
   }
   // `--done 2` refers to the second remaining item, as numbered in `status` and the brief.
-  const byNumber = (list: string[]) => (item: string) => {
+  // Items can be named by number (as listed in the latest brief/status) or by
+  // any unique part of their text, which stays valid as the list changes.
+  const byNumber = (list: string[], label: string) => (item: string) => {
     const n = /^#?(\d+)$/.exec(item.trim());
-    return n && Number(n[1]) >= 1 && Number(n[1]) <= list.length ? list[Number(n[1]) - 1] : item;
+    if (!n) {
+      if (list.includes(item)) return item;
+      const needle = item.trim().toLowerCase();
+      const matches = needle.length >= 3 ? list.filter((x) => x.toLowerCase().includes(needle)) : [];
+      return matches.length === 1 ? matches[0] : item;
+    }
+    const index = Number(n[1]);
+    if (index < 1 || index > list.length) {
+      throw new Error(`There is no ${label} item ${index} (there ${list.length === 1 ? "is 1" : `are ${list.length}`}).`);
+    }
+    return list[index - 1];
   };
-  const done = clean(patch.done).map(byNumber(task.remaining));
-  const fixed = new Set(clean(patch.fixed).map(byNumber(task.failures)));
-  const unblockSet = new Set(clean(patch.unblock).map(byNumber(task.blockers ?? [])));
+  for (const item of patch.todo ?? []) {
+    if (/^#?\d+$/.test(item.trim())) {
+      throw new Error(`"${item}" looks like an item number. To complete remaining item ${item.trim()}, use done instead of todo.`);
+    }
+  }
+  // New items first, so a step added and finished in the same update matches.
+  for (const item of clean(patch.todo)) if (!task.remaining.includes(item)) task.remaining.push(item);
+  const done = clean(patch.done).map(byNumber(task.remaining, "remaining"));
+  const fixed = new Set(clean(patch.fixed).map(byNumber(task.failures, "known-failure")));
+  const unblockSet = new Set(clean(patch.unblock).map(byNumber(task.blockers ?? [], "blocker")));
   for (const item of done) {
     task.remaining = task.remaining.filter((r) => r !== item);
     if (!task.completed.includes(item)) task.completed.push(item);
   }
-  for (const item of clean(patch.todo)) if (!task.remaining.includes(item)) task.remaining.push(item);
   task.decisions.push(...clean(patch.decisions));
   task.failures = [...task.failures.filter((f) => !fixed.has(f)), ...clean(patch.failures)];
   task.blockers = [...(task.blockers ?? []).filter((b) => !unblockSet.has(b)), ...clean(patch.blockers)];
@@ -220,7 +247,12 @@ export function latestCheckpoint(root: string, taskId: string): Checkpoint | nul
  * snapshot), attributed to the last handoff, plus instructions for keeping
  * AgentBrain up to date so the *next* switch is lossless too.
  */
-export function buildPrompt(root: string, taskId: string, cli: string): string {
+/**
+ * The state half of the brief: live task + Git state (not the stale snapshot),
+ * attributed to the last handoff. Written so the reader continues the work as
+ * its own rather than as a stranger reading someone else's notes.
+ */
+export function briefContext(root: string, taskId: string): string {
   const task = getTask(root, taskId);
   const last = latestCheckpoint(root, taskId);
   const live = makeCheckpoint(task, getGitState(root), {
@@ -230,24 +262,31 @@ export function buildPrompt(root: string, taskId: string, cli: string): string {
   });
   const context = renderHandoff(task, live).replace(/^# AgentBrain Handoff\n/, "");
   const fresh = !last && task.completed.length === 0;
+  const intro = fresh
+    ? `You are starting AgentBrain task ${task.id}. Nobody has worked on it yet.`
+    : `You are continuing AgentBrain task ${task.id}. This is your task: earlier sessions (in this or ` +
+      "another coding agent) did the work below. Pick up exactly where it left off, as if you had done it " +
+      "yourself; do not ask the developer to re-explain.";
+  return `${intro}\n${context}`;
+}
 
-  return `You are ${fresh ? "starting" : "continuing"} a software task tracked by AgentBrain.
-${fresh ? "No previous agent has worked on it yet." : "Another agent worked on it before you; its state is below. Do not ask the developer to re-explain the task."}
-${context}
+export function buildPrompt(root: string, taskId: string, cli: string): string {
+  const id = getTask(root, taskId).id;
+  return `${briefContext(root, taskId)}
 ## Keeping AgentBrain up to date
 
 You may be cut off at any time (usage limit, crash, session end), so record
 progress after each meaningful step — not only at the end:
 
-    ${cli} task update --done "<finished step>" --todo "<new step>" \\
+    ${cli} task update --task ${id} --done "<finished step>" --todo "<new step>" \\
       --decision "<decision and why>" --failure "<what failed and how>" \\
       --next "<the very next action>"
 
-Flags are repeatable. \`--done <n>\` marks remaining item n (as numbered above) complete; \`--fixed <n>\` clears known failure n once fixed. Use --blocker "<text>" if you are stuck on something only the developer can resolve.
+Flags are repeatable. \`--done\` and \`--fixed\` take the item's text or any unique part of it (numbers also work but shift as items complete). Use --blocker "<text>" if you are stuck on something only the developer can resolve.
 
-- When the objective is complete and verified: ${cli} task update --status review --next "Review the changes"
-- If you must stop before finishing:          ${cli} handoff --reason "<why>"
-- To see the current state:                   ${cli} status
+- When the objective is complete and verified: ${cli} task update --task ${id} --status review --next "Review the changes"
+- If you must stop before finishing:          ${cli} handoff ${id} --reason "<why>"
+- To see the current state:                   ${cli} resume ${id}
 
 Never put secrets, tokens or credentials in these fields.
 `;

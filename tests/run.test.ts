@@ -38,9 +38,9 @@ describe("agentbrain run", () => {
     expect(result.stderr).toContain("Auto-handoff");
 
     const prompt = fs.readFileSync(`${repo}-claude-prompt.txt`, "utf8");
-    expect(prompt).toContain("You are starting a software task");
+    expect(prompt).toContain(`You are starting AgentBrain task ${activeTask(repo).id}`);
     expect(prompt).toContain("Implement OAuth login");
-    expect(prompt).toContain("agentbrain task update --done");
+    expect(prompt).toContain(`agentbrain task update --task ${activeTask(repo).id} --done`);
 
     const task = activeTask(repo);
     expect(task.status).toBe("handoff");
@@ -70,7 +70,7 @@ describe("agentbrain run", () => {
     expect(second.stderr).not.toContain("Auto-handoff");
 
     const codexPrompt = fs.readFileSync(`${repo}-codex-prompt.txt`, "utf8");
-    expect(codexPrompt).toContain("You are continuing a software task");
+    expect(codexPrompt).toContain("You are continuing AgentBrain task");
     expect(codexPrompt).toContain("Last agent: claude-code");
     expect(codexPrompt).toContain("Stop reason: claude-code exited with code 3");
     expect(codexPrompt).toContain("- OAuth callback");
@@ -140,6 +140,15 @@ describe("agentbrain run", () => {
     expect(fs.readFileSync(`${log}.env`, "utf8")).toBe("unset");
   });
 
+  it("sends VS Code a plain 'continue' when the MCP server is connected", () => {
+    const log = `${repo}-code-mcp.txt`;
+    stubAgent(bin, "code", `printf '%s\\n' "$@" >> ${JSON.stringify(log)}`);
+    ab(repo, ["connect", "--only", "vscode"], env);
+    ab(repo, ["run", "vscode"], env);
+    const lines = fs.readFileSync(log, "utf8").trim().split("\n");
+    expect(lines.slice(-5)).toEqual(["chat", "--mode", "agent", "--reuse-window", "continue"]);
+  });
+
   it("accepts remaining-item numbers for --done", () => {
     ab(repo, ["task", "update", "--todo", "Write tests", "--todo", "Update docs"], env);
     ab(repo, ["task", "update", "--done", "3", "--done", "#1"], env);
@@ -147,6 +156,31 @@ describe("agentbrain run", () => {
     expect(task.completed).toEqual(["Update docs", "Implement OAuth login"]);
     expect(task.remaining).toEqual(["Write tests"]);
     expect(ab(repo, ["status"], env).stdout).toContain("  1. Write tests");
+  });
+
+  it("matches items by unique text and rejects ambiguous numbers", () => {
+    ab(repo, ["task", "update", "--todo", "Write the hook tests", "--todo", "Update docs"], env);
+    ab(repo, ["task", "update", "--done", "hook tests"], env);
+    expect(activeTask(repo).remaining).toEqual(["Implement OAuth login", "Update docs"]);
+    expect(() => ab(repo, ["task", "update", "--done", "7"], env)).toThrow("There is no remaining item 7");
+    expect(() => ab(repo, ["task", "update", "--todo", "6"], env)).toThrow("looks like an item number");
+  });
+
+  it("routes an agent's commands to its own running task, not the active one", () => {
+    ab(repo, ["task", "update", "--agent", "copilot", "--session", "p1", "--todo", "Write hook", "--done", "Write hook"], env);
+    const mine = activeTask(repo).id;
+    ab(repo, ["task", "create", "Something else"], env);
+    ab(repo, ["handoff", "--reason", "finished my part"], { ...env, AGENTBRAIN_AGENT: "copilot", AGENTBRAIN_SESSION: "p1" });
+    const copilotTask = readJson(path.join(repo, ".agentbrain/tasks", mine, "task.json"));
+    expect(copilotTask.status).toBe("handoff");
+    expect(copilotTask.completed).toContain("Write hook");
+    expect(activeTask(repo).status).toBe("idle");
+  });
+
+  it("ignores an inherited agent identity that belongs to another task", () => {
+    ab(repo, ["task", "update", "--agent", "codex", "--session", "c1"], env);
+    ab(repo, ["task", "update", "--next", "x"], { ...env, AGENTBRAIN_AGENT: "vscode", AGENTBRAIN_SESSION: "old", AGENTBRAIN_TASK: "task-other" });
+    expect(activeTask(repo).agent).toEqual({ id: "codex", sessionId: "c1" });
   });
 
   it("clears fixed failures and resolved blockers by number or text", () => {

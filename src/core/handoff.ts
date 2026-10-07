@@ -61,6 +61,18 @@ function list(items: string[], empty = "- None recorded"): string {
   return items.length ? items.map((x) => `- ${x}`).join("\n") : empty;
 }
 
+/**
+ * After many agent switches the history gets long; the brief keeps the most
+ * recent items (the checkpoint JSON keeps everything).
+ */
+function recent(items: string[], max: number, where: string): string {
+  if (items.length <= max) return list(items);
+  const hidden = items.length - max;
+  return `- (${hidden} earlier item${hidden === 1 ? "" : "s"} in ${where})\n${list(items.slice(-max))}`;
+}
+
+export const BRIEF_LIMITS = { completed: 12, decisions: 15, changedFiles: 40 };
+
 export function renderHandoff(task: TaskState, checkpoint: Checkpoint): string {
   const agent = checkpoint.agent.sessionId
     ? `${checkpoint.agent.id} (session ${checkpoint.agent.sessionId})`
@@ -78,13 +90,13 @@ Last agent: ${agent}${checkpoint.stopReason ? `\nStop reason: ${checkpoint.stopR
 ## Progress
 
 ### Completed
-${list(checkpoint.progress.completed)}
+${recent(checkpoint.progress.completed, BRIEF_LIMITS.completed, "task.json")}
 
 ### Remaining
 ${checkpoint.progress.remaining.length ? checkpoint.progress.remaining.map((x, i) => `${i + 1}. ${x}`).join("\n") : "- None recorded"}
 
 ## Decisions
-${list(checkpoint.decisions)}
+${recent(checkpoint.decisions, BRIEF_LIMITS.decisions, "task.json")}
 
 ## Known Failures
 ${checkpoint.failures.length ? checkpoint.failures.map((x, i) => `${i + 1}. ${x}`).join("\n") : "- None recorded"}
@@ -98,7 +110,7 @@ ${list(checkpoint.blockers)}
 - Working tree dirty: ${checkpoint.git.dirty ? "yes" : "no"}
 
 ### Changed Files
-${list(checkpoint.git.changedFiles, "- None")}
+${checkpoint.git.changedFiles.length ? recent(checkpoint.git.changedFiles, BRIEF_LIMITS.changedFiles, "git status") : "- None"}
 
 ## Next Action
 ${checkpoint.nextAction}

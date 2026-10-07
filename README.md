@@ -33,6 +33,35 @@ agentbrain task create "Implement OAuth login"
 agentbrain rules          # teach your agents the protocol (see below)
 ```
 
+### Live state for every agent (MCP)
+
+To connect the agents installed in your editor to the same live AgentBrain
+state, run this once from the project:
+
+```bash
+agentbrain connect
+```
+
+This configures the MCP server, writes the agent instruction files, and
+installs the post-commit hook. A new chat receives the current task brief when
+it connects, so you do not need to paste a brief or say `resume` first. Agents
+can read the brief, update progress, checkpoint, hand off, create a task, and
+list tasks through MCP; disconnecting while an agent owns a running task creates
+an automatic handoff checkpoint.
+
+The generated files are:
+
+| File | Purpose |
+|---|---|
+| `.mcp.json` | Claude Code and other MCP clients |
+| `.vscode/mcp.json` | MCP in VS Code |
+| `.cursor/mcp.json` | MCP in Cursor |
+| `.gemini/settings.json` | MCP in Gemini CLI |
+| instruction files | Agent behavior rules, written by `agentbrain rules` |
+
+Use `agentbrain connect --only <ids>` to configure selected targets. The
+operation is repeatable and preserves unrelated configuration.
+
 ### Terminal agents
 
 ```bash
@@ -71,6 +100,19 @@ Anything else:
 agentbrain run --agent my-agent -- my-agent-cli --message {prompt}
 ```
 
+### Automatic capture
+
+To record a checkpoint after every successful commit while the active task is
+running, install the Git hook:
+
+```bash
+agentbrain hooks install
+```
+
+The hook respects Git's `core.hooksPath` and preserves existing hook content.
+It can be removed with `agentbrain hooks uninstall`. AgentBrain failures never
+fail or delay a commit.
+
 ### IDE agents (Cursor, Copilot in VS Code, Windsurf, …)
 
 These live inside the editor, so AgentBrain can't launch them. Instead,
@@ -103,6 +145,9 @@ agentbrain resume          # prints the brief — paste it into any agent
 ```bash
 agentbrain status                 # active task, progress, last checkpoint
 agentbrain checkpoint             # snapshot without stopping
+agentbrain connect                # configure MCP, rules, and the Git hook
+agentbrain mcp                    # run the MCP server (normally started by an agent)
+agentbrain hooks install          # install automatic post-commit checkpoints
 agentbrain task list / task use <id>
 agentbrain agents                 # which agents are installed + session history
 agentbrain --help
@@ -133,9 +178,12 @@ keys, `password=` values, credentials in URLs). Add project patterns with
 
 - **Tested:** the full CLI, Git capture, redaction, instruction files, and
   `run` (including auto-handoff) against stub agents that behave like the real
-  CLIs. `npm test` runs it all.
-- **Not yet tested against the real agents.** The launch flags follow each
-  CLI's documented usage; reports and fixes are welcome.
+  CLIs. MCP is tested with stub clients. `npm test` runs it all.
+- **Verified live with GitHub Copilot in VS Code:** after `agentbrain connect`,
+  a brand-new chat given only the word "continue" called `agentbrain_brief`,
+  picked up the task another agent had handed off, recorded its progress and
+  moved it to review. Other agents' MCP configs are written but not yet tried
+  live.
 - **Not built yet:** headless execution over ACP, worktree isolation, agent
   routing. See [`SPEC.md`](SPEC.md) for the spec and roadmap.
 

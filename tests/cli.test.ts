@@ -81,7 +81,7 @@ describe("agent A → handoff → agent B", () => {
     expect(handoff).toContain("Implement OAuth login");
     expect(handoff).toContain("Last agent: claude-code (session a1)");
     expect(handoff).toContain("Stop reason: usage limit reached");
-    expect(handoff).toContain("task update --done");
+    expect(handoff).toContain(`task update --task ${taskId} --done`);
     expect(handoff).toContain("- src/oauth.ts");
     expect(handoff).toContain("Implement refresh-token rotation");
 

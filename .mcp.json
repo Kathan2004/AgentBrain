@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agentbrain": {
+      "type": "stdio",
+      "command": "agentbrain",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}
