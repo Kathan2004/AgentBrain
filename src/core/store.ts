@@ -11,6 +11,8 @@ export interface ProjectState {
   redactPatterns?: string[];
   /** Minutes without activity before a running task counts as stalled (default 10). */
   stallMinutes?: number;
+  /** Routing preferences for `agentbrain route`: agent ids, best first / never suggest. */
+  agents?: { prefer?: string[]; avoid?: string[] };
 }
 
 export function writeJson(file: string, value: unknown): void {
@@ -46,8 +48,23 @@ export function saveProject(cwd: string, project: ProjectState): void {
   writeJson(path.join(brainDir(cwd), "project.json"), project);
 }
 
+const MAX_EVENTS = 200;
+
 export function saveTask(cwd: string, task: TaskState): void {
   task.updatedAt = new Date().toISOString();
+  // Record status changes (and changes of hands while running) wherever they come from.
+  const file = path.join(taskDir(cwd, task.id), "task.json");
+  const before = fs.existsSync(file) ? readJson<TaskState>(file) : null;
+  if (!before || before.status !== task.status || (task.status === "running" && before.agent?.id !== task.agent?.id)) {
+    const events = [...(before?.events ?? task.events ?? []), {
+      at: task.updatedAt,
+      status: task.status,
+      ...(task.agent ? { agent: task.agent.id } : {}),
+    }];
+    task.events = events.slice(-MAX_EVENTS);
+  } else {
+    task.events = before.events ?? task.events;
+  }
   writeJson(path.join(taskDir(cwd, task.id), "task.json"), task);
 }
 

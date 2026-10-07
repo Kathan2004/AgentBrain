@@ -6,6 +6,7 @@ import { findOnPath } from "../adapters/process.js";
 import { ACP_AGENTS, BUILTIN_AGENTS, acpAgent, builtinAdapter, customAdapter } from "../adapters/registry.js";
 import { TOOL_KINDS, type ToolKind } from "../adapters/acp.js";
 import { runHeadless } from "../core/headless.js";
+import { routeTask } from "../core/routing.js";
 import {
   buildPrompt,
   closeSession,
@@ -29,9 +30,10 @@ import { describeActivity, taskActivity } from "../core/stall.js";
 import { addWorktree, mergeWorktree, removeWorktree, taskWorkdir } from "../core/worktree.js";
 import { taskTimeline } from "../core/timeline.js";
 import { pruneTask } from "../core/prune.js";
+import { exportTask } from "../core/export.js";
 
 const USAGE = `
-AgentBrain 0.7 — move coding tasks between AI agents without losing state
+AgentBrain 0.8 — move coding tasks between AI agents without losing state
 
 Setup
   agentbrain init                         Create .agentbrain/ in the current directory
@@ -61,12 +63,16 @@ Tasks
   agentbrain status
 
 Switching agents
+  agentbrain export [task-id] [--out <file>]
+                                          Export a portable Markdown brief and history
   agentbrain run <agent> [task-id]        Launch a terminal agent on the task; auto-handoff on exit
   agentbrain run [task-id] --agent <id> -- <command> [args...]
                                           Launch any other agent ({prompt}, {prompt_file} expand)
   agentbrain run <agent> [task-id] --headless [--allow <kinds>] [--max-turns N] [--timeout <min>]
                                           Run an ACP agent with no UI in the task's worktree
                                           (agents: ${ACP_AGENTS.map((a) => a.id).join(", ")}; default allow: read,edit,search,think)
+  agentbrain route [task-id] [--run]      Suggest which agent should take the task, with reasons;
+                                          --run launches the top suggestion
   agentbrain checkpoint [task-id] [--reason <text>]
                                           Snapshot state; task keeps running
   agentbrain handoff [task-id] [--agent <id>] [--session <id>] [--reason <text>]
@@ -119,11 +125,13 @@ function parseCli() {
         only: { type: "string" },
         cli: { type: "string" },
         root: { type: "string" },
+        out: { type: "string" },
         keep: { type: "string" },
         all: { type: "boolean" },
         "dry-run": { type: "boolean" },
         worktree: { type: "boolean" },
         headless: { type: "boolean" },
+        run: { type: "boolean" },
         allow: { type: "string" },
         "max-turns": { type: "string" },
         timeout: { type: "string" },
@@ -411,6 +419,32 @@ async function run(agentName: string | undefined, taskArg: string | undefined): 
   process.exitCode = exitCode;
 }
 
+async function route(id?: string): Promise<void> {
+  const cwd = root();
+  const taskId = resolveTaskId(cwd, id, undefined, process.cwd());
+  const task = getTask(cwd, taskId);
+  const ranked = routeTask(cwd, taskId);
+  console.log(`Who should take ${task.id} — ${task.objective} (${task.status})?\n`);
+  const available = ranked.filter((c) => c.available);
+  available.forEach((c, i) => {
+    console.log(`${i + 1}. ${c.name} [${c.mode}]  score ${c.score}`);
+    for (const reason of c.reasons) console.log(`     - ${reason}`);
+    console.log(`     $ ${c.command}`);
+  });
+  if (!available.length) console.log("No supported agent is installed. Run `agentbrain agents` to see options.");
+  const missing = ranked.filter((c) => !c.available).map((c) => (c.mode === "headless" ? `${c.id} (headless)` : c.id));
+  if (missing.length) console.log(`\nNot installed: ${[...new Set(missing)].join(", ")}`);
+
+  if (flags.run) {
+    const top = available[0];
+    if (!top) throw new Error("Nothing to run.");
+    if (top.score <= -100) throw new Error(`Top suggestion ${top.id} is likely unavailable (${top.reasons.join("; ")}). Pick one yourself.`);
+    console.log(`\nLaunching ${top.name}...`);
+    flags.headless = top.mode === "headless";
+    await run(top.id, taskId);
+  }
+}
+
 function agents(): void {
   console.log("Terminal agents (agentbrain run <id>):");
   for (const def of BUILTIN_AGENTS) {
@@ -441,6 +475,19 @@ function log(id?: string): void {
   const taskId = resolveTaskId(cwd, id);
   for (const event of taskTimeline(cwd, taskId)) {
     console.log(`${localTime(event.timestamp)} ${event.agent.padEnd(12)} ${event.event.padEnd(10)} ${event.reason}`);
+  }
+}
+
+function exportMarkdown(id?: string): void {
+  const cwd = root();
+  const taskId = resolveTaskId(cwd, id);
+  const markdown = exportTask(cwd, taskId);
+  if (flags.out) {
+    const file = path.resolve(process.cwd(), flags.out);
+    fs.writeFileSync(file, markdown, "utf8");
+    console.log(`✓ Exported ${taskId} to ${file}`);
+  } else {
+    process.stdout.write(markdown);
   }
 }
 
@@ -554,12 +601,16 @@ async function main(): Promise<void> {
     resume(subcommand);
   } else if (command === "log") {
     log(subcommand);
+  } else if (command === "export") {
+    exportMarkdown(subcommand);
   } else if (command === "prune") {
     prune(subcommand);
   } else if (command === "run") {
     // `run <agent> [task]`, or `run [task] -- <command>` for a custom agent.
     if (passthrough.length) await run(undefined, subcommand);
     else await run(subcommand, rest[0]);
+  } else if (command === "route") {
+    await route(subcommand);
   } else if (command === "agents") {
     agents();
   } else if (command === "rules") {

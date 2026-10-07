@@ -451,8 +451,12 @@ hook and agent launch; `agentbrain prune`.
 ### V0.7 — done
 Headless runs over ACP; README/CLI docs guard test.
 
+### V0.8 — done
+`agentbrain route` (suggestions from usage limits, track record and
+preferences; task status history), `agentbrain export`.
+
 ### Next
-Agent selection/routing; trying headless runs against real ACP agents.
+Trying headless runs against real ACP agents.
 
 ### V1.0
 Stable project-state specification and extensible agent ecosystem.

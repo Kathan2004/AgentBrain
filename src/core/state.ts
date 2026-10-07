@@ -37,8 +37,16 @@ export interface TaskState {
   nextAction?: string;
   /** The agent currently (or most recently) working on the task. */
   agent?: AgentRef;
+  /** Status changes, oldest first (capped): who moved the task where, and when. */
+  events?: TaskEvent[];
   /** The task's own Git worktree, when it has one (`agentbrain worktree add`). */
   worktree?: { path: string; branch: string; base: string };
+}
+
+export interface TaskEvent {
+  at: string;
+  status: TaskStatus;
+  agent?: string;
 }
 
 export interface AgentSessionState {

@@ -192,6 +192,8 @@ Set `"stallMinutes"` in `.agentbrain/project.json` to change the threshold.
 agentbrain status                 # active task, progress, last checkpoint, stall warnings
 agentbrain checkpoint             # snapshot without stopping
 agentbrain log                    # timeline of agent sessions and checkpoints
+agentbrain route [task-id]        # which agent should take the task next, with reasons
+agentbrain export [task-id]       # export a portable Markdown brief and history
 agentbrain worktree add [task-id] # give a task its own Git worktree
 agentbrain worktree remove [task-id] # remove a task worktree
 agentbrain worktree list          # task worktrees and their branches

@@ -23,4 +23,12 @@ describe("CLI documentation", () => {
       expect(readme).toMatch(pattern);
     }
   });
+
+  it("has no leftover merge conflict markers in docs or source", () => {
+    const files = ["README.md", "SPEC.md", ...fs.readdirSync("src", { recursive: true }).map((f) => path.join("src", String(f)))]
+      .filter((f) => /\.(md|ts)$/.test(f));
+    for (const file of files) {
+      expect(fs.readFileSync(file, "utf8"), file).not.toMatch(/^(<{7}|>{7})( |$)/m);
+    }
+  });
 });
