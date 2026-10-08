@@ -4,7 +4,9 @@ import path from "node:path";
 import { findOnPath } from "../adapters/process.js";
 import { CONNECT_TARGETS } from "./connect.js";
 import { findRoot } from "./paths.js";
+import { readQueue } from "./queue.js";
 import { RULES_TARGETS } from "./rules.js";
+import { listTasks } from "./store.js";
 
 export interface DoctorCheck {
   name: string;
@@ -72,6 +74,30 @@ export function runDoctor(cwd: string): DoctorCheck[] {
       ? { name: "AgentBrain initialized", ok: true, detail: path.join(root, ".agentbrain") }
       : { name: "AgentBrain initialized", ok: false, detail: "no .agentbrain/project.json found", fix: "Run agentbrain init" },
   );
+
+  if (root) {
+    const tasks = listTasks(root);
+    const leftover = tasks.filter((task) => task.status === "done" && task.worktree);
+    const missing = tasks.filter((task) => task.worktree && !fs.existsSync(task.worktree.path));
+    const worktreeProblems = [
+      ...leftover.map((task) => `${task.id} is done but still has a worktree`),
+      ...missing.map((task) => `${task.id} records a missing worktree at ${task.worktree!.path}`),
+    ];
+    checks.push({
+      name: "Task worktrees",
+      ok: worktreeProblems.length === 0,
+      detail: worktreeProblems.length ? worktreeProblems.join("; ") : "no leftover or missing worktrees",
+      fix: worktreeProblems.length ? "Run agentbrain worktree prune" : undefined,
+    });
+
+    const queueProblems = readQueue(root).filter((taskId) => !tasks.some((task) => task.id === taskId));
+    checks.push({
+      name: "Queue",
+      ok: queueProblems.length === 0,
+      detail: queueProblems.length ? `missing task(s): ${queueProblems.join(", ")}` : "all queued tasks exist",
+      fix: queueProblems.length ? `Run agentbrain queue remove ${queueProblems.join(" ")}` : undefined,
+    });
+  }
 
   const hook = repo ? hookFile(cwd) : null;
   const postCommit = hook && path.join(hook, "post-commit");

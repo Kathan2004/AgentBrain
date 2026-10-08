@@ -39,6 +39,16 @@ export function parsePorcelainZ(output: string): string[] {
   return files;
 }
 
+/**
+ * Commits reachable from HEAD but not from `since` (newest first), as
+ * "<short sha> <subject>". Empty when `since` is unknown or not a commit.
+ */
+export function commitsSince(cwd: string, since: string | null | undefined, max = 15): string[] {
+  if (!since) return [];
+  const out = git(cwd, ["log", "--no-merges", `--max-count=${max}`, "--format=%h %s", `${since}..HEAD`]);
+  return out ? out.split("\n").filter(Boolean) : [];
+}
+
 export function getGitState(cwd: string): GitState {
   if (git(cwd, ["rev-parse", "--is-inside-work-tree"])?.trim() !== "true") {
     throw new Error("AgentBrain requires a Git repository.");

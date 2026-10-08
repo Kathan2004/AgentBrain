@@ -53,6 +53,8 @@ export function postCommit(cwd: string): void {
     const activeId = getProject(root).activeTaskId;
     const task = owner ?? (activeId ? getTask(root, activeId) : null);
     if (!task || task.status !== "running") return;
+    // A task with its own worktree only owns commits made in that worktree.
+    if (!owner && task.worktree) return;
     const sha = git(cwd, ["rev-parse", "--short", "HEAD"]);
     const subject = git(cwd, ["log", "-1", "--pretty=%s"]);
     writeCheckpoint(root, task.id, { reason: `commit ${sha}: ${subject}`, status: "checkpoint" });

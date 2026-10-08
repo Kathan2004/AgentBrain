@@ -29,11 +29,27 @@ export const BUILTIN_AGENTS: ProcessAgentDefinition[] = [
     detached: true,
     // Focuses the window that has this folder open, or opens a new one (a task
     // worktree is a different folder; never replace the developer's window).
-    prepare: (cwd) => [cwd],
-    args: (_p, file, cwd) =>
-      // With the MCP server connected, Copilot reads live state itself: send
-      // what a developer would type. Otherwise attach the brief.
-      hasMcp(cwd)
+    prepare: (cwd, here) => (here ? [] : [cwd]),
+    args: (_p, file, cwd, here) =>
+      here
+        ? // The open chat's workspace is some other folder: say exactly where to work.
+          [
+            "chat",
+            "--mode",
+            "agent",
+            "--reuse-window",
+            "--add-file",
+            file,
+            `New AgentBrain task for you. The attached file is your brief. Work ONLY in ${cwd} ` +
+              "(it may be outside this window's workspace; use that absolute path for every file and run every " +
+              `terminal command from it, e.g. \`cd ${JSON.stringify(cwd)} && ...\`). The task is already assigned to you. ` +
+              "Record progress with the `agentbrain task update` command shown in the brief after each step, commit " +
+              "your work in that directory, and finish with `agentbrain task update ... --status review` (or " +
+              "`agentbrain handoff` if you must stop early).",
+          ]
+        : // With the MCP server connected, Copilot reads live state itself: send
+          // what a developer would type. Otherwise attach the brief.
+          hasMcp(cwd)
         ? ["chat", "--mode", "agent", "--reuse-window", "continue"]
         : [
             "chat",

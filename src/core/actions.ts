@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { getGitState } from "./git.js";
+import { commitsSince, getGitState } from "./git.js";
 import { makeCheckpoint, renderHandoff, type Checkpoint } from "./handoff.js";
 import { tasksDir } from "./paths.js";
 import { compilePatterns, redact, redactAll } from "./redact.js";
@@ -152,6 +152,12 @@ export function updateTask(root: string, taskId: string, patch: TaskPatch): Task
     }
   }
 
+  // Finishing the task finishes its objective; agents never tick that item off themselves.
+  if ((task.status === "review" || task.status === "done") && task.remaining.includes(task.objective)) {
+    task.remaining = task.remaining.filter((r) => r !== task.objective);
+    if (!task.completed.includes(task.objective)) task.completed.push(task.objective);
+  }
+
   // Recording progress implies someone is working on the task.
   if (patch.status === undefined && (task.status === "idle" || task.status === "handoff")) {
     task.status = "running";
@@ -288,7 +294,26 @@ export function briefContext(root: string, taskId: string): string {
   const note = warning
     ? `\n> Note: ${warning} If you are taking over, continue from the next action; your first update makes the task yours.\n`
     : "";
-  return `${intro}\n${note}${context}`;
+  return `${intro}\n${note}${context}${taskCommitsSection(root, task)}`;
+}
+
+/** First Git HEAD recorded for a task: where its work started. */
+function taskStart(root: string, task: TaskState): string | null {
+  if (task.worktree) return task.worktree.base;
+  const dir = path.join(tasksDir(root), task.id, "checkpoints");
+  if (!fs.existsSync(dir)) return null;
+  const first = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).sort()[0];
+  return first ? readJson<Checkpoint>(path.join(dir, first)).git.head : null;
+}
+
+/**
+ * Commits made on the task so far, so the next agent sees what actually
+ * changed, not only what earlier agents reported.
+ */
+function taskCommitsSection(root: string, task: TaskState): string {
+  const commits = commitsSince(taskWorkdir(root, task), taskStart(root, task));
+  if (!commits.length) return "";
+  return `\n## Commits on this task (newest first)\n${commits.map((c) => `- ${c}`).join("\n")}\n`;
 }
 
 export function buildPrompt(root: string, taskId: string, cli: string): string {

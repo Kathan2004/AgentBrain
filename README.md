@@ -1,5 +1,7 @@
 # AgentBrain
 
+[![CI](https://github.com/Kathan2004/AgentBrain/actions/workflows/ci.yml/badge.svg)](https://github.com/Kathan2004/AgentBrain/actions/workflows/ci.yml)
+
 > One project. Any coding agent. No lost context.
 
 AgentBrain is a local-first continuity layer for AI coding agents. It keeps the
@@ -27,6 +29,121 @@ Requires Node 20+ and Git.
 
 ## Use it
 
+### Five-minute walkthrough
+
+Follow these steps from the root of the project you want agents to work on.
+
+1. **Install AgentBrain.**
+
+   ```bash
+   npm install
+   npm run build
+   npm link
+   ```
+
+   These install dependencies, build the CLI, and put `agentbrain` on your
+   `PATH`. You should see a successful TypeScript build and be able to run
+   `agentbrain --help`.
+
+2. **Initialize the project.**
+
+   ```bash
+   agentbrain init
+   ```
+
+   This creates the local `.agentbrain/` state directory. You should see a
+   confirmation that the project is initialized.
+
+3. **Connect your coding agents.**
+
+   ```bash
+   agentbrain connect
+   ```
+
+   This configures MCP, writes agent instructions, and installs the Git hook.
+   You should see the targets that were configured and the files that were
+   written.
+
+4. **Create a task in its own worktree.**
+
+   ```bash
+   agentbrain task create "Implement OAuth login" --worktree
+   ```
+
+   This creates and activates a task with an isolated Git worktree. You should
+   see the task ID, its `agentbrain/<task-id>` branch, and its worktree path.
+
+5. **Start the first agent.**
+
+   ```bash
+   agentbrain run claude
+   ```
+
+   This launches Claude with the task brief and asks it to record progress as
+   it works. You should see Claude working in the task's worktree; in Copilot
+   or Cursor, open the connected project and say `continue` instead.
+
+6. **Let AgentBrain capture the handoff.**
+
+   ```bash
+   agentbrain status
+   ```
+
+   When the agent exits because it finishes, reaches a usage limit, or stops,
+   AgentBrain writes a handoff checkpoint automatically. You should see the
+   task's progress, stop reason, and next action in the status output.
+
+7. **Route the task to another agent.**
+
+   ```bash
+   agentbrain route
+   agentbrain run codex
+   ```
+
+   The first command suggests the next agent and explains why; the second
+   starts it with the saved brief. You should see the new agent continue from
+   the previous checkpoint rather than starting from scratch.
+
+8. **Watch the task live.**
+
+   ```bash
+   agentbrain
+   ```
+
+   This opens the live terminal view of tasks, agents, checkpoints, and diffs.
+   You should see the active task and its current status update as work
+   progresses.
+
+9. **Finish by merging the worktree.**
+
+   ```bash
+   agentbrain worktree merge <task-id>
+   ```
+
+   This merges the completed task branch into the project and removes its
+   worktree. You should see the merge result and a clean-up confirmation.
+
+### How it works
+
+AgentBrain persists coordination state alongside the project:
+
+```text
+.agentbrain/
+├── project.json
+├── tasks/<task-id>/task.json
+├── tasks/<task-id>/checkpoints/<checkpoint-id>.{json,md}
+└── agents/<agent-id>/sessions/<session-id>.{json,prompt.md}
+```
+
+The same state reaches agents through three integration paths:
+
+- **MCP:** `agentbrain connect` configures clients to read briefs, update
+  progress, checkpoint, and hand off through the MCP server.
+- **Instruction files:** `agentbrain rules` writes the protocol into files such
+  as `AGENTS.md`, `CLAUDE.md`, and `.github/copilot-instructions.md`.
+- **Launching agents:** `agentbrain run <agent>` starts a terminal agent with
+  the current brief and records an automatic handoff when it exits.
+
 ```bash
 cd your-project
 agentbrain init
@@ -46,9 +163,10 @@ agentbrain connect
 This configures the MCP server, writes the agent instruction files, and
 installs the post-commit hook. A new chat receives the current task brief when
 it connects, so you do not need to paste a brief or say `resume` first. Agents
-can read the brief, update progress, checkpoint, hand off, create a task, and
-list tasks through MCP; disconnecting while an agent owns a running task creates
-an automatic handoff checkpoint.
+can read the brief and timeline, get routing suggestions, update progress,
+checkpoint, hand off, create a task, and list tasks through MCP. Routing only
+suggests; the developer decides, and disconnecting while an agent owns a running
+task creates an automatic handoff checkpoint.
 
 The generated files are:
 
@@ -141,6 +259,10 @@ agentbrain handoff --reason "switching to Cursor for the UI work"
 agentbrain resume          # prints the brief — paste it into any agent
 ```
 
+`agentbrain run vscode <task-id> --here` sends the task to the Copilot chat you
+already have open instead of opening the task's folder in a new window; the
+message tells Copilot the exact directory to work in.
+
 ### Parallel agents: one worktree per task
 
 ```bash
@@ -213,12 +335,16 @@ agentbrain status                 # active task, progress, last checkpoint, stal
 agentbrain checkpoint             # snapshot without stopping
 agentbrain log                    # timeline of agent sessions and checkpoints
 agentbrain route [task-id]        # which agent should take the task next, with reasons
+agentbrain queue add <task-id>... # line up tasks for one agent
+agentbrain queue list             # what's queued (queue remove <task-id> to drop one)
+agentbrain queue run vscode --here # hand queued tasks to the agent one after another
 agentbrain attach <session-id>    # watch a background (headless) agent live and message it
 agentbrain stop <session-id>      # stop a background agent; its task is handed off
 agentbrain export [task-id]       # export a portable Markdown brief and history
 agentbrain worktree add [task-id] # give a task its own Git worktree
 agentbrain worktree remove [task-id] # remove a task worktree
 agentbrain worktree list          # task worktrees and their branches
+agentbrain worktree prune         # clean up worktrees of finished, merged tasks (--branches, --dry-run)
 agentbrain prune [task-id]        # remove old checkpoints (use --keep N, --all, or --dry-run)
 agentbrain connect                # configure MCP, rules, and the Git hook
 agentbrain doctor                 # check setup and print fixes for anything missing

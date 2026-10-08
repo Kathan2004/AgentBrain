@@ -33,4 +33,23 @@ describe("agentbrain doctor", () => {
     expect(result.stdout).toContain("✓ MCP server  starts and answers initialize");
     expect(fs.existsSync(path.join(repo, ".git", "hooks", "post-commit"))).toBe(true);
   });
+
+  it("reports leftover task worktrees and missing queue tasks", () => {
+    const repo = tempRepo("agentbrain-doctor-state-");
+    ab(repo, ["init"]);
+    const done = ab(repo, ["task", "create", "Finished task", "--worktree"]).stdout
+      .match(/Created (task-\d+)/)?.[1];
+    expect(done).toBeDefined();
+    ab(repo, ["task", "update", "--task", done!, "--status", "done"]);
+    const project = JSON.parse(fs.readFileSync(path.join(repo, ".agentbrain", "project.json"), "utf8"));
+    project.queue = ["task-missing"];
+    fs.writeFileSync(path.join(repo, ".agentbrain", "project.json"), JSON.stringify(project, null, 2));
+
+    const result = spawnSync("node", [CLI, "doctor"], { cwd: repo, encoding: "utf8" });
+
+    expect(result.stdout).toContain("✗ Task worktrees");
+    expect(result.stdout).toContain("fix: Run agentbrain worktree prune");
+    expect(result.stdout).toContain("✗ Queue");
+    expect(result.stdout).toContain("fix: Run agentbrain queue remove task-missing");
+  });
 });

@@ -71,6 +71,18 @@ describe("task worktrees", () => {
     const cpDir = path.join(repo, ".agentbrain/tasks", a, "checkpoints");
     const reasons = fs.readdirSync(cpDir).filter((f) => f.endsWith(".json")).map((f) => readJson(path.join(cpDir, f)).stopReason);
     expect(reasons.some((r: string) => /^commit \w+: add login$/.test(r))).toBe(true);
+
+    // A commit in the main checkout does not belong to a task that has its own worktree,
+    // even when that task is the active one.
+    ab(repo, ["task", "use", a], env);
+    fs.writeFileSync(path.join(repo, "main-only.ts"), "x\n");
+    execFileSync("git", ["add", "main-only.ts"], { cwd: repo, env: { ...process.env, ...env } });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "main checkout work"], {
+      cwd: repo,
+      env: { ...process.env, ...env },
+    });
+    const after = fs.readdirSync(cpDir).filter((f) => f.endsWith(".json")).map((f) => readJson(path.join(cpDir, f)).stopReason);
+    expect(after.some((r: string) => /main checkout work/.test(r))).toBe(false);
   });
 
   it("launches agents inside the task's worktree", () => {
@@ -131,5 +143,53 @@ describe("task worktrees", () => {
     expect(result.stdout).toContain("- README.md");
     expect(fs.existsSync(wtB)).toBe(true);
     execFileSync("git", ["merge", "--abort"], { cwd: repo });
+  });
+
+  it("lists the task's commits in the brief", () => {
+    const repo = tempRepo("agentbrain-wt-");
+    ab(repo, ["init"]);
+    const a = createTask(repo, "Build login", true);
+    const wt = taskJson(repo, a).worktree.path;
+    for (const [file, msg] of [["a.ts", "Add login form"], ["b.ts", "Validate passwords"]]) {
+      fs.writeFileSync(path.join(wt, file), "x\n");
+      execFileSync("git", ["add", "-A"], { cwd: wt });
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", msg], { cwd: wt });
+    }
+    const brief = ab(repo, ["resume", a]).stdout;
+    expect(brief).toContain("## Commits on this task (newest first)");
+    expect(brief).toMatch(/- \w+ Validate passwords\n- \w+ Add login form/);
+  });
+
+  it("prunes only finished, merged, clean worktrees", () => {
+    const repo = tempRepo("agentbrain-wt-");
+    ab(repo, ["init"]);
+    const commitIn = (cwd: string, file: string) => {
+      fs.writeFileSync(path.join(cwd, file), "x\n");
+      execFileSync("git", ["add", "-A"], { cwd });
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", file], { cwd });
+    };
+    const done = createTask(repo, "Merged and done", true);
+    commitIn(taskJson(repo, done).worktree.path, "done.ts");
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-ff", "-m", "m", `agentbrain/${done}`], { cwd: repo });
+    ab(repo, ["task", "update", "--task", done, "--status", "done"]);
+    const open = createTask(repo, "Still running", true);
+    const unmerged = createTask(repo, "Done but unmerged", true);
+    commitIn(taskJson(repo, unmerged).worktree.path, "u.ts");
+    ab(repo, ["task", "update", "--task", unmerged, "--status", "done"]);
+
+    const dry = ab(repo, ["worktree", "prune", "--branches", "--dry-run"]).stdout;
+    expect(dry).toContain(`would remove 1 worktree(s): ${done}`);
+    expect(fs.existsSync(taskJson(repo, done).worktree.path)).toBe(true);
+
+    const out = ab(repo, ["worktree", "prune", "--branches"]).stdout;
+    expect(out).toContain(`removed 1 worktree(s): ${done}`);
+    expect(out).toContain("deleted 1 merged branch(es)");
+    expect(out).toContain(`kept ${open}: task is idle`);
+    expect(out).toContain(`kept ${unmerged}: agentbrain/${unmerged} has unmerged commits`);
+    expect(taskJson(repo, done).worktree).toBeUndefined();
+    expect(fs.existsSync(taskJson(repo, open).worktree.path)).toBe(true);
+    const branches = execFileSync("git", ["branch", "--list", "agentbrain/*"], { cwd: repo, encoding: "utf8" });
+    expect(branches).not.toContain(done);
+    expect(branches).toContain(unmerged);
   });
 });

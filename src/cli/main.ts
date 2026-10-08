@@ -8,6 +8,7 @@ import { ACP_AGENTS, BUILTIN_AGENTS, acpAgent, builtinAdapter, customAdapter } f
 import { TOOL_KINDS, type ToolKind } from "../adapters/acp.js";
 import { requestStop, runHeadless, sendToSession, sessionControl } from "../core/headless.js";
 import { routeTask } from "../core/routing.js";
+import { addToQueue, readQueue, removeFromQueue, shiftQueue, waitUntilSettled } from "../core/queue.js";
 import { runTui } from "../ui/tui.js";
 import {
   buildPrompt,
@@ -29,14 +30,14 @@ import { RULES_TARGETS, writeRules } from "../core/rules.js";
 import { findSession, getProject, getTask, initStore, listSessions, listTasks, sessionAlive } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 import { describeActivity, taskActivity } from "../core/stall.js";
-import { addWorktree, mergeWorktree, removeWorktree, taskWorkdir } from "../core/worktree.js";
+import { addWorktree, mergeWorktree, pruneWorktrees, removeWorktree, taskWorkdir } from "../core/worktree.js";
 import { taskTimeline } from "../core/timeline.js";
 import { pruneTask } from "../core/prune.js";
 import { exportTask } from "../core/export.js";
 import { startUiServer } from "../ui/server.js";
 
 const USAGE = `
-AgentBrain 0.9 — move coding tasks between AI agents without losing state
+AgentBrain 0.10 — move coding tasks between AI agents without losing state
 
 Live view
   agentbrain                              Every task and agent, live (keyboard and mouse)
@@ -62,6 +63,8 @@ Tasks
   agentbrain worktree remove [task-id] [--force]
                                           Remove it; the agentbrain/<id> branch is kept
   agentbrain worktree merge [task-id]     Merge its branch into the current branch, then remove it
+  agentbrain worktree prune [--branches] [--dry-run]
+                                          Remove worktrees (and merged branches) of finished tasks
   agentbrain worktree list
   agentbrain task update [--task <id>] [--status <s>] [--done <x>]... [--todo <x>]...
         [--decision <x>]... [--failure <x>]... [--fixed <x|n>]... [--blocker <x>]... [--unblock <x|n>]...
@@ -73,6 +76,7 @@ Switching agents
   agentbrain export [task-id] [--out <file>]
                                           Export a portable Markdown brief and history
   agentbrain run <agent> [task-id]        Launch a terminal agent on the task; auto-handoff on exit
+  agentbrain run vscode [task-id] --here  Send the task to the VS Code chat you already have open (no new window)
   agentbrain run [task-id] --agent <id> -- <command> [args...]
                                           Launch any other agent ({prompt}, {prompt_file} expand)
   agentbrain run <agent> [task-id] --headless [--allow <kinds>] [--max-turns N] [--timeout <min>]
@@ -82,6 +86,9 @@ Switching agents
                                           --run launches the top suggestion
   agentbrain run <agent> [task-id] --headless --detach [--linger <min>]
                                           Same, in the background; --linger keeps the agent for follow-ups
+  agentbrain queue add <task-id>...       Line up tasks for one agent
+  agentbrain queue list | remove <task-id>...
+  agentbrain queue run <agent> [--here]   Hand queued tasks to the agent one after another
   agentbrain attach <session-id>          Watch a headless agent live and send it messages
   agentbrain stop <session-id>            Stop a headless agent; the task is handed off
   agentbrain checkpoint [task-id] [--reason <text>]
@@ -148,6 +155,9 @@ function parseCli() {
         timeout: { type: "string" },
         "in-place": { type: "boolean" },
         detach: { type: "boolean" },
+        here: { type: "boolean" },
+        branches: { type: "boolean" },
+        poll: { type: "string" },
         linger: { type: "string" },
         port: { type: "string" },
         force: { type: "boolean" },
@@ -365,6 +375,29 @@ async function runHeadlessCli(agentName: string | undefined, taskArg: string | u
   if (result.status !== "done" && result.status !== "review") process.exitCode = 1;
 }
 
+/**
+ * `agentbrain queue run <agent> [--here]`: hand queued tasks to one agent, one
+ * after another. Each task is launched like `agentbrain run`; detached agents
+ * (VS Code) are watched until the task settles before the next is sent.
+ */
+async function queueRun(agentName: string | undefined): Promise<void> {
+  const cwd = root();
+  if (!agentName && !passthrough.length) throw new Error("Usage: agentbrain queue run <agent> [--here] [--headless]");
+  const pollMs = flags.poll === undefined ? 3000 : positiveNumber("poll", flags.poll) * 1000;
+  for (let taskId = shiftQueue(cwd); taskId; taskId = shiftQueue(cwd)) {
+    const task = getTask(cwd, taskId);
+    console.log(`\n▶ queue: ${taskId} — ${task.objective} (${readQueue(cwd).length} more after this)`);
+    await run(agentName, taskId);
+    const status = await waitUntilSettled(cwd, taskId, pollMs);
+    console.log(`✓ queue: ${taskId} is ${status}`);
+    if (status === "blocked" || status === "failed") {
+      console.log("  Stopping the queue: this task needs you. Resume with: agentbrain queue run " + (agentName ?? ""));
+      return;
+    }
+  }
+  console.log("\nQueue is empty.");
+}
+
 async function run(agentName: string | undefined, taskArg: string | undefined): Promise<void> {
   if (flags.headless) return runHeadlessCli(agentName, taskArg);
   const cwd = root();
@@ -407,6 +440,7 @@ async function run(agentName: string | undefined, taskArg: string | undefined): 
   process.on("SIGINT", ignore);
   const session = await adapter.resume({
     cwd: workdir,
+    here: flags.here,
     taskId,
     objective: getTask(cwd, taskId).objective,
     handoff: prompt,
@@ -726,6 +760,18 @@ async function main(): Promise<void> {
     if (!session) throw new Error("Usage: agentbrain stop <session-id>");
     requestStop(cwd, session.agentId, session.sessionId);
     console.log(`✓ Asked ${session.agentId} (${session.sessionId}) to stop; it will hand off the task.`);
+  } else if (command === "queue" && subcommand === "add") {
+    const queue = addToQueue(root(), rest);
+    console.log(`✓ Queue: ${queue.join(", ")}`);
+  } else if (command === "queue" && subcommand === "remove") {
+    console.log(`✓ Queue: ${removeFromQueue(root(), rest).join(", ") || "(empty)"}`);
+  } else if (command === "queue" && subcommand === "list") {
+    const cwd = root();
+    const queue = readQueue(cwd);
+    if (!queue.length) console.log("Queue is empty.");
+    queue.forEach((id, i) => console.log(`${i + 1}. ${id}\t${getTask(cwd, id).status}\t${getTask(cwd, id).objective}`));
+  } else if (command === "queue" && subcommand === "run") {
+    await queueRun(rest[0]);
   } else if (command === "route") {
     await route(subcommand);
   } else if (command === "agents") {
@@ -751,6 +797,12 @@ async function main(): Promise<void> {
     } else {
       console.log(`✓ Merged ${merged} commit(s) from agentbrain/${task.id} and removed its worktree.`);
     }
+  } else if (command === "worktree" && subcommand === "prune") {
+    const result = pruneWorktrees(root(), { branches: flags.branches, dryRun: flags["dry-run"] });
+    const verb = flags["dry-run"] ? "would remove" : "removed";
+    console.log(`${verb} ${result.removed.length} worktree(s)${result.removed.length ? `: ${result.removed.join(", ")}` : ""}`);
+    if (flags.branches) console.log(`${flags["dry-run"] ? "would delete" : "deleted"} ${result.deletedBranches.length} merged branch(es)`);
+    for (const s of result.skipped) console.log(`  kept ${s.taskId}: ${s.reason}`);
   } else if (command === "worktree" && subcommand === "list") {
     const cwd = root();
     for (const task of listTasks(cwd).filter((t) => t.worktree)) {

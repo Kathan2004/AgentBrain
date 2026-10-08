@@ -237,6 +237,8 @@ is as lossless as the current one.
   pasted handoff. It exposes these tools:
 
   - `agentbrain_brief`
+  - `agentbrain_log` (read-only task timeline)
+  - `agentbrain_route` (read-only routing suggestions; the developer decides)
   - `agentbrain_update`
   - `agentbrain_handoff`
   - `agentbrain_checkpoint`

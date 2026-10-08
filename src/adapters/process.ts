@@ -30,10 +30,10 @@ export interface ProcessAgentDefinition {
    * agent hands off itself via the AgentBrain instructions.
    */
   detached?: boolean;
-  /** Runs before the agent (same executable), e.g. to open the project window. */
-  prepare?(cwd: string): string[];
+  /** Runs before the agent (same executable), e.g. to open the project window. Empty: skip. */
+  prepare?(cwd: string, here: boolean): string[];
   /** Builds argv (without the command) from the prompt text and prompt file. */
-  args(prompt: string, promptFile: string, cwd: string): string[];
+  args(prompt: string, promptFile: string, cwd: string, here: boolean): string[];
 }
 
 /**
@@ -79,15 +79,16 @@ export class ProcessAdapter implements AgentAdapter {
   async start(context: AgentContext): Promise<AgentSession> {
     const executable = this.resolve() ?? this.definition.command;
     const env = this.env(context);
-    if (this.definition.prepare) {
-      const result = spawnSync(executable, this.definition.prepare(context.cwd), {
+    const prepareArgs = this.definition.prepare?.(context.cwd, Boolean(context.here)) ?? [];
+    if (prepareArgs.length) {
+      const result = spawnSync(executable, prepareArgs, {
         cwd: context.cwd,
         env,
         stdio: "inherit",
       });
       if (result.error) throw result.error;
     }
-    const child = spawn(executable, this.definition.args(context.handoff, context.promptFile, context.cwd), {
+    const child = spawn(executable, this.definition.args(context.handoff, context.promptFile, context.cwd, Boolean(context.here)), {
       cwd: context.cwd,
       env,
       stdio: "inherit",

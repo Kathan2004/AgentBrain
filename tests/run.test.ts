@@ -88,6 +88,23 @@ describe("agentbrain run", () => {
     expect(codexSession.endedAt).toBeTruthy();
   });
 
+  it("queue run hands tasks to the agent one after another", () => {
+    const first = activeTask(repo).id;
+    ab(repo, ["task", "create", "Second task"], env);
+    const second = activeTask(repo).id;
+    ab(repo, ["task", "create", "Third task"], env);
+    const third = activeTask(repo).id;
+    ab(repo, ["task", "update", "--task", second, "--status", "done"], env); // already finished: skipped
+    expect(ab(repo, ["queue", "add", first, second, third], env).stdout).toContain(`${first}, ${second}, ${third}`);
+    const out = ab(repo, ["queue", "run", "--agent", "stub", "--poll", "0.2", "--", "bash", "-c",
+      'agentbrain task update --task "$AGENTBRAIN_TASK" --done 1 --status review >/dev/null'], env).stdout;
+    expect(out).toContain(`queue: ${first} is review`);
+    expect(out).toContain(`queue: ${third} is review`);
+    expect(out).not.toContain(`▶ queue: ${second}`);
+    expect(out).toContain("Queue is empty.");
+    expect(ab(repo, ["queue", "list"], env).stdout).toContain("Queue is empty.");
+  });
+
   it("runs any command via -- with {prompt_file}", () => {
     stubAgent(bin, "my-agent", `cp "$1" "$AGENTBRAIN_ROOT/../$(basename "$AGENTBRAIN_ROOT")-custom.txt"
       agentbrain task update --status review --next "Review"`);
@@ -140,6 +157,17 @@ describe("agentbrain run", () => {
     expect(fs.readFileSync(`${log}.env`, "utf8")).toBe("unset");
   });
 
+  it("--here sends the task to the open chat without opening a window", () => {
+    const log = `${repo}-code-here.txt`;
+    stubAgent(bin, "code", `printf '%s\\n' "$@" >> ${JSON.stringify(log)}; printf -- '--\\n' >> ${JSON.stringify(log)}`);
+    ab(repo, ["run", "vscode", "--here"], env);
+    const calls = fs.readFileSync(log, "utf8").trim().split("--\n").filter(Boolean);
+    expect(calls).toHaveLength(1); // no "open folder" call
+    const args = calls[0].trim().split("\n");
+    expect(args.slice(0, 5)).toEqual(["chat", "--mode", "agent", "--reuse-window", "--add-file"]);
+    expect(args.join(" ")).toContain(`Work ONLY in ${fs.realpathSync(repo)}`);
+  });
+
   it("sends VS Code a plain 'continue' when the MCP server is connected", () => {
     const log = `${repo}-code-mcp.txt`;
     stubAgent(bin, "code", `printf '%s\\n' "$@" >> ${JSON.stringify(log)}`);
@@ -189,6 +217,13 @@ describe("agentbrain run", () => {
     const task = activeTask(repo);
     expect(task.failures).toEqual(["Login 500s"]);
     expect(task.blockers).toEqual([]);
+  });
+
+  it("finishing a task closes its objective item", () => {
+    ab(repo, ["task", "update", "--todo", "Write tests", "--done", "Write tests", "--status", "review"], env);
+    const task = activeTask(repo);
+    expect(task.remaining).toEqual([]);
+    expect(task.completed).toContain("Implement OAuth login");
   });
 
   it("clears a next action once it is completed", () => {

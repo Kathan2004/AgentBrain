@@ -96,6 +96,8 @@ describe("MCP server", () => {
     const tools = await client.request("tools/list");
     expect(tools.result.tools.map((t: any) => t.name)).toEqual([
       "agentbrain_brief",
+      "agentbrain_log",
+      "agentbrain_route",
       "agentbrain_update",
       "agentbrain_handoff",
       "agentbrain_checkpoint",
@@ -105,6 +107,21 @@ describe("MCP server", () => {
 
     const brief = await client.call("agentbrain_brief");
     expect(brief.text).toContain("1. Refresh-token rotation");
+
+    const log = await client.call("agentbrain_log");
+    expect(log.text).toMatch(/codex handoff usage limit/);
+    // Routing only lists installed agents: provide one so this works on any machine (CI has none).
+    const bin = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "agentbrain-bin-"));
+    fs.writeFileSync(path.join(bin, "gemini"), "#!/bin/sh\n");
+    fs.chmodSync(path.join(bin, "gemini"), 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${originalPath}`;
+    try {
+      const route = await client.call("agentbrain_route");
+      expect(route.text).toMatch(/Gemini CLI\tterminal\tscore -?\d+\t[^\n]*\tagentbrain run gemini /);
+    } finally {
+      process.env.PATH = originalPath;
+    }
 
     // The task was handed off, so whoever reads its brief picks it up.
     expect(activeTask(repo)).toMatchObject({ status: "running", agent: { id: "claude-code" } });

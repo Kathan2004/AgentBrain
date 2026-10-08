@@ -18,6 +18,8 @@ export interface AgentContext {
   promptFile: string;
   /** Extra environment for the agent process. */
   env: Record<string, string>;
+  /** Deliver to the agent's already-open session instead of opening the task's folder (`run vscode --here`). */
+  here?: boolean;
 }
 
 export interface ExitInfo {

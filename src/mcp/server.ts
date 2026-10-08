@@ -24,12 +24,14 @@ import {
   type TaskPatch,
 } from "../core/actions.js";
 import { findRoot } from "../core/paths.js";
+import { routeTask } from "../core/routing.js";
+import { taskTimeline } from "../core/timeline.js";
 import { taskForDir } from "../core/worktree.js";
 import { getProject, getTask, listTasks } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-const SERVER_VERSION = "0.9.0";
+const SERVER_VERSION = "0.10.0";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 interface Message {
@@ -62,6 +64,16 @@ const TOOLS = [
       "Get the live state of the active AgentBrain task (or task_id): objective, completed and remaining " +
       "work, decisions, known failures, blockers, Git state and next action. Call this before starting or " +
       "continuing work on the project's task.",
+    inputSchema: { type: "object", properties: { task_id: { type: "string" } } },
+  },
+  {
+    name: "agentbrain_log",
+    description: "Show the task timeline oldest first as dated agent events. This is read-only and does not claim the task.",
+    inputSchema: { type: "object", properties: { task_id: { type: "string" } } },
+  },
+  {
+    name: "agentbrain_route",
+    description: "Suggest available agents for the task with scores, reasons and commands. This only suggests; the developer decides which agent to use.",
     inputSchema: { type: "object", properties: { task_id: { type: "string" } } },
   },
   {
@@ -445,6 +457,22 @@ export class AgentBrainMcpServer {
         const tasks = listTasks(root);
         if (!tasks.length) return "No tasks yet.";
         return tasks.map((t) => `${t.id === active ? "*" : " "} ${t.id}\t${t.status}\t${t.objective}`).join("\n");
+      }
+      case "agentbrain_log": {
+        const root = this.requireRoot();
+        const taskId = resolveTaskId(root, args.task_id, this.agent.id, this.workdir);
+        return taskTimeline(root, taskId).map((event) =>
+          `${event.timestamp.slice(0, 16).replace("T", " ")} ${event.agent} ${event.event} ${event.reason}`,
+        ).join("\n") || "No timeline events.";
+      }
+      case "agentbrain_route": {
+        const root = this.requireRoot();
+        const taskId = resolveTaskId(root, args.task_id, this.agent.id, this.workdir);
+        const candidates = routeTask(root, taskId).filter((candidate) => candidate.available);
+        if (!candidates.length) return "No available agents.";
+        return candidates.map((candidate) =>
+          `${candidate.name}\t${candidate.mode}\tscore ${candidate.score}\t${candidate.reasons.join("; ") || "no recorded reason"}\t${candidate.command}`,
+        ).join("\n");
       }
       case "agentbrain_create_task": {
         const root = this.requireRoot();

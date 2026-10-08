@@ -13,6 +13,8 @@ export interface ProjectState {
   stallMinutes?: number;
   /** Routing preferences for `agentbrain route`: agent ids, best first / never suggest. */
   agents?: { prefer?: string[]; avoid?: string[] };
+  /** Task ids waiting for `agentbrain queue run`, next first. */
+  queue?: string[];
 }
 
 export function writeJson(file: string, value: unknown): void {

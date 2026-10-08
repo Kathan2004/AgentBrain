@@ -132,3 +132,57 @@ export function mergeWorktree(root: string, taskId: string): MergeResult {
   removeWorktree(root, task.id);
   return { task: getTask(root, task.id), merged, conflicts: [] };
 }
+
+export interface PruneWorktreesResult {
+  removed: string[];
+  deletedBranches: string[];
+  skipped: { taskId: string; reason: string }[];
+}
+
+/**
+ * Cleans up after finished work: removes worktrees of tasks that are done
+ * and whose branch is fully merged into the main checkout's HEAD, and with
+ * `branches`, deletes merged agentbrain/<id> branches. Never touches a task
+ * that isn't done, a branch with unmerged commits, or uncommitted changes.
+ */
+export function pruneWorktrees(root: string, options: { branches?: boolean; dryRun?: boolean } = {}): PruneWorktreesResult {
+  const result: PruneWorktreesResult = { removed: [], deletedBranches: [], skipped: [] };
+  if (!options.dryRun) git(root, ["worktree", "prune"]);
+  const merged = (branch: string) => {
+    try {
+      return Number(git(root, ["rev-list", "--count", `HEAD..${branch}`])) === 0;
+    } catch {
+      return false;
+    }
+  };
+
+  for (const task of listTasks(root)) {
+    if (!task.worktree) continue;
+    const { branch, path: wtPath } = task.worktree;
+    if (task.status !== "done") {
+      result.skipped.push({ taskId: task.id, reason: `task is ${task.status}` });
+      continue;
+    }
+    if (!merged(branch)) {
+      result.skipped.push({ taskId: task.id, reason: `${branch} has unmerged commits` });
+      continue;
+    }
+    if (fs.existsSync(wtPath) && git(wtPath, ["status", "--porcelain"])) {
+      result.skipped.push({ taskId: task.id, reason: "uncommitted changes in its worktree" });
+      continue;
+    }
+    if (!options.dryRun) removeWorktree(root, task.id);
+    result.removed.push(task.id);
+  }
+
+  if (options.branches) {
+    const branches = git(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads/agentbrain/"]).split("\n").filter(Boolean);
+    const inUse = new Set(listTasks(root).filter((t) => t.worktree && !result.removed.includes(t.id)).map((t) => t.worktree!.branch));
+    for (const branch of branches) {
+      if (inUse.has(branch) || !merged(branch)) continue;
+      if (!options.dryRun) git(root, ["branch", "-d", branch]);
+      result.deletedBranches.push(branch);
+    }
+  }
+  return result;
+}
