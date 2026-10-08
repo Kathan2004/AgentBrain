@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.0
+- `task update --drop` (and MCP `drop`): remove wrong or duplicate to-do items without marking them done
+- The task queue shows in the live terminal view and the web page
+- `worktree prune --branches` recognizes squash-merged branches
+
 ## 0.11.0
 - `agentbrain notify`: desktop notifications when a task reaches review, done, blocked, failed or handoff, or stalls
 - `--json` for `status`, `task list`, `log` and `route`

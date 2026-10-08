@@ -199,7 +199,7 @@ agentbrain task update --done "OAuth callback" --todo "Refresh-token rotation" \
 ```
 
 `status` and the brief number the remaining items and known failures, so
-`--done 2` completes remaining item 2 and `--fixed 1` clears failure 1.
+`--done 2` completes remaining item 2, `--drop 1` removes a wrong or duplicate item without marking it finished, and `--fixed 1` clears failure 1.
 
 When the agent exits without handing off (usage limit, crash, Ctrl-C, closed
 terminal), AgentBrain records a handoff with the reason. Built in: `claude`,

@@ -473,6 +473,9 @@ briefs, MCP log and route tools, CI on Linux and macOS.
 ### V0.11 — done
 `agentbrain notify`, `--json` output, worktrees by default.
 
+### V0.12 — done
+`task update --drop`, queue in the live views, squash-aware worktree prune.
+
 ### Next
 Trying headless runs against real ACP agents.
 

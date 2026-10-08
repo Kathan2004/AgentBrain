@@ -170,6 +170,18 @@ describe("MCP server", () => {
     await client.close();
   });
 
+  it("drops wrong or duplicate remaining items without completing them", async () => {
+    const repo = project();
+    const client = connect({ root: repo });
+    await client.initialize("Visual Studio Code");
+    await client.call("agentbrain_update", { todo: ["Wrong item", "Duplicate item"] });
+    const result = await client.call("agentbrain_update", { drop: ["Duplicate item", "Wrong item"] });
+    expect(result.isError).toBe(false);
+    expect(activeTask(repo).remaining).toEqual(["Refresh-token rotation"]);
+    expect(activeTask(repo).completed).toEqual(["Implement OAuth login", "OAuth callback"]);
+    await client.close();
+  });
+
   it("does not hand off on disconnect if the agent already finished", async () => {
     const repo = project();
     const client = connect({ root: repo });

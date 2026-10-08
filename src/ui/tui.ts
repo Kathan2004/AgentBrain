@@ -202,7 +202,8 @@ export function renderFrame(root: string, snap: Snapshot, state: TuiState, width
   const selected = tasks[Math.min(state.selected, tasks.length - 1)];
   const live = snap.sessions.filter((s) => s.alive).length;
 
-  const header = fit(` ${bold("AgentBrain")}  ${dim(snap.root)}  ${tasks.length} task(s), ${live} agent(s) running headless`, width);
+  const queue = snap.queue;
+  const header = fit(` ${bold("AgentBrain")}  ${dim(snap.root)}  ${tasks.length} task(s), ${live} agent(s) running headless${queue.length ? `, queue: ${queue.length}` : ""}`, width);
   const tabs: Frame["tabs"] = [];
   let tabLine = " ";
   VIEWS.forEach((v, i) => {
@@ -224,6 +225,10 @@ export function renderFrame(root: string, snap: Snapshot, state: TuiState, width
     listRows.set(3 + list.length, i); // screen rows are 1-based; body starts on row 3
     list.push(style(fit(` ${meta}`, listWidth)));
   });
+  if (queue.length) {
+    list.push(bold(" Queued"));
+    queue.forEach((item) => list.push(fit(dim(` ${item.objective}`), listWidth)));
+  }
   if (!tasks.length) list.push(fit(dim(" No tasks. agentbrain task create \"...\""), listWidth));
 
   // Right: details for the selected task.
@@ -248,7 +253,7 @@ export function renderFrame(root: string, snap: Snapshot, state: TuiState, width
 function renderNarrow(root: string, snap: Snapshot, state: TuiState, width: number, height: number, now: Date): Frame {
   const tasks = snap.tasks;
   const selected = tasks[Math.min(state.selected, tasks.length - 1)];
-  const lines: string[] = [fit(` ${bold("AgentBrain")} ${dim(`${tasks.length} task(s)`)}`, width)];
+  const lines: string[] = [fit(` ${bold("AgentBrain")} ${dim(`${tasks.length} task(s)${snap.queue.length ? `, queue: ${snap.queue.length}` : ""}`)}`, width)];
   const listRows = new Map<number, number>();
 
   // Compact list, scrolled to keep the selection visible.
@@ -261,6 +266,12 @@ function renderNarrow(root: string, snap: Snapshot, state: TuiState, width: numb
     lines.push(i === state.selected ? c("7", fit(row, width)) : fit(row, width));
   }
   if (!tasks.length) lines.push(fit(dim(" No tasks yet."), width));
+  if (snap.queue.length) {
+    lines.push(fit(bold(" Queued"), width));
+    // Keep room for the details pane on small terminals.
+    for (const item of snap.queue.slice(0, 3)) lines.push(fit(dim(` ${item.objective}`), width));
+    if (snap.queue.length > 3) lines.push(fit(dim(` +${snap.queue.length - 3} more`), width));
+  }
 
   const tabs: Frame["tabs"] = [];
   let tabLine = "";

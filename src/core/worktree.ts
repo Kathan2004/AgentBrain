@@ -1,5 +1,6 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { worktreesDir } from "./paths.js";
 import type { TaskState } from "./state.js";
@@ -129,8 +130,42 @@ export function mergeWorktree(root: string, taskId: string): MergeResult {
     const conflicts = git(root, ["diff", "--name-only", "--diff-filter=U"]).split("\n").filter(Boolean);
     return { task, merged, conflicts };
   }
+  // Remember exactly what was merged: after a squash, Git alone can no longer tell.
+  const tip = git(root, ["rev-parse", branch]);
   removeWorktree(root, task.id);
-  return { task: getTask(root, task.id), merged, conflicts: [] };
+  const after = getTask(root, task.id);
+  after.merged = { branch, commit: tip, at: new Date().toISOString() };
+  saveTask(root, after);
+  return { task: after, merged, conflicts: [] };
+}
+
+/**
+ * Is everything on `branch` already in HEAD? True when HEAD contains the
+ * branch's commits, or, after a squash merge (whose commits never reach HEAD,
+ * often followed by more edits to the same lines), when the branch's own
+ * changes can be cleanly undone from HEAD, which means they are all there.
+ * Anything uncertain counts as not merged.
+ */
+export function branchMerged(root: string, branch: string): boolean {
+  try {
+    if (Number(git(root, ["rev-list", "--count", `HEAD..${branch}`])) === 0) return true;
+    const base = spawnSync("git", ["merge-base", "HEAD", branch], { cwd: root, encoding: "utf8" });
+    if (base.status !== 0) return false; // no shared history: can't tell
+    const patch = git(root, ["diff", "--binary", base.stdout.trim(), branch]);
+    if (!patch) return true;
+    // Check against HEAD in a throwaway index, so the working tree is never touched.
+    const index = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "agentbrain-idx-")), "index");
+    const env = { ...process.env, GIT_INDEX_FILE: index };
+    try {
+      if (spawnSync("git", ["read-tree", "HEAD"], { cwd: root, env }).status !== 0) return false;
+      const check = spawnSync("git", ["apply", "--cached", "--check", "--reverse", "-C1"], { cwd: root, env, input: patch + "\n" });
+      return check.status === 0;
+    } finally {
+      fs.rmSync(path.dirname(index), { recursive: true, force: true });
+    }
+  } catch {
+    return false;
+  }
 }
 
 export interface PruneWorktreesResult {
@@ -148,13 +183,7 @@ export interface PruneWorktreesResult {
 export function pruneWorktrees(root: string, options: { branches?: boolean; dryRun?: boolean } = {}): PruneWorktreesResult {
   const result: PruneWorktreesResult = { removed: [], deletedBranches: [], skipped: [] };
   if (!options.dryRun) git(root, ["worktree", "prune"]);
-  const merged = (branch: string) => {
-    try {
-      return Number(git(root, ["rev-list", "--count", `HEAD..${branch}`])) === 0;
-    } catch {
-      return false;
-    }
-  };
+  const merged = (branch: string) => branchMerged(root, branch);
 
   for (const task of listTasks(root)) {
     if (!task.worktree) continue;
@@ -178,9 +207,13 @@ export function pruneWorktrees(root: string, options: { branches?: boolean; dryR
   if (options.branches) {
     const branches = git(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads/agentbrain/"]).split("\n").filter(Boolean);
     const inUse = new Set(listTasks(root).filter((t) => t.worktree && !result.removed.includes(t.id)).map((t) => t.worktree!.branch));
+    // Branches AgentBrain merged itself (and that haven't moved since) are known merged.
+    const recorded = new Map(listTasks(root).filter((t) => t.merged).map((t) => [t.merged!.branch, t.merged!.commit]));
     for (const branch of branches) {
-      if (inUse.has(branch) || !merged(branch)) continue;
-      if (!options.dryRun) git(root, ["branch", "-d", branch]);
+      const known = recorded.get(branch) === git(root, ["rev-parse", branch]);
+      if (inUse.has(branch) || (!known && !merged(branch))) continue;
+      // -D: git's own check misses squash merges; merged() above verified nothing would be lost.
+      if (!options.dryRun) git(root, ["branch", "-D", branch]);
       result.deletedBranches.push(branch);
     }
   }

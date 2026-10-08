@@ -39,6 +39,8 @@ export interface TaskState {
   agent?: AgentRef;
   /** Status changes, oldest first (capped): who moved the task where, and when. */
   events?: TaskEvent[];
+  /** Set by `agentbrain worktree merge`: which branch tip was merged, so cleanup can trust it after a squash. */
+  merged?: { branch: string; commit: string; at: string };
   /** The task's own Git worktree, when it has one (`agentbrain worktree add`). */
   worktree?: { path: string; branch: string; base: string };
 }

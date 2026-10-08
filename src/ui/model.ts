@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { getGitState, type GitState } from "../core/git.js";
+import { readQueue } from "../core/queue.js";
 import { describeActivity, taskActivity } from "../core/stall.js";
 import type { AgentSessionState, TaskState } from "../core/state.js";
 import { getProject, listSessions, listTasks, sessionAlive } from "../core/store.js";
@@ -49,6 +50,7 @@ export interface Snapshot {
   root: string;
   at: string;
   tasks: LiveTask[];
+  queue: { id: string; objective: string; status: TaskState["status"] }[];
   sessions: LiveSession[];
 }
 
@@ -71,7 +73,13 @@ const ORDER: Record<string, number> = { running: 0, blocked: 1, handoff: 2, chec
 export function snapshot(root: string, options: { includeDone?: boolean } = {}): Snapshot {
   const active = getProject(root).activeTaskId;
   const sessions = listSessions(root).map(liveSession);
-  const tasks = listTasks(root)
+  const allTasks = listTasks(root);
+  const taskById = new Map(allTasks.map((task) => [task.id, task]));
+  const queue = readQueue(root).flatMap((id) => {
+    const task = taskById.get(id);
+    return task ? [{ id: task.id, objective: task.objective, status: task.status }] : [];
+  });
+  const tasks = allTasks
     .filter((t) => options.includeDone || t.status !== "done" || t.id === active)
     .map((task): LiveTask => {
       const workdir = taskWorkdir(root, task);
@@ -97,7 +105,7 @@ export function snapshot(root: string, options: { includeDone?: boolean } = {}):
       };
     })
     .sort((a, b) => (ORDER[a.status] ?? 9) - (ORDER[b.status] ?? 9) || (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
-  return { root, at: new Date().toISOString(), tasks, sessions };
+  return { root, at: new Date().toISOString(), tasks, queue, sessions };
 }
 
 /** Last `lines` lines of a headless session's transcript. */

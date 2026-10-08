@@ -6,6 +6,7 @@ import { startUiServer } from "../src/ui/server.js";
 import { createTask } from "../src/core/actions.js";
 import { initStore, saveSession } from "../src/core/store.js";
 import { sessionControl } from "../src/core/headless.js";
+import { addToQueue } from "../src/core/queue.js";
 import { tempRepo } from "./helpers.js";
 
 async function request(base: string, route: string, options: RequestInit = {}): Promise<Response> {
@@ -28,6 +29,8 @@ describe("local UI server", () => {
     const repo = tempRepo("agentbrain-ui-");
     initStore(repo);
     const task = createTask(repo, "Build the live dashboard");
+    const queued = createTask(repo, "Queued dashboard follow-up");
+    addToQueue(repo, [queued.id]);
     const sessionId = "ui-session";
     saveSession(repo, {
       schemaVersion: "0.1",
@@ -46,8 +49,9 @@ describe("local UI server", () => {
       const token = url.hash.slice("#token=".length);
       expect((await request(base, "/api/snapshot")).status).toBe(403);
       expect(await requestWithHost(url.port, `example.com:${url.port}`, token)).toBe(403);
-      const snapshot = await (await request(base, "/api/snapshot", { headers: { "x-agentbrain-token": token } })).json() as { tasks: { id: string }[] };
+      const snapshot = await (await request(base, "/api/snapshot", { headers: { "x-agentbrain-token": token } })).json() as { tasks: { id: string }[]; queue: { id: string; objective: string; status: string }[] };
       expect(snapshot.tasks.map((item) => item.id)).toContain(task.id);
+      expect(snapshot.queue).toEqual([{ id: queued.id, objective: "Queued dashboard follow-up", status: "idle" }]);
       const message = await request(base, "/api/message", {
         method: "POST",
         headers: { "x-agentbrain-token": token },

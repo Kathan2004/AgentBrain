@@ -31,7 +31,7 @@ import { getProject, getTask, listTasks } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-const SERVER_VERSION = "0.11.0";
+const SERVER_VERSION = "0.12.0";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 interface Message {
@@ -87,6 +87,7 @@ const TOOLS = [
       properties: {
         task_id: { type: "string" },
         done: listParam("Finished steps (text, or remaining-item numbers)"),
+        drop: listParam("Wrong or duplicate remaining items to remove, not finished work (text or numbers)"),
         todo: listParam("New remaining steps"),
         decisions: listParam("Decisions made, with the reason"),
         failures: listParam("What failed and how"),
@@ -496,6 +497,7 @@ export class AgentBrainMcpServer {
         const patch: TaskPatch = {
           status: args.status,
           done: strings(args.done),
+          drop: strings(args.drop),
           todo: strings(args.todo),
           decisions: strings(args.decisions),
           failures: strings(args.failures),

@@ -194,6 +194,14 @@ describe("agentbrain run", () => {
     expect(() => ab(repo, ["task", "update", "--todo", "6"], env)).toThrow("looks like an item number");
   });
 
+  it("drops wrong or duplicate remaining items without completing them", () => {
+    ab(repo, ["task", "update", "--todo", "Wrong item", "--todo", "Duplicate item"], env);
+    ab(repo, ["task", "update", "--drop", "3", "--drop", "Wrong item"], env);
+    const task = activeTask(repo);
+    expect(task.remaining).toEqual(["Implement OAuth login"]);
+    expect(task.completed).toEqual([]);
+  });
+
   it("routes an agent's commands to its own running task, not the active one", () => {
     ab(repo, ["task", "update", "--agent", "copilot", "--session", "p1", "--todo", "Write hook", "--done", "Write hook"], env);
     const mine = activeTask(repo).id;

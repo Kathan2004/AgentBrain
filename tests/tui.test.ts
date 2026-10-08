@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { createTask } from "../src/core/actions.js";
 import { snapshot } from "../src/ui/model.js";
 import { fit, handleKey, initialState, parseInput, renderFrame, visibleLength } from "../src/ui/tui.js";
 import { ab, readJson, tempRepo } from "./helpers.js";
@@ -36,6 +37,18 @@ describe("terminal live view", () => {
     expect(text).toContain("Use JWT");
     expect(text).toContain("worktree agentbrain/task-");
     for (const line of frame.lines) expect(visibleLength(line)).toBeLessThanOrEqual(140);
+  });
+
+  it("shows queued objectives and the queue count", () => {
+    const { repo } = project();
+    const queued = createTask(repo, "Queued report");
+    const projectFile = path.join(repo, ".agentbrain/project.json");
+    const projectState = readJson(projectFile) as { queue?: string[] };
+    projectState.queue = [queued.id, "missing-task"];
+    fs.writeFileSync(projectFile, `${JSON.stringify(projectState, null, 2)}\n`);
+    const text = plain(renderFrame(repo, snapshot(repo), initialState(), 140, 40).lines);
+    expect(text).toContain("queue: 1");
+    expect(text).toContain("Queued report");
   });
 
   it("shows the task's own worktree diff and its timeline", () => {

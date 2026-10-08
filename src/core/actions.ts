@@ -82,6 +82,7 @@ export function useTask(root: string, taskId: string): TaskState {
 export interface TaskPatch {
   status?: string;
   done?: string[];
+  drop?: string[];
   todo?: string[];
   decisions?: string[];
   failures?: string[];
@@ -131,12 +132,14 @@ export function updateTask(root: string, taskId: string, patch: TaskPatch): Task
   // New items first, so a step added and finished in the same update matches.
   for (const item of clean(patch.todo)) if (!task.remaining.includes(item)) task.remaining.push(item);
   const done = clean(patch.done).map(byNumber(task.remaining, "remaining"));
+  const dropped = new Set(clean(patch.drop).map(byNumber(task.remaining, "remaining")));
   const fixed = new Set(clean(patch.fixed).map(byNumber(task.failures, "known-failure")));
   const unblockSet = new Set(clean(patch.unblock).map(byNumber(task.blockers ?? [], "blocker")));
   for (const item of done) {
     task.remaining = task.remaining.filter((r) => r !== item);
     if (!task.completed.includes(item)) task.completed.push(item);
   }
+  task.remaining = task.remaining.filter((item) => !dropped.has(item));
   task.decisions.push(...clean(patch.decisions));
   task.failures = [...task.failures.filter((f) => !fixed.has(f)), ...clean(patch.failures)];
   task.blockers = [...(task.blockers ?? []).filter((b) => !unblockSet.has(b)), ...clean(patch.blockers)];

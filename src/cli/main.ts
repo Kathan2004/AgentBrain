@@ -39,7 +39,7 @@ import { defaultNotificationSender, watchNotifications } from "../core/notify.js
 import { snapshot as liveSnapshot } from "../ui/model.js";
 
 const USAGE = `
-AgentBrain 0.11 — move coding tasks between AI agents without losing state
+AgentBrain 0.12 — move coding tasks between AI agents without losing state
 
 Live view
   agentbrain                              Every task and agent, live (keyboard and mouse)
@@ -71,7 +71,7 @@ Tasks
                                           Remove worktrees (and merged branches) of finished tasks
   agentbrain worktree list
   agentbrain task update [--task <id>] [--status <s>] [--done <x>]... [--todo <x>]...
-        [--decision <x>]... [--failure <x>]... [--fixed <x|n>]... [--blocker <x>]... [--unblock <x|n>]...
+        [--drop <x|n>]... [--decision <x>]... [--failure <x>]... [--fixed <x|n>]... [--blocker <x>]... [--unblock <x|n>]...
         [--next <action>] [--agent <id>] [--session <id>]
   agentbrain status
 
@@ -140,6 +140,7 @@ function parseCli() {
         task: { type: "string" },
         status: { type: "string" },
         done: { type: "string", multiple: true },
+        drop: { type: "string", multiple: true },
         todo: { type: "string", multiple: true },
         decision: { type: "string", multiple: true },
         failure: { type: "string", multiple: true },
@@ -274,6 +275,7 @@ function update(): void {
   const task = updateTask(cwd, taskId, {
     status: flags.status,
     done: flags.done,
+    drop: flags.drop,
     todo: flags.todo,
     decisions: flags.decision,
     failures: flags.failure,

@@ -203,4 +203,41 @@ describe("task worktrees", () => {
     const b = id(ab(repo, ["task", "create", "Small docs fix", "--no-worktree"]).stdout);
     expect(taskJson(repo, b).worktree).toBeUndefined();
   });
+
+  it("treats a squash-merged task branch as merged when pruning", () => {
+    const repo = tempRepo("agentbrain-wt-");
+    ab(repo, ["init"]);
+    const a = createTask(repo, "Squash me", true);
+    const wt = taskJson(repo, a).worktree.path;
+    fs.writeFileSync(path.join(wt, "feature.ts"), "x\n");
+    execFileSync("git", ["add", "-A"], { cwd: wt });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "feature"], { cwd: wt });
+    // Squash merge: the branch's content lands on main as a new commit.
+    execFileSync("git", ["merge", "--squash", "-q", `agentbrain/${a}`], { cwd: repo });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "squashed"], { cwd: repo });
+    ab(repo, ["task", "update", "--task", a, "--status", "done"]);
+    const out = ab(repo, ["worktree", "prune", "--branches"]).stdout;
+    expect(out).toContain(`removed 1 worktree(s): ${a}`);
+    expect(out).toContain("deleted 1 merged branch(es)");
+  });
+
+  it("prunes a branch AgentBrain merged even after the history was squashed and edited", () => {
+    const repo = tempRepo("agentbrain-wt-");
+    ab(repo, ["init"]);
+    const a = createTask(repo, "Edit README", true);
+    const wt = taskJson(repo, a).worktree.path;
+    fs.writeFileSync(path.join(wt, "README.md"), "demo\nfrom task\n");
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "task edit"], { cwd: wt });
+    ab(repo, ["worktree", "merge", a]);
+    expect(taskJson(repo, a).merged.branch).toBe(`agentbrain/${a}`);
+    // Squash main's history and keep editing the same lines afterwards.
+    const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: repo, encoding: "utf8" }).trim();
+    const squashed = execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", tree, "-m", "squashed"], { cwd: repo, encoding: "utf8" }).trim();
+    execFileSync("git", ["reset", "-q", "--hard", squashed], { cwd: repo });
+    fs.writeFileSync(path.join(repo, "README.md"), "demo\nfrom task, edited later\n");
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "later edit"], { cwd: repo });
+    ab(repo, ["task", "update", "--task", a, "--status", "done"]);
+    expect(ab(repo, ["worktree", "prune", "--branches"]).stdout).toContain("deleted 1 merged branch(es)");
+    expect(execFileSync("git", ["branch", "--list", `agentbrain/${a}`], { cwd: repo, encoding: "utf8" })).toBe("");
+  });
 });
