@@ -465,6 +465,14 @@ warnings and headless transcripts. Background headless runs (`--detach`,
 `--linger`), `attach`, `stop`, and developer messages delivered as the
 agent's next turn in the same ACP session.
 
+### V0.10 — done
+Delegation without new windows (`run vscode --here`), task queue
+(`queue add | list | remove | run`), `worktree prune`, commit lists in
+briefs, MCP log and route tools, CI on Linux and macOS.
+
+### V0.11 — done
+`agentbrain notify`, `--json` output, worktrees by default.
+
 ### Next
 Trying headless runs against real ACP agents.
 

@@ -27,7 +27,7 @@ import { remainingFeedback, runMcpServer } from "../mcp/server.js";
 import { installPostCommitHook, postCommit, uninstallPostCommitHook } from "../core/githooks.js";
 import { brainDir, findRoot } from "../core/paths.js";
 import { RULES_TARGETS, writeRules } from "../core/rules.js";
-import { findSession, getProject, getTask, initStore, listSessions, listTasks, sessionAlive } from "../core/store.js";
+import { findSession, getProject, getTask, initStore, listSessions, listTasks, saveProject, sessionAlive } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 import { describeActivity, taskActivity } from "../core/stall.js";
 import { addWorktree, mergeWorktree, pruneWorktrees, removeWorktree, taskWorkdir } from "../core/worktree.js";
@@ -35,15 +35,18 @@ import { taskTimeline } from "../core/timeline.js";
 import { pruneTask } from "../core/prune.js";
 import { exportTask } from "../core/export.js";
 import { startUiServer } from "../ui/server.js";
+import { defaultNotificationSender, watchNotifications } from "../core/notify.js";
+import { snapshot as liveSnapshot } from "../ui/model.js";
 
 const USAGE = `
-AgentBrain 0.10 — move coding tasks between AI agents without losing state
+AgentBrain 0.11 — move coding tasks between AI agents without losing state
 
 Live view
   agentbrain                              Every task and agent, live (keyboard and mouse)
+  agentbrain notify [--print]             Notify when tasks settle or stall
 
 Setup
-  agentbrain init                         Create .agentbrain/ in the current directory
+  agentbrain init [--worktrees]           Create .agentbrain/ here; --worktrees: every new task gets its own worktree
   agentbrain rules [--only <ids>]         Write AgentBrain instructions for IDE/terminal agents
                                           (${RULES_TARGETS.map((t) => t.id).join(", ")})
   agentbrain connect [--only <ids>]       Give every agent live AgentBrain state via MCP
@@ -56,6 +59,7 @@ Setup
 Tasks
   agentbrain task create <objective>      Create a task and make it active
   agentbrain task list
+  agentbrain status --json                  Emit machine-readable JSON for status, task list, log, or route
   agentbrain task create <objective> --worktree
                                           Same, in its own Git worktree (parallel agents never collide)
   agentbrain task use <task-id>           Make a task active
@@ -117,7 +121,13 @@ function fail(error: unknown): never {
 }
 
 // Everything after `--` is a command to launch, not AgentBrain arguments.
-const argv = process.argv.slice(2);
+const rawArgv = process.argv.slice(2);
+// `task create <objective>`: the objective is free text and may start with "-"
+// (e.g. "--json output for ..."); only AgentBrain's own create flags are flags.
+const CREATE_FLAGS = new Set(["--worktree", "--no-worktree"]);
+const isCreate = rawArgv[0] === "task" && rawArgv[1] === "create";
+const createObjective = isCreate ? rawArgv.slice(2).filter((a) => !CREATE_FLAGS.has(a)).join(" ") : "";
+const argv = isCreate ? [...rawArgv.slice(0, 2), ...rawArgv.slice(2).filter((a) => CREATE_FLAGS.has(a))] : rawArgv;
 const dashDash = argv.indexOf("--");
 const passthrough = dashDash === -1 ? [] : argv.slice(dashDash + 1);
 
@@ -148,6 +158,8 @@ function parseCli() {
         all: { type: "boolean" },
         "dry-run": { type: "boolean" },
         worktree: { type: "boolean" },
+        "no-worktree": { type: "boolean" },
+        worktrees: { type: "boolean" },
         headless: { type: "boolean" },
         run: { type: "boolean" },
         allow: { type: "string" },
@@ -160,7 +172,9 @@ function parseCli() {
         poll: { type: "string" },
         linger: { type: "string" },
         port: { type: "string" },
+        print: { type: "boolean" },
         force: { type: "boolean" },
+        json: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -214,6 +228,10 @@ function describeAgent(agent?: AgentRef): string {
 
 function status(): void {
   const cwd = root();
+  if (flags.json) {
+    console.log(JSON.stringify(liveSnapshot(cwd, { includeDone: true })));
+    return;
+  }
   const project = getProject(cwd);
   const tasks = listTasks(cwd);
 
@@ -498,6 +516,10 @@ async function run(agentName: string | undefined, taskArg: string | undefined): 
 async function route(id?: string): Promise<void> {
   const cwd = root();
   const taskId = resolveTaskId(cwd, id, undefined, process.cwd());
+  if (flags.json) {
+    console.log(JSON.stringify(routeTask(cwd, taskId)));
+    return;
+  }
   const task = getTask(cwd, taskId);
   const ranked = routeTask(cwd, taskId);
   console.log(`Who should take ${task.id} — ${task.objective} (${task.status})?\n`);
@@ -597,6 +619,10 @@ function localTime(timestamp: string): string {
 function log(id?: string): void {
   const cwd = root();
   const taskId = resolveTaskId(cwd, id);
+  if (flags.json) {
+    console.log(JSON.stringify(taskTimeline(cwd, taskId)));
+    return;
+  }
   for (const event of taskTimeline(cwd, taskId)) {
     console.log(`${localTime(event.timestamp)} ${event.agent.padEnd(12)} ${event.event.padEnd(10)} ${event.reason}`);
   }
@@ -660,6 +686,14 @@ async function ui(): Promise<void> {
   await new Promise<void>(() => {});
 }
 
+async function notify(): Promise<void> {
+  const stop = watchNotifications(root(), defaultNotificationSender(flags.print));
+  const close = () => { stop(); process.exit(0); };
+  process.once("SIGINT", close);
+  process.once("SIGTERM", close);
+  await new Promise<void>(() => {});
+}
+
 function doctor(): void {
   const checks = runDoctor(process.cwd());
   for (const check of checks) {
@@ -715,17 +749,23 @@ async function main(): Promise<void> {
 
   if (command === "init") {
     initStore(process.cwd());
-    console.log("✓ AgentBrain initialized");
+    if (flags.worktrees) {
+      const project = getProject(process.cwd());
+      project.worktreeByDefault = true;
+      saveProject(process.cwd(), project);
+    }
+    console.log(`✓ AgentBrain initialized${flags.worktrees ? " (every new task gets its own worktree)" : ""}`);
     console.log(`  ${brainDir(process.cwd())}`);
     console.log('\nNext: agentbrain task create "<objective>"   then   agentbrain rules');
   } else if (command === "status") {
     status();
   } else if (command === "task" && subcommand === "create") {
     const cwd = root();
-    const task = createTask(cwd, rest.join(" "));
+    const task = createTask(cwd, createObjective);
     console.log(`✓ Created ${task.id}`);
     console.log(`  ${task.objective}`);
-    if (flags.worktree) printWorktree(addWorktree(cwd, task.id));
+    const wantWorktree = flags.worktree || (getProject(cwd).worktreeByDefault && !flags["no-worktree"]);
+    if (wantWorktree) printWorktree(addWorktree(cwd, task.id));
   } else if (command === "task" && subcommand === "update") {
     update();
   } else if (command === "task" && subcommand === "use") {
@@ -734,6 +774,10 @@ async function main(): Promise<void> {
     console.log(`✓ Active task: ${task.id} — ${task.objective}`);
   } else if (command === "task" && subcommand === "list") {
     const cwd = root();
+    if (flags.json) {
+      console.log(JSON.stringify(listTasks(cwd)));
+      return;
+    }
     const active = getProject(cwd).activeTaskId;
     for (const task of listTasks(cwd)) {
       console.log(`${task.id === active ? "*" : " "} ${task.id}\t${task.status}\t${task.objective}`);
@@ -821,6 +865,8 @@ async function main(): Promise<void> {
     doctor();
   } else if (command === "ui") {
     await ui();
+  } else if (command === "notify") {
+    await notify();
   } else if (command === "hook" && subcommand === "post-commit") {
     postCommit(process.cwd());
   } else {

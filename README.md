@@ -265,6 +265,10 @@ message tells Copilot the exact directory to work in.
 
 ### Parallel agents: one worktree per task
 
+`agentbrain init --worktrees` (or `"worktreeByDefault": true` in
+`.agentbrain/project.json`) gives every new task its own worktree; pass
+`--no-worktree` to opt a single task out.
+
 ```bash
 agentbrain task create "Add prune command" --worktree   # .agentbrain/worktrees/<id>, branch agentbrain/<id>
 agentbrain run vscode <task-id>                         # the agent works only in that folder
@@ -320,6 +324,14 @@ Set `"stallMinutes"` in `.agentbrain/project.json` to change the threshold.
 
 ### Live view
 
+```bash
+agentbrain notify              # desktop notifications for settled or stalled tasks
+agentbrain notify --print      # print notifications instead of using the desktop
+```
+
+The notifier runs until stopped with `Ctrl-C` and reports tasks that move to
+review, done, blocked, failed, or handoff, plus newly detected stall warnings.
+
 Run `agentbrain` with no arguments for a live terminal view of every task and
 agent: status lights (running, stalled, handed off, in review), the brief, the
 uncommitted diff in each task's worktree, the timeline, routing suggestions,
@@ -332,6 +344,7 @@ next turn in the same session); `s` stops it.
 
 ```bash
 agentbrain status                 # active task, progress, last checkpoint, stall warnings
+agentbrain status --json          # machine-readable JSON for status, task list, log, or route
 agentbrain checkpoint             # snapshot without stopping
 agentbrain log                    # timeline of agent sessions and checkpoints
 agentbrain route [task-id]        # which agent should take the task next, with reasons

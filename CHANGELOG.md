@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.0
+- `agentbrain notify`: desktop notifications when a task reaches review, done, blocked, failed or handoff, or stalls
+- `--json` for `status`, `task list`, `log` and `route`
+- `agentbrain init --worktrees` / `worktreeByDefault`: every new task gets its own worktree (`--no-worktree` to opt out)
+- Task objectives may start with a dash
+
 ## 0.10.0
 - `agentbrain run vscode --here`: send a task to the Copilot chat you already have open, without opening a window
 - `agentbrain queue`: line up tasks for one agent; `queue run` hands them over one after another as each settles

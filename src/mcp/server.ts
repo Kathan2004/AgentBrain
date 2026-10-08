@@ -31,7 +31,7 @@ import { getProject, getTask, listTasks } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-const SERVER_VERSION = "0.10.0";
+const SERVER_VERSION = "0.11.0";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 interface Message {

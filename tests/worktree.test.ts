@@ -192,4 +192,15 @@ describe("task worktrees", () => {
     expect(branches).not.toContain(done);
     expect(branches).toContain(unmerged);
   });
+
+  it("gives every new task a worktree by default when configured, with an opt-out", () => {
+    const repo = tempRepo("agentbrain-wt-");
+    expect(ab(repo, ["init", "--worktrees"]).stdout).toContain("every new task gets its own worktree");
+    const id = (out: string) => /Created (task-\S+)/.exec(out)![1];
+    const a = id(ab(repo, ["task", "create", "--json output for status"]).stdout);
+    expect(taskJson(repo, a).objective).toBe("--json output for status");
+    expect(taskJson(repo, a).worktree.branch).toBe(`agentbrain/${a}`);
+    const b = id(ab(repo, ["task", "create", "Small docs fix", "--no-worktree"]).stdout);
+    expect(taskJson(repo, b).worktree).toBeUndefined();
+  });
 });

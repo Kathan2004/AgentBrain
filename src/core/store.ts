@@ -13,6 +13,8 @@ export interface ProjectState {
   stallMinutes?: number;
   /** Routing preferences for `agentbrain route`: agent ids, best first / never suggest. */
   agents?: { prefer?: string[]; avoid?: string[] };
+  /** Give every new task its own Git worktree (opt out per task with --no-worktree). */
+  worktreeByDefault?: boolean;
   /** Task ids waiting for `agentbrain queue run`, next first. */
   queue?: string[];
 }
