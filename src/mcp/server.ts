@@ -24,14 +24,19 @@ import {
   type TaskPatch,
 } from "../core/actions.js";
 import { findRoot } from "../core/paths.js";
+import { awaitingVote, reviewerNotice, reviewSummary, reviewTask } from "../core/review.js";
 import { routeTask } from "../core/routing.js";
+import { sendMessage, takeUnread, unreadFor } from "../core/messages.js";
+import { delegate } from "../core/delegate.js";
+import { lessonsDigest, recall, remember } from "../core/vault.js";
+import { listSessions } from "../core/store.js";
 import { taskTimeline } from "../core/timeline.js";
 import { taskForDir } from "../core/worktree.js";
 import { getProject, getTask, listTasks } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-const SERVER_VERSION = "0.12.0";
+const SERVER_VERSION = "0.13.0";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 interface Message {
@@ -57,7 +62,13 @@ export function agentIdFromClient(name: string | undefined): string {
 
 const listParam = (description: string) => ({ type: "array", items: { type: "string" }, description });
 
-const TOOLS = [
+interface ToolDef {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+const TOOLS: ToolDef[] = [
   {
     name: "agentbrain_brief",
     description:
@@ -137,11 +148,78 @@ const TOOLS = [
     },
   },
   {
+    name: "agentbrain_message",
+    description:
+      "Talk to the other agents working on this project at the same time (or the developer): coordinate, " +
+      "warn about conflicts (\"my uncommitted change to X blocks your merge\"), ask for help or a review. " +
+      "to is an agent id (claude-code, vscode, codex, gemini, cursor, developer) or \"all\". Replies arrive in " +
+      "your next AgentBrain tool results.",
+    inputSchema: {
+      type: "object",
+      properties: { to: { type: "string" }, text: { type: "string" }, task_id: { type: "string" } },
+      required: ["to", "text"],
+    },
+  },
+  {
+    name: "agentbrain_delegate",
+    description:
+      "Hand part of your work to another agent working in parallel. AgentBrain creates the subtask (linked to " +
+      "your task), gives it its own Git worktree, picks the best-placed ready agent (or the one you name: " +
+      "claude-code, codex, vscode, gemini, any), runs the project's checks on the result and sends it through review. " +
+      "You get a message when it is ready. Use it to split large tasks into independent pieces.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        objective: { type: "string", description: "What the other agent should do, self-contained" },
+        worker: { type: "string" },
+        parent_task_id: { type: "string" },
+      },
+      required: ["objective"],
+    },
+  },
+  {
+    name: "agentbrain_recall",
+    description:
+      "Search the project's shared memory (the AgentBrain vault): lessons from reviews, decisions and why, which " +
+      "files tasks touched, notes other agents and the developer kept. Use it before deciding how to do something.",
+    inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+  },
+  {
+    name: "agentbrain_remember",
+    description:
+      "Save something future agents on this project should know (a convention, a gotcha, how a subsystem works) " +
+      "as a lasting note in the shared memory. Not for task progress: use agentbrain_update for that.",
+    inputSchema: {
+      type: "object",
+      properties: { title: { type: "string" }, text: { type: "string" }, tags: listParam("Optional tags") },
+      required: ["title", "text"],
+    },
+  },
+  {
     name: "agentbrain_list_tasks",
     description: "List AgentBrain tasks with their status; the active one is marked with *.",
     inputSchema: { type: "object", properties: {} },
   },
 ];
+
+/** Only listed for the lead agent. */
+const REVIEW_TOOL: ToolDef = {
+  name: "agentbrain_review",
+  description:
+    "You review other agents' work (lead or council member): give your verdict on a task in review. Read the " +
+    "packet from agentbrain_brief (claims, diff, AgentBrain's own check results, flags) and verify it yourself first. " +
+    "Once the reviewers reach a decision, approve merges the task's branch and marks it done; changes sends it back " +
+    "with the notes as remaining items.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      task_id: { type: "string" },
+      verdict: { type: "string", enum: ["approve", "changes"] },
+      notes: { type: "string", description: "Required for changes: concrete, one item per line" },
+    },
+    required: ["task_id", "verdict"],
+  },
+};
 
 export interface McpServerOptions {
   /** Project root; if omitted, resolved from cwd or the client's MCP roots. */
@@ -149,6 +227,8 @@ export interface McpServerOptions {
   /** Fixed identity (set by `agentbrain run --headless`), instead of deriving it from the client name. */
   agent?: Required<AgentRef>;
   input?: NodeJS.ReadableStream;
+  /** How to start AgentBrain itself (for delegating); defaults to this process's script. */
+  self?: { command: string; args: string[] };
   output?: NodeJS.WritableStream;
   log?: (message: string) => void;
 }
@@ -352,16 +432,28 @@ export class AgentBrainMcpServer {
    * Tool descriptions are always in the model's context (server instructions
    * are not shown by every client), so the task in progress goes there too.
    */
-  tools(): typeof TOOLS {
+  tools(): ToolDef[] {
+    const reviewer = this.root ? reviewerNotice(this.root, this.agent.id) : null;
+    const base = reviewer ? [...TOOLS, REVIEW_TOOL] : TOOLS;
+    const waiting = reviewer && this.root ? awaitingVote(this.root, this.agent.id) : [];
+    const withReviews = waiting.length
+      ? base.map((tool) => tool.name === "agentbrain_review"
+        ? { ...tool, description: `${tool.description} WAITING FOR YOUR REVIEW: ${waiting.map((t) => `${t.id} by ${t.review?.worker ?? t.agent?.id ?? "unknown"}`).join(", ")}.` }
+        : tool)
+      : base;
+    const unread = this.root ? unreadFor(this.root, this.agent.id).length : 0;
+    const withInbox = unread
+      ? withReviews.map((tool) => tool.name === "agentbrain_message" ? { ...tool, description: `${tool.description} YOU HAVE ${unread} UNREAD MESSAGE(S): call any AgentBrain tool (e.g. agentbrain_brief) to read them.` } : tool)
+      : withReviews;
     const task = this.pendingTask();
-    if (!task) return TOOLS;
+    if (!task) return withInbox;
     const live =
       ` TASK IN PROGRESS: ${task.id} "${task.objective}" (${task.status}` +
       (task.agent ? `, last worked on by ${task.agent.id}` : "") +
       `)${task.nextAction ? `; next action: ${task.nextAction}` : ""}. ` +
       "When the developer says continue/resume/keep going, call this first, even mid-conversation: the task may " +
       "have changed since earlier messages (other agents work on it too), and this is the source of truth.";
-    return TOOLS.map((tool) => (tool.name === "agentbrain_brief" ? { ...tool, description: tool.description + live } : tool));
+    return withInbox.map((tool) => (tool.name === "agentbrain_brief" ? { ...tool, description: tool.description + live } : tool));
   }
 
   private async resolveRootFromClient(): Promise<void> {
@@ -396,7 +488,27 @@ export class AgentBrainMcpServer {
 - If you stop before finishing, or the developer is switching agents, call agentbrain_handoff with the reason.
 - "Continue", "resume", "keep going" and similar mean: call agentbrain_brief and continue the task it returns. Do this even in the middle of a conversation: other agents may have changed the task since your earlier messages, so AgentBrain, not the chat history, is the source of truth. Do not create a task for them.
 - Only if the developer explicitly describes a new objective, call agentbrain_create_task.
+- Other agents work on this project at the same time. For a large task, split off independent pieces with agentbrain_delegate (each gets its own worktree, checks and review; you hear back when it is ready), and coordinate with agentbrain_message.
 - Never put secrets in AgentBrain fields.`;
+    if (!this.root) return protocol;
+    const reviewer = reviewerNotice(this.root, this.agent.id);
+    const parts = [this.stateInstructions(protocol), lessonsDigest(this.root), this.waitingNotice(), reviewer].filter(Boolean);
+    return parts.join("\n\n");
+  }
+
+  /**
+   * Tasks the developer delegated to "the next agent you open": whichever
+   * agent connects (Claude app, Cursor, a VS Code extension...) offers to take them.
+   */
+  private waitingNotice(): string {
+    if (!this.root) return "";
+    const waiting = listTasks(this.root).filter((t) => (t.status === "idle" || t.status === "handoff") && !t.agent);
+    if (!waiting.length) return "";
+    return `Tasks the developer delegated that are waiting for an agent (tell the developer about them; if they say go, ` +
+      `call agentbrain_brief with the task_id and do it):\n${waiting.map((t) => `- ${t.id}: ${t.objective}`).join("\n")}`;
+  }
+
+  private stateInstructions(protocol: string): string {
     if (!this.root) return protocol;
     try {
       const project = getProject(this.root);
@@ -424,7 +536,10 @@ export class AgentBrainMcpServer {
 
   private async callTool(name: string, args: Record<string, any>): Promise<unknown> {
     try {
-      return { content: [{ type: "text", text: this.runTool(name, args) }] };
+      // Every tool result carries messages other agents sent this one since its last call.
+      const text = this.runTool(name, args);
+      const inbox = this.root ? takeUnread(this.root, this.agent.id) : "";
+      return { content: [{ type: "text", text: inbox ? `${text}\n\n${inbox}` : text }] };
     } catch (error) {
       return { content: [{ type: "text", text: `Error: ${(error as Error).message}` }], isError: true };
     }
@@ -439,6 +554,13 @@ export class AgentBrainMcpServer {
         // Chat history can point an agent at a task that's already finished;
         // steer it to the one actually waiting.
         const root = this.requireRoot();
+        // The lead reviewing a finished result gets what it needs to judge it.
+        if (args.task_id && reviewerNotice(root, this.agent.id)) {
+          const asked = getTask(root, String(args.task_id));
+          if (asked.status === "review" && asked.review?.worker !== this.agent.id) {
+            return `${reviewSummary(root, asked, this.agent.id)}\n\nGive your verdict with agentbrain_review (task_id ${asked.id}).\n\n${briefContext(root, asked.id)}`;
+          }
+        }
         const waiting = this.pendingTask();
         if (args.task_id && waiting && waiting.id !== args.task_id) {
           const asked = getTask(root, String(args.task_id));
@@ -526,6 +648,57 @@ export class AgentBrainMcpServer {
         return status === "handoff"
           ? `Handed off ${taskId} (${result.checkpoint.checkpointId}). Any agent can continue it now.`
           : `Checkpoint ${result.checkpoint.checkpointId} saved for ${taskId}.`;
+      }
+      case "agentbrain_delegate": {
+        const root = this.requireRoot();
+        const parent = args.parent_task_id ? String(args.parent_task_id) : [...this.claimed].at(-1) ?? this.pendingTask()?.id;
+        const result = delegate(root, {
+          prompt: String(args.objective ?? ""),
+          ...(args.worker ? { worker: String(args.worker) } : {}),
+          ...(parent ? { parent } : {}),
+          requestedBy: this.agent.id,
+        }, this.options.self ?? { command: process.execPath, args: [process.argv[1]] });
+        return `Delegated ${result.task.id} to ${result.worker.name} (${result.why}). ` +
+          "It works in its own worktree; you'll get a message here when it is ready for review or needs you.";
+      }
+      case "agentbrain_recall": {
+        const root = this.requireRoot();
+        const hits = recall(root, String(args.query ?? ""));
+        if (!hits.length) return "Nothing in the project's memory matches. If you learn something worth keeping, use agentbrain_remember.";
+        return hits.map((h) => `## ${h.note}\n${h.excerpt}`).join("\n\n") + "\n\n(Notes live in .agentbrain/vault; open it in Obsidian to browse.)";
+      }
+      case "agentbrain_remember": {
+        const root = this.requireRoot();
+        const file = remember(root, { title: String(args.title ?? ""), text: String(args.text ?? ""), author: this.agent.id, tags: strings(args.tags) });
+        return `Saved to the shared memory as ${file}. Every agent on this project can recall it.`;
+      }
+      case "agentbrain_message": {
+        const root = this.requireRoot();
+        const message = sendMessage(root, { from: this.agent.id, to: String(args.to ?? "all"), text: String(args.text ?? ""), ...(args.task_id ? { task: String(args.task_id) } : {}) });
+        const around = [...new Set(listSessions(root).filter((s) => !s.endedAt && s.agentId !== this.agent.id).map((s) => s.agentId))];
+        return `Sent to ${message.to === "all" ? "everyone" : message.to}.` + (around.length ? ` Agents with open sessions: ${around.join(", ")}.` : "");
+      }
+      case "agentbrain_review": {
+        const root = this.requireRoot();
+        if (!reviewerNotice(root, this.agent.id)) throw new UserError("Only reviewers (the lead or council members) can review. The developer sets them with agentbrain lead / agentbrain council.");
+        const verdict = args.verdict === "approve" ? "approved" : args.verdict === "changes" ? "changes" : null;
+        if (!verdict) throw new UserError('verdict must be "approve" or "changes".');
+        const result = reviewTask(root, String(args.task_id ?? ""), { verdict, reviewer: this.agent.id, notes: args.notes });
+        const left = awaitingVote(root, this.agent.id).length;
+        const more = left ? ` ${left} more result(s) waiting for your review.` : " Nothing else is waiting for your review.";
+        if (result.conflicts) {
+          return `Approved, but ${result.task.id}'s branch conflicts with the main checkout in ${result.conflicts.join(", ")}. ` +
+            "The merge was aborted and the task is still in review." + more;
+        }
+        if (!result.outcome) {
+          const t = result.tally;
+          return `Vote recorded for ${result.task.id}. No decision yet` +
+            (t ? ` (${t.approve.toFixed(1)} approve / ${t.changes.toFixed(1)} changes of ${t.total.toFixed(1)} weight${t.blocked ? `; ${t.blocked}` : ""})` : "") +
+            "." + more;
+        }
+        return (result.outcome === "approved"
+          ? `Decided: approved ${result.task.id}${result.merged ? `; merged ${result.merged} commit(s)` : ""}. It is done.`
+          : `Decided: ${result.task.id} goes back with the reviewers' notes; it is waiting for an agent to pick it up.`) + more;
       }
       default:
         throw new UserError(`Unknown tool ${name}`);

@@ -61,7 +61,9 @@ describe("local UI server", () => {
       expect(fs.readFileSync(sessionControl(repo, "test-agent", sessionId).inbox, "utf8")).toContain("Please continue");
       const page = await request(base, "/");
       expect(page.status).toBe(200);
-      expect(await page.text()).toContain("AgentBrain");
+      const html = await page.text();
+      expect(html).toContain("AgentBrain");
+      expect(html).toContain('data-open="\'+esc(t.id)+\'"');
     } finally {
       await server.close();
     }

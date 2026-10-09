@@ -1,22 +1,11 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { findOnPath, spawnPortable, spawnSyncPortable } from "../core/platform.js";
+import type { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentAdapter, AgentCapabilities, AgentContext, AgentSession, ExitInfo } from "./types.js";
 
 /** Resolves a command name against PATH the way a shell would. */
-export function findOnPath(command: string, envPath = process.env.PATH ?? ""): string | null {
-  if (command.includes("/")) return fs.existsSync(command) ? path.resolve(command) : null;
-  for (const dir of envPath.split(path.delimiter).filter(Boolean)) {
-    const candidate = path.join(dir, command);
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      if (fs.statSync(candidate).isFile()) return candidate;
-    } catch {
-      // not here
-    }
-  }
-  return null;
-}
+export { findOnPath } from "../core/platform.js";
 
 export interface ProcessAgentDefinition {
   id: string;
@@ -81,14 +70,14 @@ export class ProcessAdapter implements AgentAdapter {
     const env = this.env(context);
     const prepareArgs = this.definition.prepare?.(context.cwd, Boolean(context.here)) ?? [];
     if (prepareArgs.length) {
-      const result = spawnSync(executable, prepareArgs, {
+      const result = spawnSyncPortable(executable, prepareArgs, {
         cwd: context.cwd,
         env,
         stdio: "inherit",
       });
       if (result.error) throw result.error;
     }
-    const child = spawn(executable, this.definition.args(context.handoff, context.promptFile, context.cwd, Boolean(context.here)), {
+    const child = spawnPortable(executable, this.definition.args(context.handoff, context.promptFile, context.cwd, Boolean(context.here)), {
       cwd: context.cwd,
       env,
       stdio: "inherit",

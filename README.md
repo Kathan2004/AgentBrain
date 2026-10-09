@@ -12,8 +12,15 @@ agent to another without starting the conversation over.
 Git tells you what the code looks like. AgentBrain tells the next agent what was
 happening and what to do next.
 
-AgentBrain is **not** an IDE, a model provider, an agent swarm, or a replacement
-for Git. It never commits, and never reads or stores file contents.
+Switch it on from any terminal, even inside an agent session, and it becomes the
+control room beside your agents: it shows every agent at work, keeps the shared
+memory, and decides whose work counts, by one lead agent or by a council that
+votes and checks the evidence itself.
+
+AgentBrain is **not** an IDE, a model provider, or a replacement for Git. It
+never commits on its own (merging an approved task's branch is the one Git
+write it makes, and only when you have set reviewers), and never stores file
+contents.
 
 ## Install
 
@@ -26,6 +33,140 @@ agentbrain doctor # checks the installation and project integration
 ```
 
 Requires Node 20+ and Git.
+
+## The console
+
+```bash
+cd your-project
+agentbrain
+```
+
+Opens the AgentBrain console, built like an agent CLI: a prompt box, slash
+commands, and a live transcript. What you type is **delegated**: it becomes a
+task with its own worktree, your worker agent picks it up (Copilot in the VS
+Code chat you already have open, or a headless agent), and its edits, commands
+and progress stream into the console. When it finishes, the result comes back
+for review with AgentBrain's own checks: `/approve` merges it, `/changes <what
+to fix>` sends it back. `/help` lists the rest (`/status`, `/review`,
+`/continue`, `/worker`, `/lead`, `/council`, `/checks`, `/dashboard`).
+
+AgentBrain only sets itself up inside a project (a Git repository), never in
+your home folder. `agentbrain top` is the older full-screen live view.
+
+## Control plane
+
+```bash
+agentbrain on                  # from any terminal in a project, or `! agentbrain on` inside Claude Code
+```
+
+One idempotent step: it initializes the repo if needed, connects every agent to
+AgentBrain over MCP, streams Claude Code's prompts, edits and commands into the
+activity feed (hooks in `.claude/settings.local.json`), installs the commit
+hook, and opens the **control room** in your browser, beside your terminal:
+
+- **Home**: a prompt box to delegate from the browser, what **needs you**
+  (results to review, with checks, flags and votes), and what is **in
+  progress**, each task with its stage (delegated, working, checks, review,
+  done) and its latest activity.
+- **Activity**: the live feed of prompts, edits, commands, commits, progress,
+  decisions, handoffs and verdicts, from every agent.
+- **Brain**: the shared memory as a graph of tasks, agents, decisions, files and
+  flags (also written as an Obsidian vault in `.agentbrain/vault`).
+- **Settings**: who new tasks go to, who decides, and the checks.
+
+`agentbrain off` stops streaming and closes the control room; state is kept.
+Details: [docs/control-plane.md](docs/control-plane.md).
+
+### Who decides: a lead or a council
+
+```bash
+agentbrain lead claude-code                       # one agent reviews everyone else's work
+agentbrain council claude-code codex gemini cursor --quorum 0.67
+agentbrain checks "npm test" "npx tsc --noEmit"   # AgentBrain runs these itself on every result
+agentbrain review                                 # what is waiting, with claims, diff, checks, flags, votes
+agentbrain review <task-id> --approve             # or --changes "<what to fix>"
+```
+
+With reviewers set, an agent that finishes a task doesn't close it: the task
+waits in review. A **lead** approves or sends it back. A **council** votes:
+
+- **Evidence first.** AgentBrain runs your checks in the task's folder itself.
+  Failing checks block approval whatever the votes say.
+- **Sealed votes.** Reviewers can't see each other's votes until they have
+  voted, so they judge the work, not each other.
+- **Reputation as stake.** Votes are weighted by each agent's track record:
+  agreeing with outcomes earns weight, dissent and false claims cost it.
+- **Quorum.** A result passes with the quorum's share of the weight (default
+  two thirds). With equal weights, n reviewers survive ⌊n/3⌋ broken,
+  compromised or hallucinating members: 4 tolerate 1, 7 tolerate 2.
+- **Flags.** Claims that the evidence contradicts are shown on the result and in
+  the brain: "tests pass" when AgentBrain's run failed, "done" with no changes,
+  files that don't exist (in the work or in a review), and votes against the
+  consensus.
+
+Approval merges the task's worktree branch and marks it done. Changes become
+the task's remaining items and hand it back. Your verdict, from the CLI or the
+control room, always decides (recorded as an override).
+
+### Agents talking to each other
+
+Agents working on the same project at the same time can coordinate through
+AgentBrain: "my uncommitted change to README.md blocks your merge", "I'm
+editing the API, hold off on the client", "can you review this?".
+
+```bash
+agentbrain message vscode "hold off on page.ts, I'm editing it"   # or: all, claude-code, codex…
+agentbrain inbox                                                    # messages for you
+```
+
+Agents send with the `agentbrain_message` MCP tool and receive messages in
+their next AgentBrain tool result; Claude Code also gets them through its hooks
+(including just before it stops), and Copilot gets them in its VS Code chat when
+it is idle. In the console: `/message <agent|all> <text>`.
+
+### The memory palace (an Obsidian vault)
+
+`.agentbrain/vault` is a real Obsidian vault, kept current by AgentBrain: open
+the folder in Obsidian and the graph view shows the project's memory, coloured
+by room.
+
+- **Onboarding**: the first note any agent reads, new or returning: how work
+  happens here, who reviews, the checks, and what to read next.
+- **Lessons**: what reviewers sent back, claims that didn't match the evidence,
+  known failures. New sessions get the latest lessons in their first context.
+- **Agents**, **Tasks**, **Decisions** (one note per decision, linked to its
+  task and agent), **Code map** (files the agents changed and which tasks did),
+  **Daily log**.
+- **Memory**: lasting notes agents save with `agentbrain_remember`, plus
+  anything you write anywhere in the vault. AgentBrain never overwrites them.
+
+Agents search all of it with `agentbrain_recall`; you can too:
+
+```bash
+agentbrain recall "how do we handle auth tokens"
+```
+
+### Choosing the agent
+
+Each prompt goes to the agent best placed to do it right now: who is free,
+whose results were approved or sent back in this project, reputation, recent
+usage limits and crashes, and your preferences. The console shows the pick and
+the reasons (Shift+Tab switches, `@claude …` / `@codex …` / `@copilot …` /
+`@any …` at the start of a prompt overrides). Agents AgentBrain can start
+itself: Copilot in your open VS Code chat, Claude Code (`claude -p`, including
+the copy inside the Claude desktop app) and Codex (`codex exec`), with no
+window (`agentbrain run claude-code|codex [task] --print`), and ACP agents.
+Everything else that speaks MCP (the Claude app, Cursor, Windsurf, the Claude
+Code / Codex / Cline extensions in VS Code) can pull work: `@any` leaves the
+task waiting, and the next agent you open on the repo is told about it.
+
+Claude Code as a reviewer is asked to review automatically: when it finishes a
+turn with results waiting, its stop hook hands it the review queue once per
+result. Other agents see the queue in their MCP instructions and tools.
+
+Limits, stated plainly: reviewers built on the same model can share the same
+blind spot, so mix vendors in a council. Flags catch claims that can be checked
+mechanically, not every wrong answer.
 
 ## Use it
 
@@ -303,7 +444,7 @@ Tested with a stand-in ACP agent; not yet run against the real ones.
 ### Live web dashboard
 
 ```bash
-agentbrain ui                 # open the local task dashboard on port 4747
+agentbrain ui                 # run the control room in this terminal (agentbrain on runs it in the background)
 agentbrain ui --port 5050     # choose a port (a busy default port is replaced automatically)
 ```
 
@@ -325,6 +466,7 @@ Set `"stallMinutes"` in `.agentbrain/project.json` to change the threshold.
 ### Live view
 
 ```bash
+agentbrain top                 # full-screen live view of every task and agent
 agentbrain notify              # desktop notifications for settled or stalled tasks
 agentbrain notify --print      # print notifications instead of using the desktop
 ```
@@ -360,7 +502,14 @@ agentbrain worktree list          # task worktrees and their branches
 agentbrain worktree prune         # clean up worktrees of finished, merged tasks (--branches, --dry-run)
 agentbrain prune [task-id]        # remove old checkpoints (use --keep N, --all, or --dry-run)
 agentbrain connect                # configure MCP, rules, and the Git hook
+agentbrain on                     # enable AgentBrain and start the control room
+agentbrain off                    # stop the control room and activity hooks
+agentbrain lead <agent-id>        # set the reviewing lead agent
+agentbrain council <agent-id>...  # configure a reviewing council
+agentbrain checks <command>...    # configure checks for submitted work
+agentbrain review [task-id]       # inspect or decide pending reviews
 agentbrain doctor                 # check setup and print fixes for anything missing
+agentbrain vault                  # regenerate the Obsidian Markdown vault
 agentbrain mcp                    # run the MCP server (normally started by an agent)
 agentbrain hooks install          # install automatic post-commit checkpoints
 agentbrain task list / task use <id>

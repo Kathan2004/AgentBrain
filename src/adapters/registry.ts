@@ -1,6 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import { vscodeCommand } from "../core/platform.js";
 import { ProcessAdapter, type ProcessAgentDefinition } from "./process.js";
+
+function vscodeFallbacks(): string[] {
+  const found = vscodeCommand();
+  return found ? [found] : [];
+}
 
 /**
  * Built-in terminal agents. Each takes the AgentBrain prompt as its opening
@@ -25,7 +31,8 @@ export const BUILTIN_AGENTS: ProcessAgentDefinition[] = [
     id: "vscode",
     name: "GitHub Copilot in VS Code",
     command: "code",
-    fallbacks: ["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"],
+    // Where the installer puts `code` on each OS, when it is not on PATH.
+    fallbacks: vscodeFallbacks(),
     detached: true,
     // Focuses the window that has this folder open, or opens a new one (a task
     // worktree is a different folder; never replace the developer's window).

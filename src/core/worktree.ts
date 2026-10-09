@@ -118,8 +118,16 @@ export function mergeWorktree(root: string, taskId: string): MergeResult {
   if (fs.existsSync(wtPath) && git(wtPath, ["status", "--porcelain"])) {
     throw new Error(`${wtPath} has uncommitted changes. Commit them in the worktree first.`);
   }
-  const mainChanges = git(root, ["status", "--porcelain", "--untracked-files=no"]);
-  if (mainChanges) throw new Error("The main checkout has uncommitted changes. Commit or stash them first.");
+  // Someone (the developer, or another agent) may be working in the main checkout at the same
+  // time. That's fine unless the task's branch changes the same files: only then stop, and say which.
+  const dirty = git(root, ["diff", "--name-only", "HEAD"]).split("\n").filter(Boolean);
+  if (dirty.length) {
+    const touched = new Set(git(root, ["diff", "--name-only", `HEAD...${branch}`]).split("\n").filter(Boolean));
+    const overlap = dirty.filter((file) => touched.has(file));
+    if (overlap.length) {
+      throw new Error(`Can't merge yet: ${overlap.join(", ")} ${overlap.length === 1 ? "has" : "have"} uncommitted changes in the main checkout that this task also changes. Commit or stash ${overlap.length === 1 ? "it" : "them"}, then approve again.`);
+    }
+  }
 
   const merged = Number(git(root, ["rev-list", "--count", `HEAD..${branch}`]));
   if (merged === 0) return { ...removeWorktree(root, task.id), merged: 0, conflicts: [] };

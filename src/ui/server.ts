@@ -2,9 +2,14 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { requestStop, sendToSession } from "../core/headless.js";
 import { taskTimeline } from "../core/timeline.js";
-import { findSession } from "../core/store.js";
+import { findSession, getProject, listTasks } from "../core/store.js";
+import { readNote, vaultGraph, writeVault } from "../core/vault.js";
 import { snapshot, taskDiff, transcriptTail, watchProject, type LiveTask } from "./model.js";
 import { openInEditor } from "./open.js";
+import { PAGE } from "./page.js";
+import { reviewTask, setChecks, setCouncil, setLead, startVerification } from "../core/review.js";
+import { delegate, setDefaultWorker } from "../core/delegate.js";
+import { openUrl } from "../core/platform.js";
 
 export interface UiServer {
   url: string;
@@ -44,8 +49,11 @@ function dashboardUrl(request: IncomingMessage): URL {
   return new URL(request.url ?? "/", `http://${request.headers.host ?? ""}`);
 }
 
-export async function startUiServer(root: string, options: { port?: number } = {}): Promise<UiServer> {
-  const token = randomBytes(24).toString("hex");
+export async function startUiServer(
+  root: string,
+  options: { port?: number; token?: string; self?: { command: string; args: string[] } } = {},
+): Promise<UiServer> {
+  const token = options.token && /^[0-9a-f]{48}$/.test(options.token) ? options.token : randomBytes(24).toString("hex");
   const clients = new Set<ServerResponse>();
   let server: Server;
   let actualPort = options.port ?? 4747;
@@ -58,8 +66,33 @@ export async function startUiServer(root: string, options: { port?: number } = {
     return allowedHost(request.headers.host) && typeof given === "string" && given.length === token.length &&
       timingSafeEqual(Buffer.from(given), Buffer.from(token));
   };
+  // Results submitted by agents connected through an older AgentBrain (or set to review by
+  // hand) never had their checks started: the control room starts them, once per submission.
+  const verifying = new Set<string>();
+  const autoVerify = () => {
+    if (!options.self) return;
+    try {
+      if (!getProject(root).checks?.length) return;
+      for (const task of listTasks(root)) {
+        if (task.status !== "review" || task.review?.verifiedAt) continue;
+        const key = `${task.id}@${task.review?.requestedAt ?? task.updatedAt}`;
+        if (verifying.has(key)) continue;
+        verifying.add(key);
+        startVerification(root, task.id);
+      }
+    } catch {
+      // never let this break the dashboard
+    }
+  };
   let lastSent = "";
+  let vaultTimer: NodeJS.Timeout | undefined;
   const sendEvent = () => {
+    autoVerify();
+    if (vaultTimer) clearTimeout(vaultTimer);
+    vaultTimer = setTimeout(() => {
+      vaultTimer = undefined;
+      try { writeVault(root); } catch {}
+    }, 250);
     if (!clients.size) return;
     const data = JSON.stringify(snapshot(root, { includeDone: true }));
     // The watcher also polls; don't redraw browsers when nothing changed.
@@ -88,13 +121,51 @@ export async function startUiServer(root: string, options: { port?: number } = {
         return;
       }
       if (url.pathname === "/api/diff" && request.method === "GET") return json(response, { diff: taskDiff(findTask(root, url.searchParams.get("task") ?? "").workdir) });
+      if (url.pathname === "/api/vault" && request.method === "GET") return json(response, vaultGraph(root));
+      if (url.pathname === "/api/note" && request.method === "GET") return json(response, { id: url.searchParams.get("id"), markdown: readNote(root, url.searchParams.get("id") ?? "") });
       if (url.pathname === "/api/log" && request.method === "GET") return json(response, taskTimeline(root, url.searchParams.get("task") ?? ""));
       if (url.pathname === "/api/transcript" && request.method === "GET") {
         const session = findSession(root, url.searchParams.get("session") ?? "");
         return json(response, { transcript: transcriptTail(session?.transcript) });
       }
-      if (request.method === "POST" && ["/api/message", "/api/stop", "/api/open"].includes(url.pathname)) {
+      if (request.method === "POST" && url.pathname === "/api/policy") {
+        const body = JSON.parse(await readBody(request)) as { mode: string; agents?: string[]; quorum?: number };
+        if (body.mode === "lead") setLead(root, body.agents?.[0] ?? null);
+        else if (body.mode === "council") setCouncil(root, body.agents ?? [], body.quorum);
+        else { setLead(root, null); setCouncil(root, null); }
+        return json(response, { ok: true });
+      }
+      if (request.method === "POST" && url.pathname === "/api/delegate") {
+        const body = JSON.parse(await readBody(request)) as { prompt?: string; taskId?: string; worker?: string };
+        if (!options.self) throw new Error("This control room can't start agents; run it with `agentbrain on`.");
+        if (!body.taskId && !body.prompt?.trim()) throw new Error("Say what you want done.");
+        const result = delegate(root, { prompt: body.prompt?.trim(), taskId: body.taskId, worker: body.worker }, options.self);
+        return json(response, { ok: true, taskId: result.task.id, worker: result.worker.name });
+      }
+      if (request.method === "POST" && url.pathname === "/api/verify") {
+        const body = JSON.parse(await readBody(request)) as { taskId: string };
+        startVerification(root, findTask(root, body.taskId).id);
+        return json(response, { ok: true });
+      }
+      if (request.method === "POST" && url.pathname === "/api/settings") {
+        const body = JSON.parse(await readBody(request)) as { worker?: string; checks?: string[] };
+        if (body.worker) setDefaultWorker(root, body.worker);
+        if (body.checks) setChecks(root, body.checks.map((c) => c.trim()).filter(Boolean));
+        return json(response, { ok: true });
+      }
+      if (request.method === "POST" && url.pathname === "/api/review") {
+        const body = JSON.parse(await readBody(request)) as { taskId: string; verdict: string; notes?: string };
+        if (body.verdict !== "approved" && body.verdict !== "changes") throw new Error("verdict must be approved or changes");
+        // The person at the dashboard is the developer: their verdict decides (an override).
+        const result = reviewTask(root, body.taskId, { verdict: body.verdict, reviewer: "developer", notes: body.notes });
+        return json(response, { ok: true, outcome: result.outcome, conflicts: result.conflicts });
+      }
+      if (request.method === "POST" && ["/api/message", "/api/stop", "/api/open", "/api/open-vault"].includes(url.pathname)) {
         const body = JSON.parse(await readBody(request)) as Record<string, string>;
+        if (url.pathname === "/api/open-vault") {
+          openUrl(vaultGraph(root).dir);
+          return json(response, { ok: true });
+        }
         if (url.pathname === "/api/open") {
           openInEditor(findTask(root, body.taskId).workdir);
         } else {
@@ -139,18 +210,3 @@ export async function startUiServer(root: string, options: { port?: number } = {
     },
   };
 }
-
-const PAGE = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AgentBrain</title>
-<style>
-:root{color-scheme:light dark;--bg:#f4f1ea;--panel:#fffdf8;--ink:#20231f;--muted:#72766d;--line:#d8d5ca;--accent:#d65b38} @media(prefers-color-scheme:dark){:root{--bg:#171916;--panel:#22251f;--ink:#f3f0e7;--muted:#a4aa9d;--line:#3a3d35;--accent:#f08a62}} *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px ui-sans-serif,system-ui,sans-serif}main{display:grid;grid-template-columns:310px 1fr;min-height:100vh}aside{border-right:1px solid var(--line);padding:24px 16px;overflow:auto}h1{font:700 28px Georgia,serif;margin:0 0 24px}h2{font:700 24px Georgia,serif;margin:0 0 8px}h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:25px 0 8px}.task{display:block;width:100%;text-align:left;background:none;border:1px solid transparent;border-radius:7px;color:inherit;padding:12px;margin:4px 0;cursor:pointer}.task:hover,.task.active{background:var(--panel);border-color:var(--line)}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#999;margin-right:8px}.running{background:#37a66a}.warning{background:#d5a528}.handoff{background:#4e91d8}.review{background:#9a65ce}.failed,.blocked{background:#d5534b}.agent{color:var(--muted);font-size:12px;margin:5px 0 0 18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.objective{margin-left:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}section{padding:42px clamp(24px,6vw,90px);max-width:1100px}.top{display:flex;justify-content:space-between;gap:16px;align-items:start}button,.send{border:1px solid var(--line);background:var(--panel);color:inherit;border-radius:5px;padding:9px 13px;cursor:pointer}button:hover{border-color:var(--accent)}pre{background:var(--panel);border:1px solid var(--line);padding:14px;overflow:auto;white-space:pre-wrap;max-height:360px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:18px}.box{border-top:2px solid var(--line);padding-top:10px}.box ul{padding-left:20px;line-height:1.55}.muted{color:var(--muted)}textarea{width:100%;min-height:70px;background:var(--panel);border:1px solid var(--line);color:inherit;padding:10px;margin:8px 0}.actions{display:flex;gap:8px;align-items:center}@media(max-width:700px){main{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--line);max-height:38vh}section{padding:28px 18px}}
-</style></head><body><main><aside><h1>AgentBrain</h1><div id="tasks"></div></aside><section id="detail"><p class="muted">Select a task</p></section></main>
-<script>
-const token=location.hash.replace(/^#token=/,'');let state;let selected;
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const api=(path,opts={})=>fetch(path,{...opts,headers:{'x-agentbrain-token':token,'content-type':'application/json',...(opts.headers||{})}}).then(r=>r.json());
-const list=a=>a?.length?'<ul>'+a.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>':'<p class="muted">None</p>';
-function render(){if(!state)return;document.querySelector('#tasks').innerHTML=state.tasks.map(t=>'<button class="task '+(t.id===selected?'active':'')+'" data-id="'+esc(t.id)+'"><span class="dot '+(t.warning?'warning':esc(t.status))+'"></span>'+esc(t.id)+'<div class="agent">'+esc(t.agent||'unassigned')+'</div><div class="objective">'+esc(t.objective)+'</div></button>').join('')+(state.queue?.length?'<h3>Queue</h3>'+state.queue.map(q=>'<div class="objective muted">'+esc(q.objective)+'</div>').join(''):'');document.querySelectorAll('[data-id]').forEach(b=>b.onclick=()=>{selected=b.dataset.id;render();show()});show()}
-async function show(){const t=state?.tasks.find(x=>x.id===selected)||state?.tasks[0];if(!t)return;selected=t.id;const prevMsg=document.querySelector('#message');const draft=prevMsg?prevMsg.value:'';const typing=document.activeElement===prevMsg;const prevPre=document.querySelector('#transcript');const pinned=!prevPre||prevPre.scrollTop+prevPre.clientHeight>=prevPre.scrollHeight-8;const [d,l]=await Promise.all([api('/api/diff?task='+encodeURIComponent(t.id)),api('/api/log?task='+encodeURIComponent(t.id))]);let live=t.liveSession;let transcript=live?await api('/api/transcript?session='+encodeURIComponent(live.sessionId)):null;document.querySelector('#detail').innerHTML='<div class="top"><div><p class="muted">'+esc(t.status)+(t.warning?' · '+esc(t.warning):'')+'</p><h2>'+esc(t.objective)+'</h2><p class="muted">'+esc(t.nextAction||'No next action recorded')+'</p></div><div class="actions"><button id="open">Open in VS Code</button>'+(live&&live.alive?'<button id="stop">Stop</button>':'')+'</div></div><div class="grid"><div class="box"><h3>Completed</h3>'+list(t.completed)+'</div><div class="box"><h3>Remaining</h3>'+list(t.remaining)+'</div><div class="box"><h3>Decisions</h3>'+list(t.decisions)+'</div><div class="box"><h3>Failures</h3>'+list(t.failures)+'</div></div><h3>Changed files and diff</h3><pre>'+esc(d.diff)+'</pre><h3>Timeline</h3><pre>'+esc(l.map(x=>x.timestamp+'  '+x.event+'  '+x.agent+'  '+x.reason).join('\\n'))+'</pre>'+(live&&live.mode==='headless'?'<h3>Live transcript</h3><pre id="transcript">'+esc((transcript?.transcript||[]).join('\\n'))+'</pre><textarea id="message" placeholder="Message this session"></textarea><button id="send">Send</button>':'')+'<p class="muted">Workdir: '+esc(t.workdir)+'</p>';const msg=document.querySelector('#message');if(msg){msg.value=draft;if(typing)msg.focus()}const pre=document.querySelector('#transcript');if(pre&&pinned)pre.scrollTop=pre.scrollHeight;document.querySelector('#open').onclick=()=>api('/api/open',{method:'POST',body:JSON.stringify({taskId:t.id})});document.querySelector('#stop')?.addEventListener('click',()=>api('/api/stop',{method:'POST',body:JSON.stringify({sessionId:live.sessionId})}));document.querySelector('#send')?.addEventListener('click',()=>{const m=document.querySelector('#message');api('/api/message',{method:'POST',body:JSON.stringify({sessionId:live.sessionId,text:m.value})});m.value=''})}
-api('/api/snapshot').then(x=>{state=x;selected=x.tasks[0]?.id;render()});const events=new EventSource('/api/events?token='+encodeURIComponent(token));events.addEventListener('snapshot',e=>{state=JSON.parse(e.data);render()});
-</script></body></html>`;

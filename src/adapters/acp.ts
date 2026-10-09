@@ -7,7 +7,8 @@
  * writes (confined to the task's working directory) and answers permission
  * requests from a policy, since no human is watching.
  */
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { spawnPortable } from "../core/platform.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -66,7 +67,7 @@ export class AcpClient {
   }
 
   start(): void {
-    const child = spawn(this.options.command, this.options.args, {
+    const child = spawnPortable(this.options.command, this.options.args, {
       cwd: this.options.cwd,
       env: this.options.env ?? process.env,
       stdio: ["pipe", "pipe", "pipe"],

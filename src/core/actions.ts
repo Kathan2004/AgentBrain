@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import { recordActivity } from "./activity.js";
 import { commitsSince, getGitState } from "./git.js";
 import { makeCheckpoint, renderHandoff, type Checkpoint } from "./handoff.js";
 import { tasksDir } from "./paths.js";
 import { compilePatterns, redact, redactAll } from "./redact.js";
+import { gateFinish, startVerification } from "./review.js";
 import { describeActivity, taskActivity } from "./stall.js";
 import { taskForDir, taskWorkdir } from "./worktree.js";
 import { SCHEMA_VERSION, isTaskStatus, TASK_STATUSES } from "./state.js";
@@ -42,7 +44,7 @@ function redactor(root: string): RegExp[] {
   return compilePatterns(getProject(root).redactPatterns);
 }
 
-export function createTask(root: string, objective: string): TaskState {
+export function createTask(root: string, objective: string, options: { activate?: boolean } = {}): TaskState {
   const text = redact(objective.trim(), redactor(root));
   if (!text) throw new Error("Task objective cannot be empty.");
 
@@ -65,9 +67,12 @@ export function createTask(root: string, objective: string): TaskState {
   };
   saveTask(root, task);
 
-  const project = getProject(root);
-  project.activeTaskId = id;
-  saveProject(root, project);
+  // Subtasks an agent delegates don't take over the developer's active task.
+  if (options.activate !== false) {
+    const project = getProject(root);
+    project.activeTaskId = id;
+    saveProject(root, project);
+  }
   return task;
 }
 
@@ -98,6 +103,7 @@ export interface TaskPatch {
 /** Applies a progress update. All free text is redacted before it is stored. */
 export function updateTask(root: string, taskId: string, patch: TaskPatch): TaskState {
   const task = getTask(root, taskId);
+  const previous = task.status;
   const extra = redactor(root);
   const clean = (items?: string[]) => redactAll(items ?? [], extra);
 
@@ -140,7 +146,11 @@ export function updateTask(root: string, taskId: string, patch: TaskPatch): Task
     if (!task.completed.includes(item)) task.completed.push(item);
   }
   task.remaining = task.remaining.filter((item) => !dropped.has(item));
-  task.decisions.push(...clean(patch.decisions));
+  const decisions = clean(patch.decisions);
+  task.decisions.push(...decisions);
+  for (const text of decisions) {
+    recordActivity(root, { agent: patch.agent?.id ?? task.agent?.id ?? "developer", session: patch.agent?.sessionId, task: task.id, kind: "decision", text });
+  }
   task.failures = [...task.failures.filter((f) => !fixed.has(f)), ...clean(patch.failures)];
   task.blockers = [...(task.blockers ?? []).filter((b) => !unblockSet.has(b)), ...clean(patch.blockers)];
   if (patch.next !== undefined) task.nextAction = redact(patch.next, extra);
@@ -155,6 +165,20 @@ export function updateTask(root: string, taskId: string, patch: TaskPatch): Task
     }
   }
 
+  // Progress shows in the live feed and keeps MCP-connected agents visible as active.
+  const actor = patch.agent?.id ?? task.agent?.id ?? "developer";
+  for (const item of done) recordActivity(root, { agent: actor, session: patch.agent?.sessionId, task: task.id, kind: "progress", text: `Done: ${item}` });
+  if (patch.next !== undefined && task.nextAction) recordActivity(root, { agent: actor, session: patch.agent?.sessionId, task: task.id, kind: "progress", text: `Next: ${task.nextAction}` });
+  if (patch.agent?.sessionId) {
+    const session = getSession(root, patch.agent.id, patch.agent.sessionId);
+    if (session && !session.endedAt) {
+      saveSession(root, { ...session, lastSeenAt: new Date().toISOString(), activity: "working", ...(task.nextAction ? { lastAction: `Next: ${task.nextAction}` } : {}) });
+    }
+  }
+
+  // With a lead agent set, a worker's finished task waits for the lead's review.
+  const submitted = gateFinish(root, task, previous, patch.agent?.id);
+
   // Finishing the task finishes its objective; agents never tick that item off themselves.
   if ((task.status === "review" || task.status === "done") && task.remaining.includes(task.objective)) {
     task.remaining = task.remaining.filter((r) => r !== task.objective);
@@ -166,6 +190,8 @@ export function updateTask(root: string, taskId: string, patch: TaskPatch): Task
     task.status = "running";
   }
   saveTask(root, task);
+  // AgentBrain checks the submission itself: runs the project's checks and compares claims with evidence.
+  if (submitted) startVerification(root, task.id);
   return task;
 }
 
@@ -297,7 +323,12 @@ export function briefContext(root: string, taskId: string): string {
   const note = warning
     ? `\n> Note: ${warning} If you are taking over, continue from the next action; your first update makes the task yours.\n`
     : "";
-  return `${intro}\n${note}${context}${taskCommitsSection(root, task)}`;
+  const children = listTasks(root).filter((t) => t.parent === task.id);
+  const subtasks = children.length
+    ? `\n## Subtasks you delegated\n${children.map((t) => `- ${t.id} [${t.status}] ${t.objective}${t.agent ? ` (${t.agent.id})` : ""}`).join("\n")}\n`
+    : "";
+  const parent = task.parent ? `\n> This is part of ${task.parent}${task.requestedBy ? `, delegated by ${task.requestedBy}` : ""}. Do only this part.\n` : "";
+  return `${intro}\n${parent}${note}${context}${taskCommitsSection(root, task)}${subtasks}`;
 }
 
 /** First Git HEAD recorded for a task: where its work started. */

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { recordActivity } from "./activity.js";
 import path from "node:path";
 import { AcpClient, DEFAULT_ALLOWED_KINDS, type AcpEvent, type ToolKind } from "../adapters/acp.js";
 import { briefContext, closeSession, takeOver, writeCheckpoint } from "./actions.js";
@@ -120,6 +121,10 @@ export async function runHeadless(
   saveSession(root, { ...session, mode: "headless", pid: process.pid, transcript });
   const log = (event: AcpEvent) => {
     fs.appendFileSync(transcript, `[${new Date().toISOString()}] ${event.kind}: ${event.text}\n`);
+    // Tool calls and file writes also go to the live feed (messages and thoughts stay in the transcript).
+    if (event.kind === "tool" || event.kind === "fs" || event.kind === "permission") {
+      recordActivity(root, { agent: agent.id, session: agent.sessionId, task: taskId, kind: event.kind === "fs" ? "edit" : "tool", text: event.text.split("\n")[0] });
+    }
     options.onEvent?.(event);
   };
 

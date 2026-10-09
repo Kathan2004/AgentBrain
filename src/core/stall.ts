@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { latestCheckpoint } from "./actions.js";
-import { getGitState } from "./git.js";
+import { getGitState, type GitState } from "./git.js";
 import type { AgentRef, TaskState } from "./state.js";
 import { taskWorkdir } from "./worktree.js";
 
@@ -36,6 +36,8 @@ export function taskActivity(
   task: TaskState,
   thresholdMinutes = DEFAULT_STALL_MINUTES,
   now = new Date(),
+  /** Git state of the task's workdir, if the caller already has it. */
+  git?: GitState,
 ): TaskActivity | null {
   if (task.status !== "running" && task.status !== "handoff") return null;
 
@@ -47,7 +49,7 @@ export function taskActivity(
   // Per-task: a task with its own worktree only sees its own agent's edits.
   const workdir = taskWorkdir(root, task);
   let latestFile = 0;
-  for (const file of getGitState(workdir).changedFiles) {
+  for (const file of (git ?? getGitState(workdir)).changedFiles) {
     try {
       latestFile = Math.max(latestFile, fs.statSync(path.join(workdir, file)).mtimeMs);
     } catch {

@@ -5,6 +5,7 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -44,3 +45,33 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+  windows:
+    # The full suite stubs agents with bash scripts; on Windows run everything that
+    # doesn't, plus a CLI smoke run, so Windows-specific breakage shows up.
+    name: Node 22 on windows-latest
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Configure Git identity
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+      - run: npm ci
+      - run: npm run build
+      - name: Tests that don't need bash
+        run: npx vitest run tests/platform.test.ts tests/council.test.ts tests/messages.test.ts tests/redact.test.ts tests/docs.test.ts tests/handoff.test.ts tests/export.test.ts tests/prune.test.ts tests/log.test.ts
+      - name: CLI smoke run
+        shell: bash
+        run: |
+          mkdir smoke && cd smoke && git init -q && echo hi > README.md && git add . && git commit -qm init
+          node ../dist/cli/main.js init
+          node ../dist/cli/main.js task create "Smoke test"
+          node ../dist/cli/main.js message all "hello from CI"
+          node ../dist/cli/main.js status

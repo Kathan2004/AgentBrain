@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { recordActivity } from "./activity.js";
+import { sendMessage } from "./messages.js";
 import { checkpointsDir, brainDir, sessionFile, taskDir, tasksDir } from "./paths.js";
 import type { AgentSessionState, TaskState } from "./state.js";
 
@@ -15,6 +17,14 @@ export interface ProjectState {
   agents?: { prefer?: string[]; avoid?: string[] };
   /** Give every new task its own Git worktree (opt out per task with --no-worktree). */
   worktreeByDefault?: boolean;
+  /** The lead agent: work by every other agent waits for its review before it is done. */
+  lead?: string;
+  /** A review council instead of a lead: members vote, weighted by reputation, and a quorum decides. */
+  council?: { members: string[]; quorum?: number };
+  /** The agent prompts are delegated to by default (console and control room). */
+  worker?: string;
+  /** Commands AgentBrain runs itself on every submitted result (e.g. "npm test"). */
+  checks?: string[];
   /** Task ids waiting for `agentbrain queue run`, next first. */
   queue?: string[];
 }
@@ -34,6 +44,13 @@ export function readJson<T>(file: string): T {
 export function initStore(cwd: string): void {
   fs.mkdirSync(tasksDir(cwd), { recursive: true });
   fs.mkdirSync(path.join(brainDir(cwd), "agents"), { recursive: true });
+
+  // Runtime files that are personal to this machine never belong in Git.
+  const ignore = path.join(brainDir(cwd), ".gitignore");
+  const wanted = ["activity.jsonl", "ui.json", "ui.log", "reputation.json"];
+  const current = fs.existsSync(ignore) ? fs.readFileSync(ignore, "utf8") : "";
+  const missing = wanted.filter((line) => !current.split("\n").includes(line));
+  if (missing.length) fs.writeFileSync(ignore, `${current}${current && !current.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`, "utf8");
 
   const projectFile = path.join(brainDir(cwd), "project.json");
   if (!fs.existsSync(projectFile)) {
@@ -66,6 +83,27 @@ export function saveTask(cwd: string, task: TaskState): void {
       ...(task.agent ? { agent: task.agent.id } : {}),
     }];
     task.events = events.slice(-MAX_EVENTS);
+    // An agent that delegated this task hears when it is ready, stuck or handed back.
+    if (before && before.status !== task.status && task.requestedBy && task.requestedBy !== "developer" &&
+      ["review", "done", "handoff", "blocked", "failed"].includes(task.status)) {
+      sendMessage(cwd, {
+        from: "agentbrain",
+        to: task.requestedBy,
+        task: task.id,
+        text: `The task you delegated, ${task.id} "${task.objective}", is now ${task.status}` +
+          (task.status === "done" ? "." : task.status === "review" ? "; it is waiting for review." : `. ${task.nextAction ? `Next: ${task.nextAction}` : ""}`),
+      });
+    }
+    if (before && before.status !== task.status) {
+      const kind = task.status === "handoff" ? "handoff" : task.status === "review" ? "review" : "status";
+      recordActivity(cwd, {
+        agent: task.agent?.id ?? "developer",
+        session: task.agent?.sessionId,
+        task: task.id,
+        kind,
+        text: `${before.status} → ${task.status}: ${task.objective}`,
+      });
+    }
   } else {
     task.events = before.events ?? task.events;
   }

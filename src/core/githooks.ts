@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { writeCheckpoint } from "./actions.js";
+import { recordActivity } from "./activity.js";
 import { findRoot } from "./paths.js";
 import { getProject, getTask } from "./store.js";
 import { taskForDir } from "./worktree.js";
@@ -52,11 +53,19 @@ export function postCommit(cwd: string): void {
     const owner = taskForDir(root, cwd);
     const activeId = getProject(root).activeTaskId;
     const task = owner ?? (activeId ? getTask(root, activeId) : null);
-    if (!task || task.status !== "running") return;
-    // A task with its own worktree only owns commits made in that worktree.
-    if (!owner && task.worktree) return;
     const sha = git(cwd, ["rev-parse", "--short", "HEAD"]);
     const subject = git(cwd, ["log", "-1", "--pretty=%s"]);
+    const files = git(cwd, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]).split("\n").filter(Boolean);
+    // A task with its own worktree only owns commits made in that worktree.
+    const owns = task && task.status === "running" && (owner || !task.worktree);
+    recordActivity(root, {
+      agent: owns ? task.agent?.id ?? "developer" : "developer",
+      task: owns ? task.id : undefined,
+      kind: "commit",
+      text: `${sha} ${subject}`,
+      files: files.slice(0, 50),
+    });
+    if (!owns) return;
     writeCheckpoint(root, task.id, { reason: `commit ${sha}: ${subject}`, status: "checkpoint" });
   } catch {
     // A commit must never depend on AgentBrain being available or healthy.

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { findOnPath } from "../adapters/process.js";
@@ -10,6 +11,12 @@ import { requestStop, runHeadless, sendToSession, sessionControl } from "../core
 import { routeTask } from "../core/routing.js";
 import { addToQueue, readQueue, removeFromQueue, shiftQueue, waitUntilSettled } from "../core/queue.js";
 import { runTui } from "../ui/tui.js";
+import { runConsole } from "../ui/console.js";
+import { claudeBinary, codexBinary } from "../core/delegate.js";
+import { runPrint } from "../core/printrun.js";
+import { selfCommand as platformSelf } from "../core/platform.js";
+import { markRead, sendMessage, unreadFor } from "../core/messages.js";
+import { deliverToChat } from "../core/delegate.js";
 import {
   buildPrompt,
   closeSession,
@@ -34,15 +41,37 @@ import { addWorktree, mergeWorktree, pruneWorktrees, removeWorktree, taskWorkdir
 import { taskTimeline } from "../core/timeline.js";
 import { pruneTask } from "../core/prune.js";
 import { exportTask } from "../core/export.js";
+import { recall, writeVault } from "../core/vault.js";
 import { startUiServer } from "../ui/server.js";
+import { openBrowser, previousToken, runningUi, startUiDaemon, stopUiDaemon, writeUiState } from "../ui/daemon.js";
+import { claudeHooksInstalled, handleClaudeHook, installClaudeHooks, uninstallClaudeHooks } from "../core/claudehooks.js";
+import { computeTally, faultTolerance, getLead, pendingReviews, readReputation, reviewPolicy, reviewSummary, reviewTask, setChecks, setCouncil, setLead, verifyTask } from "../core/review.js";
 import { defaultNotificationSender, watchNotifications } from "../core/notify.js";
 import { snapshot as liveSnapshot } from "../ui/model.js";
 
 const USAGE = `
-AgentBrain 0.12 — move coding tasks between AI agents without losing state
+AgentBrain 0.13 — one console for every coding agent: delegate, review, remember
 
-Live view
-  agentbrain                              Every task and agent, live (keyboard and mouse)
+Control plane
+  agentbrain on [--no-open]               Switch AgentBrain on for this repo, from any terminal or agent:
+                                          connect every agent, stream their activity, open the control room
+  agentbrain off                          Stop streaming activity and close the control room
+  agentbrain lead [<agent-id> | --none]   Show or set the lead agent, who reviews every other agent's work
+  agentbrain council <agent>... [--quorum 0.67] | --none
+                                          Instead of one lead, a council votes on every result: sealed votes,
+                                          weighted by reputation, decided by quorum (survives corrupted members)
+  agentbrain checks <command>... | --none Commands AgentBrain runs itself on every result (e.g. "npm test");
+                                          failing checks block approval and expose false claims
+  agentbrain message <agent|all> "<text>" Message the agents working on this project (they see it in their next step)
+  agentbrain inbox                        Messages for you (or for --agent <id>)
+  agentbrain recall "<query>"             Search the project's shared memory (the Obsidian vault in .agentbrain/vault)
+  agentbrain review [task-id]             Show results waiting for review: claims, diff, checks, flags, votes
+  agentbrain review <task-id> --approve | --changes "<notes>"
+                                          Vote as a reviewer, or decide as the developer (override)
+
+Console
+  agentbrain                              Open the console: type a task, an agent takes it, you review the result
+  agentbrain top                          Every task and agent, live (keyboard and mouse)
   agentbrain notify [--print]             Notify when tasks settle or stall
 
 Setup
@@ -52,6 +81,7 @@ Setup
   agentbrain connect [--only <ids>]       Give every agent live AgentBrain state via MCP
                                           (${CONNECT_TARGETS.map((t) => t.id).join(", ")}) + rules + Git hook
   agentbrain doctor                         Check setup and print fixes for anything missing
+  agentbrain vault                          Regenerate the Obsidian Markdown vault
   agentbrain mcp [--root <dir>]           Run the MCP server (started by agents, not by hand)
   agentbrain hooks install                 Install the automatic post-commit checkpoint hook
   agentbrain hooks uninstall               Remove the automatic post-commit checkpoint hook
@@ -76,11 +106,13 @@ Tasks
   agentbrain status
 
 Switching agents
-  agentbrain ui [--port N]                  Open the local live task dashboard
+  agentbrain ui [--port N]                  Run the control room in this terminal
   agentbrain export [task-id] [--out <file>]
                                           Export a portable Markdown brief and history
   agentbrain run <agent> [task-id]        Launch a terminal agent on the task; auto-handoff on exit
   agentbrain run vscode [task-id] --here  Send the task to the VS Code chat you already have open (no new window)
+  agentbrain run claude-code|codex [task-id] --print
+                                          Run Claude Code (claude -p) or Codex (codex exec) on the task, no window
   agentbrain run [task-id] --agent <id> -- <command> [args...]
                                           Launch any other agent ({prompt}, {prompt_file} expand)
   agentbrain run <agent> [task-id] --headless [--allow <kinds>] [--max-turns N] [--timeout <min>]
@@ -176,6 +208,12 @@ function parseCli() {
         print: { type: "boolean" },
         force: { type: "boolean" },
         json: { type: "boolean" },
+        "no-open": { type: "boolean" },
+        approve: { type: "boolean" },
+        changes: { type: "string" },
+        none: { type: "boolean" },
+        verify: { type: "boolean" },
+        quorum: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -420,6 +458,18 @@ async function queueRun(agentName: string | undefined): Promise<void> {
 
 async function run(agentName: string | undefined, taskArg: string | undefined): Promise<void> {
   if (flags.headless) return runHeadlessCli(agentName, taskArg);
+  if (flags.print) {
+    // `run claude-code|codex [task] --print`: the agent CLI with no window (used by delegation).
+    const cwd = root();
+    const id = agentName === "claude" ? "claude-code" : agentName;
+    const command = id === "claude-code" ? claudeBinary() : id === "codex" ? codexBinary() : null;
+    if (id !== "claude-code" && id !== "codex") throw new Error("--print works with claude-code or codex.");
+    if (!command) throw new Error(`${id} is not installed.`);
+    const taskId = resolveTaskId(cwd, taskArg, undefined, process.cwd());
+    const result = await runPrint(cwd, taskId, { id, command }, { cli: selfCommand(), timeoutMinutes: flags.timeout ? Number(flags.timeout) : undefined });
+    console.error(`✓ ${id} run ended: ${result.stopReason}; task is ${result.status}.`);
+    return;
+  }
   const cwd = root();
   const adapter = passthrough.length
     ? customAdapter(passthrough, flags.agent)
@@ -676,11 +726,18 @@ function hooks(action: "install" | "uninstall"): void {
 }
 
 async function ui(): Promise<void> {
-  const text = flags.port ?? "4747";
-  if (!/^\d+$/.test(text)) throw new Error("--port must be a number.");
-  const port = Number(text);
-  if (port < 0 || port > 65535) throw new Error("--port must be between 0 and 65535.");
-  const server = await startUiServer(root(), { port });
+  const text = flags.port;
+  if (text !== undefined && !/^\d+$/.test(text)) throw new Error("--port must be a number.");
+  const port = text === undefined ? undefined : Number(text);
+  if (port !== undefined && (port < 0 || port > 65535)) throw new Error("--port must be between 0 and 65535.");
+  const cwd = root();
+  const running = runningUi(cwd);
+  if (running) {
+    console.log(`The control room is already running: ${running.url}`);
+    return;
+  }
+  const server = await startUiServer(cwd, { port, token: previousToken(cwd), self: selfCommand() });
+  writeUiState(cwd, server.url);
   console.log(server.url);
   const close = () => { void server.close().finally(() => process.exit(0)); };
   process.once("SIGINT", close);
@@ -717,8 +774,8 @@ function printWorktree(task: ReturnType<typeof getTask>): void {
 function connect(): void {
   const cwd = root();
   const onPath = findOnPath("agentbrain") !== null;
-  const command = onPath ? "agentbrain" : process.execPath;
-  const args = onPath ? ["mcp"] : [fs.realpathSync(process.argv[1]), "mcp"];
+  const command = onPath && process.platform !== "win32" ? "agentbrain" : process.execPath;
+  const args = command === "agentbrain" ? ["mcp"] : [fs.realpathSync(process.argv[1]), "mcp"];
   const only = flags.only?.split(",").map((x) => x.trim()).filter(Boolean);
 
   console.log("MCP (live state in every new agent session):");
@@ -739,13 +796,181 @@ function connect(): void {
   console.log("\nRestart open agent sessions (or reload the VS Code / Cursor window) to pick up the MCP server.");
 }
 
+/** How to start AgentBrain itself in a background process: Node and the script, on every OS. */
+function selfCommand(): { command: string; args: string[] } {
+  return platformSelf();
+}
+
+/**
+ * How agents' config files (MCP servers, hooks) should start AgentBrain: the
+ * portable `agentbrain` command when it is on PATH, except on Windows, where
+ * it is a .cmd shim that agents can't start without a shell.
+ */
+function configCommand(): { command: string; args: string[] } {
+  return findOnPath("agentbrain") && process.platform !== "win32" ? { command: "agentbrain", args: [] } : platformSelf();
+}
+
+function gitTop(dir: string): string | null {
+  try {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The project to work in: the nearest AgentBrain project, else the Git
+ * repository around the current folder (set up on first use). Never a home
+ * folder or a folder outside any project: AgentBrain writes agent configs into
+ * the project, and those must not land somewhere global.
+ */
+function projectRoot(): string {
+  const found = findRoot(process.cwd());
+  if (found && found !== os.homedir()) return found;
+  const top = gitTop(process.cwd());
+  if (!top || top === os.homedir()) {
+    throw new Error(
+      "Run AgentBrain inside a project: cd into a Git repository first (or run `git init` there). " +
+        "It never sets itself up in your home folder or outside a repository.",
+    );
+  }
+  initStore(top);
+  console.log(`✓ Set up AgentBrain in ${top}`);
+  return top;
+}
+
+/** `agentbrain on`: everything needed to orchestrate from here, in one idempotent step. */
+async function on(): Promise<void> {
+  const cwd = projectRoot();
+  initStore(cwd);
+  writeVault(cwd);
+  const self = selfCommand();
+  const config = configCommand();
+  const connected = connectAgents(cwd, config.command, [...config.args, "mcp"]);
+  const agents = connected.filter((r) => r.action !== "skipped").map((r) => r.agent);
+  console.log(`✓ Live state for ${agents.join(", ")} (MCP)`);
+  for (const r of connected.filter((r) => r.action === "skipped")) console.log(`  ! ${r.agent}: ${r.note}`);
+  writeRules(cwd, cliCommand());
+  try { installPostCommitHook(cwd); } catch { /* not a Git repository */ }
+  const hook = installClaudeHooks(cwd, `${[config.command === "agentbrain" ? "agentbrain" : JSON.stringify(config.command), ...config.args.map((a) => JSON.stringify(a))].join(" ")} hook claude`);
+  console.log(`✓ Streaming Claude Code activity (${path.relative(cwd, hook.file)})`);
+  const lead = getLead(cwd);
+  console.log(lead ? `✓ Lead agent: ${lead}` : "  No lead agent yet: agentbrain lead claude-code   (or pick one in the control room)");
+  const ui = await startUiDaemon(cwd, self.command, self.args);
+  console.log(`✓ Control room: ${ui.url}`);
+  if (!flags["no-open"]) openBrowser(ui.url);
+  console.log("\nAgents already open pick up the MCP server after a restart (or a window reload in VS Code / Cursor).");
+}
+
+function vault(): void {
+  const folder = writeVault(root());
+  console.log(`✓ Vault written to ${folder}`);
+}
+
+async function off(): Promise<void> {
+  const cwd = root();
+  console.log(uninstallClaudeHooks(cwd) ? "✓ Stopped streaming Claude Code activity" : "  Claude Code activity was not being streamed");
+  console.log((await stopUiDaemon(cwd)) ? "✓ Stopped the control room" : "  The control room was not running");
+  console.log("Task state, memory and MCP configs are kept. `agentbrain on` turns everything back on.");
+}
+
+function lead(agent?: string): void {
+  const cwd = root();
+  if (flags.none) {
+    setLead(cwd, null);
+    console.log("✓ No lead agent: agents finish their own tasks.");
+  } else if (agent) {
+    console.log(`✓ Lead agent: ${setLead(cwd, agent)}. Work by other agents now waits for its review.`);
+  } else {
+    const current = getLead(cwd);
+    console.log(current ? `Lead agent: ${current}` : "No lead agent. Set one with: agentbrain lead <agent-id>");
+  }
+}
+
+function council(members: string[]): void {
+  const cwd = root();
+  if (flags.none) {
+    setCouncil(cwd, null);
+    console.log("✓ Council dissolved.");
+    return;
+  }
+  if (members.length) {
+    const ids = members.flatMap((m) => m.split(",")).map((m) => m.trim()).filter(Boolean);
+    const quorum = flags.quorum === undefined ? undefined : Number(flags.quorum);
+    const policy = setCouncil(cwd, ids, quorum);
+    console.log(`✓ Council: ${policy.reviewers.join(", ")}; a result passes with ${Math.round(policy.quorum * 100)}% of reputation weight.`);
+    const f = faultTolerance(policy.reviewers.length, policy.quorum);
+    console.log(`  Survives ${f} broken, compromised or hallucinating reviewer(s)${f ? "" : "; add members to tolerate one (4 members tolerate 1, 7 tolerate 2)"}.`);
+    if (!getProject(cwd).checks?.length) console.log('  Tip: let AgentBrain verify results itself: agentbrain checks "npm test"');
+    return;
+  }
+  const policy = reviewPolicy(cwd);
+  if (policy.mode === "none") console.log("No reviewers: agents finish their own work. Set some with: agentbrain council <agent> <agent> <agent>");
+  else console.log(`${policy.mode === "lead" ? "Lead" : "Council"}: ${policy.reviewers.join(", ")}${policy.mode === "council" ? `; quorum ${Math.round(policy.quorum * 100)}%, survives ${faultTolerance(policy.reviewers.length, policy.quorum)}` : ""}`);
+  const rep = readReputation(cwd);
+  for (const [id, r] of Object.entries(rep)) console.log(`  ${id.padEnd(14)} weight ${r.score.toFixed(2)}  agreed ${r.agreed}  dissented ${r.dissented}  flagged ${r.flagged}`);
+}
+
+function checks(commands: string[]): void {
+  const cwd = root();
+  if (flags.none) {
+    setChecks(cwd, []);
+    console.log("✓ No checks: reviewers rely on the agents' own reports.");
+  } else if (commands.length) {
+    console.log(`✓ AgentBrain runs these itself on every submitted result: ${setChecks(cwd, commands).join("; ")}`);
+  } else {
+    const current = getProject(cwd).checks ?? [];
+    console.log(current.length ? current.join("\n") : 'No checks. Add some: agentbrain checks "npm test"');
+  }
+}
+
+function review(taskId?: string): void {
+  const cwd = root();
+  if (flags.verify) {
+    if (!taskId) throw new Error("Usage: agentbrain review <task-id> --verify");
+    const { task } = verifyTask(cwd, taskId);
+    if (!flags.json) console.log(reviewSummary(cwd, task));
+    return;
+  }
+  if (!flags.approve && flags.changes === undefined) {
+    const waiting = taskId ? [getTask(cwd, taskId)] : pendingReviews(cwd);
+    if (!waiting.length) console.log("Nothing is waiting for review.");
+    for (const task of waiting) console.log(`${reviewSummary(cwd, task, callerId())}\n`);
+    if (waiting.length) console.log('Give a verdict: agentbrain review <task-id> --approve   or   --changes "<what to fix>"');
+    return;
+  }
+  const id = taskId ?? pendingReviews(cwd)[0]?.id;
+  if (!id) throw new Error("Nothing is waiting for review.");
+  const result = reviewTask(cwd, id, { verdict: flags.approve ? "approved" : "changes", reviewer: callerId() ?? "developer", notes: flags.changes });
+  if (result.conflicts) {
+    console.log(`✗ ${id} conflicts with the current branch in: ${result.conflicts.join(", ")}. Merge aborted; still in review.`);
+    process.exitCode = 1;
+  } else if (!result.outcome) {
+    const t = result.tally ?? computeTally(cwd, result.task);
+    console.log(`✓ Vote recorded. No decision yet: ${t.approve.toFixed(1)} approve / ${t.changes.toFixed(1)} changes of ${t.total.toFixed(1)}${t.blocked ? ` (${t.blocked})` : ""}.`);
+  } else if (result.outcome === "approved") {
+    console.log(`✓ Approved ${id}${result.merged ? ` and merged ${result.merged} commit(s)` : ""}. It is done.`);
+  } else {
+    console.log(`✓ Sent ${id} back with the notes; the next agent picks them up.`);
+  }
+}
+
+async function claudeHook(): Promise<void> {
+  let input = "";
+  for await (const chunk of process.stdin) input += chunk;
+  let payload = {};
+  try { payload = JSON.parse(input); } catch { return; }
+  const output = handleClaudeHook(payload);
+  if (output) process.stdout.write(output);
+}
+
 async function main(): Promise<void> {
   const [command, subcommand, ...rest] = positionals;
   if (flags.help) usage(0);
-  // Bare `agentbrain` in a terminal opens the live view of every task and agent.
+  // Bare `agentbrain` in a terminal opens the console: type a task, an agent takes it.
   if (!command) {
     if (!process.stdout.isTTY || !process.stdin.isTTY) usage(1);
-    await runTui(root());
+    await runConsole(projectRoot(), { self: selfCommand() });
     return;
   }
 
@@ -865,10 +1090,49 @@ async function main(): Promise<void> {
     hooks(subcommand);
   } else if (command === "doctor") {
     doctor();
+  } else if (command === "vault") {
+    vault();
   } else if (command === "ui") {
     await ui();
   } else if (command === "notify") {
     await notify();
+  } else if (command === "top") {
+    if (!process.stdout.isTTY || !process.stdin.isTTY) throw new Error("agentbrain top needs a terminal.");
+    await runTui(root());
+  } else if (command === "on") {
+    await on();
+  } else if (command === "off") {
+    await off();
+  } else if (command === "lead") {
+    lead(subcommand);
+  } else if (command === "review") {
+    review(subcommand);
+  } else if (command === "council") {
+    council([subcommand, ...rest].filter(Boolean));
+  } else if (command === "checks") {
+    checks([subcommand, ...rest].filter(Boolean));
+  } else if (command === "message") {
+    const cwd = root();
+    const text = rest.join(" ");
+    if (!subcommand || !text) throw new Error('Usage: agentbrain message <agent|all> "<text>"');
+    const message = sendMessage(cwd, { from: callerId() ?? "developer", to: subcommand, text, ...(flags.task ? { task: flags.task } : {}) });
+    deliverToChat(cwd, message);
+    console.log(`✓ Sent to ${message.to === "all" ? "everyone" : message.to}.`);
+  } else if (command === "recall") {
+    const query = [subcommand, ...rest].filter(Boolean).join(" ");
+    if (!query) throw new Error('Usage: agentbrain recall "<what you are looking for>"');
+    const hits = recall(root(), query);
+    if (!hits.length) console.log("Nothing in the project's memory matches.");
+    for (const h of hits) console.log(`── ${h.note}\n${h.excerpt}\n`);
+  } else if (command === "inbox") {
+    const cwd = root();
+    const me = callerId() ?? "developer";
+    const unread = unreadFor(cwd, me);
+    if (!unread.length) console.log("No new messages.");
+    for (const m of unread) console.log(`${m.at.slice(11, 16)}  ${m.from}${m.to === "all" ? " → everyone" : ""}: ${m.text}`);
+    markRead(cwd, me);
+  } else if (command === "hook" && subcommand === "claude") {
+    await claudeHook();
   } else if (command === "hook" && subcommand === "post-commit") {
     postCommit(process.cwd());
   } else {

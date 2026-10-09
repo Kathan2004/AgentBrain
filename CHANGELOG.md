@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.13.0
+- **Console**: bare `agentbrain` opens a prompt-driven console. Type a task; it gets its own worktree and goes to the best-placed agent (Shift+Tab or `@claude`/`@codex`/`@copilot`/`@any` to choose), its work streams in live, and the result comes back for `/approve` or `/changes`. `agentbrain top` is the old live view
+- **Agent choice per task**, with reasons: who is free, approvals and send-backs in this project, reputation, usage limits, crashes, preferences
+- **Background Claude Code and Codex**: `agentbrain run claude-code|codex --print` (`claude -p`, `codex exec`, including the copy of Claude Code bundled with the Claude desktop app); sign-in is detected
+- **Pull work**: `@any` leaves a task for the next MCP agent you open (Claude app, Cursor, VS Code extensions)
+- **Control plane**: `agentbrain on`/`off` connects every agent, streams Claude Code activity through hooks, and runs the web control room (prompt box, what needs you, what is in progress, activity, brain graph, settings)
+- **Who decides**: a lead agent or a review council with sealed, reputation-weighted votes and a quorum; AgentBrain runs `agentbrain checks` itself and flags claims the evidence contradicts (false "tests pass", no changes, files that don't exist, dissent)
+- **Agents talk and delegate**: `agentbrain_message` / `agentbrain message`, and `agentbrain_delegate` to split work into linked subtasks with their own worktree, checks and review
+- **Memory palace**: `.agentbrain/vault` is an Obsidian vault (onboarding, lessons, decisions, code map, daily log, agent-written memory); `agentbrain_recall` / `agentbrain recall` and `agentbrain_remember`
+- The control room's Brain tab draws the real vault, notes and `[[links]]` read from disk, like Obsidian's graph view: rooms by colour, zoom and pan, labels that appear as you zoom, notes open in place with clickable links, and buttons to open the folder or the vault in Obsidian
+- Approving merges alongside someone else's uncommitted work unless the same files are touched
+- Never sets itself up outside a Git repository or in your home folder
+- Windows: PATHEXT-aware lookup, `.cmd` shims (arguments escaped twice, as batch files re-parse them), prompts on stdin, forward-slash paths in feeds, per-OS VS Code and browser; Windows CI job
+
 ## 0.12.0
 - `task update --drop` (and MCP `drop`): remove wrong or duplicate to-do items without marking them done
 - The task queue shows in the live terminal view and the web page
