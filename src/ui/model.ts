@@ -4,7 +4,7 @@ import path from "node:path";
 import { getGitState, type GitState } from "../core/git.js";
 import { readActivity, type ActivityEvent } from "../core/activity.js";
 import { readQueue } from "../core/queue.js";
-import { computeTally, faultTolerance, readReputation, reviewPolicy, type Reputation, type Tally } from "../core/review.js";
+import { computeTally, faultTolerance, readReputation, reviewPolicy, reviewPriority, type Reputation, type Tally } from "../core/review.js";
 import { BUILTIN_AGENTS } from "../adapters/registry.js";
 import { rankWorkers, type Worker } from "../core/delegate.js";
 import { describeActivity, taskActivity } from "../core/stall.js";
@@ -165,7 +165,11 @@ export function snapshot(root: string, options: { includeDone?: boolean } = {}):
         ...(task.status === "review" ? { tally: computeTally(root, task) } : {}),
       };
     })
-    .sort((a, b) => (ORDER[a.status] ?? 9) - (ORDER[b.status] ?? 9) || (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    .sort((a, b) =>
+      (ORDER[a.status] ?? 9) - (ORDER[b.status] ?? 9) ||
+      (b.review ? reviewPriority(b) : 0) - (a.review ? reviewPriority(a) : 0) ||
+      (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""),
+    );
   const project = getProject(root);
   const policy = reviewPolicy(root);
   const known = new Set<string>([...BUILTIN_AGENTS.map((a) => a.id), ...sessions.map((s) => s.agentId), ...policy.reviewers]);

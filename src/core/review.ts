@@ -42,6 +42,16 @@ export interface ReviewPolicy {
   checks: string[];
 }
 
+export function reviewPriority(task: Pick<TaskState, "review">): number {
+  const priorities: Record<ReviewFlag["kind"], number> = {
+    hallucination: 3,
+    "false-claim": 2,
+    "no-change": 1,
+    dissent: 0,
+  };
+  return Math.max(...(task.review?.flags ?? []).map((flag) => priorities[flag.kind] ?? 0), 0);
+}
+
 export function reviewPolicy(root: string): ReviewPolicy {
   const project = getProject(root);
   const checks = project.checks ?? [];
@@ -169,7 +179,7 @@ function git(cwd: string, args: string[]): string {
 
 /** Paths an agent mentions (src/x.ts, README.md, ...). */
 function mentionedFiles(text: string): string[] {
-  const found = text.match(/(?<![\w/.-])(?:[\w.-]+\/)*[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|py|go|rs|java|rb|css|html|yml|yaml|toml|sh)\b/g) ?? [];
+  const found = text.match(/(?<![\w/.-])(?:\.?[\w-]+\/)*[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|py|go|rs|java|rb|css|html|yml|yaml|toml|sh)\b/g) ?? [];
   return [...new Set(found)];
 }
 
@@ -178,7 +188,9 @@ function mentionedFiles(text: string): string[] {
  * name ("Brain.md") is as likely a note, a generated file or a plan as a claim.
  */
 function missingFiles(workdir: string, text: string): string[] {
-  return mentionedFiles(text).filter((file) => file.includes("/") && !fs.existsSync(path.join(workdir, file)));
+  return mentionedFiles(text).filter(
+    (file) => file.includes("/") && !file.startsWith(".agentbrain/") && !fs.existsSync(path.join(workdir, file)),
+  );
 }
 
 function changedSinceBase(root: string, task: TaskState): boolean {
@@ -297,7 +309,10 @@ export function computeTally(root: string, task: TaskState): Tally {
 export function pendingReviews(root: string): TaskState[] {
   return listTasks(root)
     .filter((t) => t.status === "review")
-    .sort((a, b) => (a.review?.requestedAt ?? a.updatedAt ?? "").localeCompare(b.review?.requestedAt ?? b.updatedAt ?? ""));
+    .sort((a, b) =>
+      reviewPriority(b) - reviewPriority(a) ||
+      (a.review?.requestedAt ?? a.updatedAt ?? "").localeCompare(b.review?.requestedAt ?? b.updatedAt ?? ""),
+    );
 }
 
 /** Results this agent still has to vote on. */

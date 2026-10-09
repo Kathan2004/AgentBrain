@@ -146,6 +146,47 @@ Agents search all of it with `agentbrain_recall`; you can too:
 agentbrain recall "how do we handle auth tokens"
 ```
 
+### Plan a big goal
+
+```bash
+agentbrain plan "add OAuth login with Google and GitHub"     # or /plan … in the console
+```
+
+A planner agent (Claude Code, else Codex) reads the code without editing it,
+splits the goal into independent pieces and hands each one to the best-placed
+agent with `agentbrain_delegate`. The pieces run in parallel, each in its own
+worktree with its own checks and review, and the goal's task lists them.
+
+### Connectors: every AI tool on the machine
+
+```bash
+agentbrain connectors            # what's installed, signed in, connected, and what it can do
+agentbrain connect codex kilo    # write AgentBrain into those tools' MCP config
+agentbrain disconnect kilo
+agentbrain delegate "add rate limiting to the API"   # hand a task over from a script or another agent
+```
+
+AgentBrain looks for terminal agents (Claude Code, including the copy inside the
+Claude app, Codex, Gemini CLI, Copilot CLI, Cursor CLI, OpenCode, Aider, Goose,
+Amp, Qwen Code), desktop apps (Claude, ChatGPT, Codex, Warp, Ollama), IDEs (VS
+Code, Cursor, Windsurf, Kiro, Zed, JetBrains) and IDE extensions in VS Code,
+Cursor and Windsurf (Copilot, Claude Code, Codex, Cline, Roo Code, Kilo Code,
+Continue, Amazon Q, Gemini Code Assist, Augment, Cody, Tabnine), on macOS,
+Windows and Linux. Each one is shown with what it can do with AgentBrain:
+
+- **can start tasks**: AgentBrain hands it work itself (Claude Code, Codex, the
+  VS Code chat, ACP agents);
+- **picks up tasks**: once connected over MCP it sees the project's tasks and
+  memory, picks up work, reports progress and reviews;
+- **plans & reviews**: chat apps with no access to the code (the Claude app);
+- **can't connect**: with the reason (the ChatGPT app only takes remote MCP
+  servers; Ollama is a model server, not an agent).
+
+Connecting writes AgentBrain into the tool's own MCP config: the project's file
+where the tool has one, the user-level file only where it has nothing else
+(Codex, Windsurf, Cline, the Claude app), and plain steps where a tool only
+takes MCP servers through its settings screen (Zed, JetBrains, Warp, Augment).
+
 ### Choosing the agent
 
 Each prompt goes to the agent best placed to do it right now: who is free,
@@ -244,6 +285,14 @@ Follow these steps from the root of the project you want agents to work on.
    The first command suggests the next agent and explains why; the second
    starts it with the saved brief. You should see the new agent continue from
    the previous checkpoint rather than starting from scratch.
+
+  Configure per-agent concurrency, run time, and daily delegation budgets:
+
+  ```bash
+  agentbrain limits
+  agentbrain limits claude-code --parallel 2 --minutes 30 --daily 5
+  agentbrain limits claude-code --none
+  ```
 
 8. **Watch the task live.**
 

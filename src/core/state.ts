@@ -49,6 +49,8 @@ export interface TaskState {
   parent?: string;
   /** Who asked for this task: the developer, or the agent that delegated it. */
   requestedBy?: string;
+  /** Worker selected by delegation and when it was selected. */
+  delegatedTo?: { worker: string; at: string };
   /** The task's own Git worktree, when it has one (`agentbrain worktree add`). */
   worktree?: { path: string; branch: string; base: string };
 }

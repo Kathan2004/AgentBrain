@@ -12,8 +12,10 @@ import { routeTask } from "../core/routing.js";
 import { addToQueue, readQueue, removeFromQueue, shiftQueue, waitUntilSettled } from "../core/queue.js";
 import { runTui } from "../ui/tui.js";
 import { runConsole } from "../ui/console.js";
-import { claudeBinary, codexBinary } from "../core/delegate.js";
+import { claudeBinary, codexBinary, delegate, planGoal } from "../core/delegate.js";
+import { getLimits, runTimeoutMinutes, setLimits, effectiveLimits } from "../core/limits.js";
 import { runPrint } from "../core/printrun.js";
+import { connectConnector, detectConnectors, disconnectConnector } from "../core/connectors.js";
 import { selfCommand as platformSelf } from "../core/platform.js";
 import { markRead, sendMessage, unreadFor } from "../core/messages.js";
 import { deliverToChat } from "../core/delegate.js";
@@ -62,6 +64,9 @@ Control plane
                                           weighted by reputation, decided by quorum (survives corrupted members)
   agentbrain checks <command>... | --none Commands AgentBrain runs itself on every result (e.g. "npm test");
                                           failing checks block approval and expose false claims
+  agentbrain plan "<goal>" [--agent <id>]  A planner agent splits a big goal into pieces and delegates them in parallel
+  agentbrain delegate "<task>" [--agent <id>] [--task <id>]
+                                          Hand a task to the best-placed agent (or the one named), no window
   agentbrain message <agent|all> "<text>" Message the agents working on this project (they see it in their next step)
   agentbrain inbox                        Messages for you (or for --agent <id>)
   agentbrain recall "<query>"             Search the project's shared memory (the Obsidian vault in .agentbrain/vault)
@@ -78,6 +83,10 @@ Setup
   agentbrain init [--worktrees]           Create .agentbrain/ here; --worktrees: every new task gets its own worktree
   agentbrain rules [--only <ids>]         Write AgentBrain instructions for IDE/terminal agents
                                           (${RULES_TARGETS.map((t) => t.id).join(", ")})
+  agentbrain connectors [--all]           Every AI tool on this machine (terminal agents, apps, IDEs, extensions):
+                                          installed, signed in, connected, and what it can do with AgentBrain
+  agentbrain connect <id>...              Connect those tools (writes AgentBrain into their MCP config)
+  agentbrain disconnect <id>...           Remove AgentBrain from their config
   agentbrain connect [--only <ids>]       Give every agent live AgentBrain state via MCP
                                           (${CONNECT_TARGETS.map((t) => t.id).join(", ")}) + rules + Git hook
   agentbrain doctor                         Check setup and print fixes for anything missing
@@ -119,6 +128,8 @@ Switching agents
                                           Run an ACP agent with no UI in the task's worktree
                                           (agents: ${ACP_AGENTS.map((a) => a.id).join(", ")}; default allow: read,edit,search,think)
   agentbrain route [task-id] [--run]      Suggest which agent should take the task, with reasons;
+  agentbrain limits [agent] [--parallel N] [--minutes N] [--daily N] [--none]
+                                         Configure per-agent budgets and limits
                                           --run launches the top suggestion
   agentbrain run <agent> [task-id] --headless --detach [--linger <min>]
                                           Same, in the background; --linger keeps the agent for follow-ups
@@ -198,6 +209,10 @@ function parseCli() {
         allow: { type: "string" },
         "max-turns": { type: "string" },
         timeout: { type: "string" },
+          parallel: { type: "string" },
+          minutes: { type: "string" },
+          daily: { type: "string" },
+          none: { type: "boolean" },
         "in-place": { type: "boolean" },
         detach: { type: "boolean" },
         here: { type: "boolean" },
@@ -211,8 +226,8 @@ function parseCli() {
         "no-open": { type: "boolean" },
         approve: { type: "boolean" },
         changes: { type: "string" },
-        none: { type: "boolean" },
         verify: { type: "boolean" },
+        plan: { type: "boolean" },
         quorum: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
@@ -419,7 +434,7 @@ async function runHeadlessCli(agentName: string | undefined, taskArg: string | u
     cli: onPath ? { command: "agentbrain", args: [] } : { command: process.execPath, args: [fs.realpathSync(process.argv[1])] },
     allowed: allowed as ToolKind[] | undefined,
     maxTurns: positiveInt("max-turns", flags["max-turns"], 3),
-    timeoutMinutes: flags.timeout === undefined ? undefined : positiveNumber("timeout", flags.timeout),
+    timeoutMinutes: flags.timeout === undefined ? runTimeoutMinutes(cwd, def.id) : positiveNumber("timeout", flags.timeout),
     inPlace: flags["in-place"],
     sessionId: flags.session,
     lingerMinutes: flags.linger === undefined ? undefined : positiveNumber("linger", flags.linger),
@@ -466,7 +481,11 @@ async function run(agentName: string | undefined, taskArg: string | undefined): 
     if (id !== "claude-code" && id !== "codex") throw new Error("--print works with claude-code or codex.");
     if (!command) throw new Error(`${id} is not installed.`);
     const taskId = resolveTaskId(cwd, taskArg, undefined, process.cwd());
-    const result = await runPrint(cwd, taskId, { id, command }, { cli: selfCommand(), timeoutMinutes: flags.timeout ? Number(flags.timeout) : undefined });
+    const result = await runPrint(cwd, taskId, { id, command }, {
+      cli: selfCommand(),
+      plan: flags.plan,
+      timeoutMinutes: flags.timeout === undefined ? runTimeoutMinutes(cwd, id) : positiveNumber("timeout", flags.timeout),
+    });
     console.error(`✓ ${id} run ended: ${result.stopReason}; task is ${result.status}.`);
     return;
   }
@@ -600,8 +619,15 @@ async function attach(sessionId?: string): Promise<void> {
   const cwd = root();
   if (!sessionId) throw new Error("Usage: agentbrain attach <session-id>   (see `agentbrain` or `agentbrain agents`)");
   const session = findSession(cwd, sessionId);
-  if (!session?.transcript) throw new Error(`No headless session ${sessionId}.`);
+  if (!session) throw new Error(`No headless session ${sessionId} in ${cwd}.`);
   const control = sessionControl(cwd, session.agentId, sessionId);
+  const transcript = session.transcript ?? (fs.existsSync(control.transcript) ? control.transcript : undefined);
+  if (!transcript) throw new Error(`Headless session ${sessionId} has no transcript.`);
+  if (!sessionAlive(session)) {
+    const ended = session.endedAt ? ` at ${session.endedAt}` : "";
+    const reason = session.stopReason ? `: ${session.stopReason}` : ".";
+    throw new Error(`Headless session ${sessionId} ended${ended}${reason} Transcript: ${transcript}`);
+  }
   console.log(`Attached to ${session.agentId} on ${session.taskId}. Type a message and press Enter to send it as the agent's next turn.`);
   console.log("/stop stops the run; Ctrl-C detaches and leaves it running.\n");
 
@@ -736,7 +762,7 @@ async function ui(): Promise<void> {
     console.log(`The control room is already running: ${running.url}`);
     return;
   }
-  const server = await startUiServer(cwd, { port, token: previousToken(cwd), self: selfCommand() });
+  const server = await startUiServer(cwd, { port, token: previousToken(cwd), self: selfCommand(), config: configCommand() });
   writeUiState(cwd, server.url);
   console.log(server.url);
   const close = () => { void server.close().finally(() => process.exit(0)); };
@@ -768,6 +794,41 @@ function printWorktree(task: ReturnType<typeof getTask>): void {
   console.log(`✓ Worktree for ${task.id} on branch ${task.worktree!.branch}`);
   console.log(`  ${task.worktree!.path}`);
   console.log(`  Agents launched with \`agentbrain run <agent> ${task.id}\` work there; commands run inside it apply to this task.`);
+}
+
+const CAPABILITY: Record<string, string> = {
+  start: "can start tasks",
+  pickup: "picks up tasks",
+  review: "plans & reviews (no code access)",
+  none: "can't connect",
+};
+
+function connectorsList(): void {
+  const cwd = root();
+  const list = detectConnectors(cwd, { all: flags.all });
+  if (flags.json) { console.log(JSON.stringify(list)); return; }
+  const groups: [string, string][] = [["terminal", "Terminal agents"], ["app", "Desktop apps"], ["ide", "IDEs"], ["extension", "IDE extensions"]];
+  for (const [kind, title] of groups) {
+    const items = list.filter((c) => c.kind === kind);
+    if (!items.length) continue;
+    console.log(`\n${title}`);
+    for (const c of items) {
+      const state = !c.installed ? "not installed" : c.connected ? "connected" : c.capability === "none" ? "—" : "not connected";
+      const signed = c.signedIn === false ? ", not signed in" : "";
+      console.log(`  ${c.connected ? "●" : "○"} ${c.id.padEnd(16)} ${c.name.padEnd(26)} ${(state + signed).padEnd(28)} ${CAPABILITY[c.capability]}`);
+    }
+  }
+  console.log("\nConnect one: agentbrain connect <id>   ·   all detected: agentbrain connectors --all");
+}
+
+function connectTools(ids: string[]): void {
+  const cwd = root();
+  const config = configCommand();
+  for (const id of ids) {
+    const result = connectConnector(cwd, id, config.command, [...config.args, "mcp"]);
+    console.log(`✓ ${id}: ${result.action} ${path.isAbsolute(result.file) && !result.file.startsWith(cwd) ? result.file : path.relative(cwd, result.file)}`);
+  }
+  console.log("Restart the tool (or reload its window) so it starts AgentBrain's MCP server.");
 }
 
 /** MCP config for every agent, plus instruction files and the commit hook. */
@@ -924,6 +985,37 @@ function checks(commands: string[]): void {
   }
 }
 
+function limits(agent?: string): void {
+  const cwd = root();
+  const configured = getLimits(cwd);
+  const target = agent ?? undefined;
+  const hasFlags = flags.parallel !== undefined || flags.minutes !== undefined || flags.daily !== undefined || flags.none;
+  if (hasFlags) {
+    if (!target) throw new Error("Usage: agentbrain limits <agent> [--parallel N] [--minutes N] [--daily N] [--none]");
+    if (flags.none) {
+      setLimits(cwd, target, null);
+      console.log(`✓ Cleared limits for ${target}`);
+      return;
+    }
+    const patch = {
+      ...(flags.parallel !== undefined ? { maxParallel: positiveInt("parallel", flags.parallel, 0) } : {}),
+      ...(flags.minutes !== undefined ? { maxRunMinutes: positiveInt("minutes", flags.minutes, 0) } : {}),
+      ...(flags.daily !== undefined ? { dailyTasks: positiveInt("daily", flags.daily, 0) } : {}),
+    };
+    setLimits(cwd, target, patch);
+    console.log(`✓ Updated limits for ${target}`);
+  }
+  const ids = target ? [target] : ["default", ...Object.keys(configured).filter((id) => id !== "default")];
+  const tasks = listTasks(cwd);
+  for (const id of ids) {
+    const values = effectiveLimits(getProject(cwd), id);
+    const running = tasks.filter((task) => task.status === "running" && task.agent?.id === id).length;
+    const delegated = tasks.filter((task) => task.delegatedTo?.worker === id &&
+      new Date(task.delegatedTo.at).toDateString() === new Date().toDateString()).length;
+    console.log(`${id}: parallel=${values.maxParallel ?? "unlimited"}, minutes=${values.maxRunMinutes ?? "unlimited"}, daily=${values.dailyTasks ?? "unlimited"} (running ${running}, delegated today ${delegated})`);
+  }
+}
+
 function review(taskId?: string): void {
   const cwd = root();
   if (flags.verify) {
@@ -970,7 +1062,7 @@ async function main(): Promise<void> {
   // Bare `agentbrain` in a terminal opens the console: type a task, an agent takes it.
   if (!command) {
     if (!process.stdout.isTTY || !process.stdin.isTTY) usage(1);
-    await runConsole(projectRoot(), { self: selfCommand() });
+    await runConsole(projectRoot(), { self: selfCommand(), config: configCommand() });
     return;
   }
 
@@ -1045,6 +1137,8 @@ async function main(): Promise<void> {
     await queueRun(rest[0]);
   } else if (command === "route") {
     await route(subcommand);
+  } else if (command === "limits") {
+    limits(subcommand);
   } else if (command === "agents") {
     agents();
   } else if (command === "rules") {
@@ -1079,6 +1173,27 @@ async function main(): Promise<void> {
     for (const task of listTasks(cwd).filter((t) => t.worktree)) {
       console.log(`${task.id}\t${task.status}\t${task.worktree!.branch}\t${task.worktree!.path}`);
     }
+  } else if (command === "plan") {
+    const cwd = root();
+    const goal = [subcommand, ...rest].filter(Boolean).join(" ");
+    if (!goal) throw new Error('Usage: agentbrain plan "<big goal>" [--agent claude-code|codex]');
+    const result = planGoal(cwd, goal, selfCommand(), flags.agent);
+    console.log(`✓ ${result.worker.name} is planning ${result.task.id}; its pieces will be delegated as they are planned.`);
+  } else if (command === "delegate") {
+    // Scriptable delegation (the console's prompt box, for scripts and other agents).
+    const cwd = root();
+    const prompt = [subcommand, ...rest].filter(Boolean).join(" ");
+    if (!prompt && !flags.task) throw new Error('Usage: agentbrain delegate "<what to do>" [--agent <id>] [--task <id>]');
+    const result = delegate(cwd, { ...(prompt ? { prompt } : {}), ...(flags.task ? { taskId: flags.task } : {}), ...(flags.agent ? { worker: flags.agent } : {}) }, selfCommand());
+    if (flags.json) console.log(JSON.stringify({ taskId: result.task.id, worker: result.worker.id, why: result.why }));
+    else console.log(`✓ ${result.task.id} → ${result.worker.name} (${result.why})\n  ${result.task.objective.length > 100 ? `${result.task.objective.slice(0, 99)}…` : result.task.objective}`);
+  } else if (command === "connectors") {
+    connectorsList();
+  } else if (command === "connect" && subcommand) {
+    connectTools([subcommand, ...rest]);
+  } else if (command === "disconnect" && subcommand) {
+    const cwd = root();
+    for (const id of [subcommand, ...rest]) console.log(disconnectConnector(cwd, id) ? `✓ Disconnected ${id}` : `  ${id} was not connected`);
   } else if (command === "connect") {
     connect();
   } else if (command === "mcp") {

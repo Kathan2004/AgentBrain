@@ -101,6 +101,7 @@ export function vscodeCommand(): string | null {
           path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Microsoft VS Code", "bin", "code.cmd"),
         ]
       : ["/usr/bin/code", "/usr/share/code/bin/code", "/snap/bin/code"];
+  if (process.env.AGENTBRAIN_ONLY_PATH) return findOnPath("code");
   return findOnPath("code") ?? candidates.find((file) => executable(file)) ?? null;
 }
 

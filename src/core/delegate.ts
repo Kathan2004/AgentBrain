@@ -10,6 +10,7 @@ import { recordActivity } from "./activity.js";
 import { brainDir } from "./paths.js";
 import { readReputation } from "./review.js";
 import { agentRecords, LIMIT_WINDOW_HOURS } from "./routing.js";
+import { limitReason } from "./limits.js";
 import type { TaskState } from "./state.js";
 import { getProject, getTask, listTasks, saveProject, saveTask } from "./store.js";
 import { addWorktree } from "./worktree.js";
@@ -42,7 +43,7 @@ export interface Worker {
 /** Claude Code's CLI: on PATH, or the copy the Claude desktop app ships with. */
 export function claudeBinary(): string | null {
   const onPath = findOnPath("claude");
-  if (onPath) return onPath;
+  if (onPath || process.env.AGENTBRAIN_ONLY_PATH) return onPath;
   const base = path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code");
   try {
     const versions = fs.readdirSync(base).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
@@ -58,6 +59,7 @@ export function claudeBinary(): string | null {
 
 /** Codex's CLI: on PATH, or the copy inside Codex.app. */
 export function codexBinary(): string | null {
+  if (process.env.AGENTBRAIN_ONLY_PATH) return findOnPath("codex");
   return findOnPath("codex") ?? (fs.existsSync("/Applications/Codex.app/Contents/Resources/codex") ? "/Applications/Codex.app/Contents/Resources/codex" : null);
 }
 
@@ -183,6 +185,12 @@ export function rankWorkers(root: string, now = new Date()): WorkerChoice[] {
     if (!worker.available) {
       return { worker, score: -1e9, reasons: [worker.note ?? "not available"] };
     }
+    const limited = limitReason(root, worker.id, now);
+    if (limited) {
+      worker.available = false;
+      worker.note = limited;
+      return { worker, score: -1e9, reasons: [limited] };
+    }
     if (project.worker === worker.id) { score += 50; reasons.push("your pinned worker"); }
     if (avoid.has(worker.id)) { score -= 1000; reasons.push("on your avoid list"); }
     const rank = prefer.indexOf(worker.id);
@@ -190,7 +198,11 @@ export function rankWorkers(root: string, now = new Date()): WorkerChoice[] {
 
     const busy = tasks.filter((t) => t.status === "running" && t.agent?.id === worker.id);
     if (worker.how !== "pull") {
-      if (busy.length) { score -= 15 * busy.length; reasons.push(`busy with ${busy.length} task(s)`); } else reasons.push("free");
+      if (busy.length && worker.how === "chat") {
+        // A chat does one thing at a time: a second task would land in the middle of the first.
+        score -= 500;
+        reasons.push(`busy in its chat with ${busy[0].id}`);
+      } else if (busy.length) { score -= 15 * busy.length; reasons.push(`busy with ${busy.length} task(s)`); } else reasons.push("free");
     }
 
     let approved = 0;
@@ -280,6 +292,8 @@ export function delegate(
     task = { ...task, ...(input.parent ? { parent: input.parent } : {}), ...(input.requestedBy ? { requestedBy: input.requestedBy } : {}) };
     saveTask(root, task);
   }
+  task.delegatedTo = { worker: worker.id, at: new Date().toISOString() };
+  saveTask(root, task);
   // Parallel work never collides: each delegated task gets its own checkout.
   if (!task.worktree && isGitRepo(root) && task.status !== "done") task = addWorktree(root, task.id);
 
@@ -325,4 +339,41 @@ export function deliverToChat(root: string, message: { from: string; to: string;
   { cwd: root, detached: true, stdio: "ignore" });
   child.unref();
   return true;
+}
+
+/**
+ * A big goal: a planner agent (Claude Code by default, else Codex) reads the
+ * code, splits the goal into independent pieces and delegates each one; the
+ * pieces run in parallel and the goal's task tracks them.
+ */
+export function planGoal(root: string, goal: string, self: { command: string; args: string[] }, planner?: string): DelegateResult {
+  const ready = rankWorkers(root).filter((c) => c.worker.available && c.worker.how === "print");
+  const choice = planner ? ready.find((c) => c.worker.id === planner) : ready.find((c) => c.worker.id === "claude-code") ?? ready[0];
+  if (!choice) throw new Error("Planning needs Claude Code or Codex signed in on this machine (it reads the code and delegates the pieces).");
+  const task = createTask(root, goal);
+  const log = path.join(brainDir(root), "agents", `plan-${task.id}.log`);
+  fs.mkdirSync(path.dirname(log), { recursive: true });
+  const fd = fs.openSync(log, "a");
+  spawn(self.command, [...self.args, "run", choice.worker.id, task.id, "--print", "--plan"], { cwd: root, detached: true, stdio: ["ignore", fd, fd] }).unref();
+  fs.closeSync(fd);
+  recordActivity(root, { agent: "developer", task: task.id, kind: "handoff", text: `${choice.worker.name} is planning: ${task.objective}` });
+  return { task, worker: choice.worker, why: "planner", log };
+}
+
+/**
+ * Autopilot: a background run stopped early (usage limit, crash, timeout), so
+ * hand the task to the next best ready agent, skipping the one that stopped.
+ * At most three hand-overs per task; off with "autopilot": false in project.json.
+ */
+export function autoContinue(root: string, taskId: string, stopped: string, reason: string, self: { command: string; args: string[] }): DelegateResult | null {
+  const project = getProject(root) as { autopilot?: boolean };
+  if (project.autopilot === false) return null;
+  const task = getTask(root, taskId);
+  if (task.status !== "handoff") return null;
+  const attempts = (task.events ?? []).filter((e) => e.status === "handoff").length;
+  if (attempts > 3) return null;
+  const next = rankWorkers(root).find((c) => c.worker.available && c.worker.id !== stopped && c.worker.how !== "pull");
+  if (!next) return null;
+  recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot: ${stopped} stopped (${reason.slice(0, 120)}); handing the task to ${next.worker.name}` });
+  return delegate(root, { taskId, worker: next.worker.id }, self);
 }

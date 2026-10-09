@@ -9,8 +9,8 @@ import { taskTimeline } from "../core/timeline.js";
 import { openInEditor } from "./open.js";
 import { snapshot, taskDiff, transcriptTail, watchProject, type LiveTask, type Snapshot } from "./model.js";
 
-export type View = "overview" | "changes" | "live" | "timeline" | "route";
-export const VIEWS: View[] = ["overview", "changes", "live", "timeline", "route"];
+export type View = "overview" | "changes" | "live" | "timeline" | "route" | "review" | "activity";
+export const VIEWS: View[] = ["overview", "changes", "live", "timeline", "route", "review", "activity"];
 
 export interface TuiState {
   selected: number;
@@ -88,6 +88,21 @@ const STATUS_COLOR: Record<string, string> = {
   checkpoint: "36",
 };
 
+const ACTIVITY_GLYPH: Record<string, string> = {
+  session: "◉",
+  prompt: "?",
+  tool: "◇",
+  edit: "✎",
+  command: "$",
+  commit: "◆",
+  status: "●",
+  decision: "!",
+  progress: "→",
+  handoff: "⇄",
+  review: "✓",
+  message: "✉",
+};
+
 function dot(task: LiveTask): string {
   if (task.warning) return c("33", "●");
   return c(STATUS_COLOR[task.status] ?? "37", "●");
@@ -97,6 +112,14 @@ function ago(iso: string | undefined, now: Date): string {
   if (!iso) return "";
   const m = Math.max(0, Math.round((now.getTime() - new Date(iso).getTime()) / 60_000));
   return m < 1 ? "now" : m < 60 ? `${m}m` : m < 1440 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
+}
+
+function shortTime(iso: string | undefined): string {
+  return iso ? iso.slice(5, 16).replace("T", " ") : "";
+}
+
+function viewHelp(): string {
+  return `1-${VIEWS.length}/←→ view`;
 }
 
 // ---------------------------------------------------------------- detail views
@@ -176,7 +199,53 @@ export function detailLines(root: string, task: LiveTask, view: View, width: num
         });
       return lines;
     }
+    case "review":
+    case "activity":
+      return [];
   }
+}
+
+function reviewLines(snap: Snapshot, width: number): string[] {
+  const tasks = snap.tasks.filter((task) => task.status === "review");
+  if (!tasks.length) return [bold("No tasks are waiting for review.")];
+  const lines: string[] = [bold(`Review (${tasks.length})`), ""];
+  for (const task of tasks) {
+    const review = task.review;
+    const tally = task.tally;
+    lines.push(...wrap(`${bold(task.id)} by ${review?.worker ?? task.agent ?? "unknown"}: ${task.objective}`, width));
+    if (review?.checks?.length) {
+      for (const check of review.checks) lines.push(...wrap(` ${check.ok ? "✓" : "✗"} ${check.command}`, width));
+    } else {
+      lines.push(dim(" no checks recorded"));
+    }
+    for (const flag of review?.flags ?? []) {
+      lines.push(...wrap(` ⚠ ${flag.kind}: ${flag.text} (${flag.agent})`, width).map((line) => c("31", line)));
+    }
+    if (tally) {
+      const vote = ` tally ${tally.approve}/${tally.changes} of ${tally.total} approve/changes`;
+      lines.push(...wrap(`${dim(vote)}${tally.blocked ? c("31", ` · blocked: ${tally.blocked}`) : ""}`, width));
+    }
+    lines.push("");
+  }
+  return lines;
+}
+
+function activityLines(snap: Snapshot, width: number): string[] {
+  if (!snap.activity.length) return [bold("No activity yet.")];
+  return [
+    bold("Activity"),
+    "",
+    ...[...snap.activity].reverse().map((event) => {
+      const glyph = ACTIVITY_GLYPH[event.kind] ?? "·";
+      return fit(`${dim(shortTime(event.at))} ${event.agent.padEnd(12)} ${glyph} ${event.text}`, width);
+    }),
+  ];
+}
+
+function bodyLines(root: string, snap: Snapshot, selected: LiveTask | undefined, view: View, width: number): string[] {
+  if (view === "review") return reviewLines(snap, width);
+  if (view === "activity") return activityLines(snap, width);
+  return selected ? detailLines(root, selected, view, width) : [dim("Nothing selected.")];
 }
 
 // ---------------------------------------------------------------- frame
@@ -232,7 +301,7 @@ export function renderFrame(root: string, snap: Snapshot, state: TuiState, width
   if (!tasks.length) list.push(fit(dim(" No tasks. agentbrain task create \"...\""), listWidth));
 
   // Right: details for the selected task.
-  const body = selected ? detailLines(root, selected, state.view, detailWidth - 1) : [dim("Nothing selected.")];
+  const body = bodyLines(root, snap, selected, state.view, detailWidth - 1);
   const bodyHeight = height - 3; // header, tab row, footer
   const scroll = Math.max(0, Math.min(state.scroll, Math.max(0, body.length - bodyHeight)));
   const visible = body.slice(scroll, scroll + bodyHeight);
@@ -245,7 +314,7 @@ export function renderFrame(root: string, snap: Snapshot, state: TuiState, width
     state.input !== null
       ? `${c("7", " message ")} ${state.input}█  ${dim("Enter send · Esc cancel")}`
       : state.flash ||
-        dim("↑↓ select · 1-5/←→ view · PgUp/PgDn scroll · o open in VS Code · m message · s stop · d show done · q quit");
+        dim(`↑↓ select · ${viewHelp()} · PgUp/PgDn scroll · o open in VS Code · m message · s stop · d show done · q quit`);
   lines.push(fit(` ${footer}`, width));
   return { lines, listRows, tabs, tabRow: 2, listWidth };
 }
@@ -284,11 +353,11 @@ function renderNarrow(root: string, snap: Snapshot, state: TuiState, width: numb
   const tabRow = lines.length + 1;
   lines.push(fit(tabLine, width));
 
-  const body = selected ? detailLines(root, selected, state.view, width - 1) : [];
+  const body = bodyLines(root, snap, selected, state.view, width - 1);
   const bodyHeight = height - lines.length - 1;
   const scroll = Math.max(0, Math.min(state.scroll, Math.max(0, body.length - bodyHeight)));
   for (let r = 0; r < bodyHeight; r++) lines.push(fit(` ${body[scroll + r] ?? ""}`, width));
-  const footer = state.input !== null ? `${c("7", " msg ")} ${state.input}█` : state.flash || dim("↑↓ 1-5 o open m msg s stop q quit");
+  const footer = state.input !== null ? `${c("7", " msg ")} ${state.input}█` : state.flash || dim(`↑↓ ${viewHelp()} o open m msg s stop q quit`);
   lines.push(fit(` ${footer}`, width));
   return { lines, listRows, tabs, tabRow, listWidth: width };
 }
@@ -359,7 +428,7 @@ export function handleKey(state: TuiState, key: string, taskCount: number): Acti
       state.input = "";
       break;
     default:
-      if (/^[1-5]$/.test(key)) {
+      if (/^[1-9]$/.test(key) && Number(key) <= VIEWS.length) {
         state.view = VIEWS[Number(key) - 1];
         state.scroll = 0;
       }

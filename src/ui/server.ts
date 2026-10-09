@@ -8,8 +8,10 @@ import { snapshot, taskDiff, transcriptTail, watchProject, type LiveTask } from 
 import { openInEditor } from "./open.js";
 import { PAGE } from "./page.js";
 import { reviewTask, setChecks, setCouncil, setLead, startVerification } from "../core/review.js";
-import { delegate, setDefaultWorker } from "../core/delegate.js";
+import { claudeBinary, codexBinary, delegate, setDefaultWorker } from "../core/delegate.js";
+import { runChat } from "../core/printrun.js";
 import { openUrl } from "../core/platform.js";
+import { connectConnector, detectConnectors, disconnectConnector } from "../core/connectors.js";
 
 export interface UiServer {
   url: string;
@@ -51,7 +53,14 @@ function dashboardUrl(request: IncomingMessage): URL {
 
 export async function startUiServer(
   root: string,
-  options: { port?: number; token?: string; self?: { command: string; args: string[] } } = {},
+  options: {
+    port?: number;
+    token?: string;
+    /** How to start AgentBrain in the background (delegation). */
+    self?: { command: string; args: string[] };
+    /** How agents' config files should start AgentBrain (connectors). */
+    config?: { command: string; args: string[] };
+  } = {},
 ): Promise<UiServer> {
   const token = options.token && /^[0-9a-f]{48}$/.test(options.token) ? options.token : randomBytes(24).toString("hex");
   const clients = new Set<ServerResponse>();
@@ -121,6 +130,13 @@ export async function startUiServer(
         return;
       }
       if (url.pathname === "/api/diff" && request.method === "GET") return json(response, { diff: taskDiff(findTask(root, url.searchParams.get("task") ?? "").workdir) });
+      if (url.pathname === "/api/connectors" && request.method === "GET") return json(response, detectConnectors(root, { all: url.searchParams.get("all") === "1" }));
+      if (request.method === "POST" && (url.pathname === "/api/connectors/connect" || url.pathname === "/api/connectors/disconnect")) {
+        const body = JSON.parse(await readBody(request)) as { id: string };
+        if (url.pathname.endsWith("/disconnect")) return json(response, { ok: true, changed: disconnectConnector(root, body.id) });
+        const cmd = options.config ?? options.self ?? { command: "agentbrain", args: [] };
+        return json(response, { ok: true, ...connectConnector(root, body.id, cmd.command, [...cmd.args, "mcp"]) });
+      }
       if (url.pathname === "/api/vault" && request.method === "GET") return json(response, vaultGraph(root));
       if (url.pathname === "/api/note" && request.method === "GET") return json(response, { id: url.searchParams.get("id"), markdown: readNote(root, url.searchParams.get("id") ?? "") });
       if (url.pathname === "/api/log" && request.method === "GET") return json(response, taskTimeline(root, url.searchParams.get("task") ?? ""));
@@ -141,6 +157,16 @@ export async function startUiServer(
         if (!body.taskId && !body.prompt?.trim()) throw new Error("Say what you want done.");
         const result = delegate(root, { prompt: body.prompt?.trim(), taskId: body.taskId, worker: body.worker }, options.self);
         return json(response, { ok: true, taskId: result.task.id, worker: result.worker.name });
+      }
+      if (request.method === "POST" && url.pathname === "/api/chat") {
+        const body = JSON.parse(await readBody(request)) as { prompt?: string; worker?: string };
+        if (!body.prompt?.trim()) throw new Error("Say something to chat about.");
+        if (body.worker !== "claude-code" && body.worker !== "codex") throw new Error("Chat mode supports Claude Code or Codex. Choose one in the model picker.");
+        const command = body.worker === "claude-code" ? claudeBinary() : codexBinary();
+        if (!command) throw new Error(`${body.worker} is not installed or signed in.`);
+        const output: string[] = [];
+        await runChat(root, { id: body.worker, command }, body.prompt.trim(), (text) => output.push(text));
+        return json(response, { ok: true, worker: body.worker, text: output.join("\n") });
       }
       if (request.method === "POST" && url.pathname === "/api/verify") {
         const body = JSON.parse(await readBody(request)) as { taskId: string };
@@ -180,6 +206,8 @@ export async function startUiServer(
       }
       response.writeHead(404).end("Not found");
     } catch (error) {
+      // A stream that already started (live updates) can't get an error reply; just close it.
+      if (response.headersSent) { response.end(); return; }
       json(response, { error: error instanceof Error ? error.message : String(error) }, 400);
     }
   };

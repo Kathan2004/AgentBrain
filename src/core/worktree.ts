@@ -133,7 +133,8 @@ export function mergeWorktree(root: string, taskId: string): MergeResult {
   if (merged === 0) return { ...removeWorktree(root, task.id), merged: 0, conflicts: [] };
 
   try {
-    git(root, ["merge", "--no-ff", "-m", `Merge ${branch}: ${task.objective}`, branch]);
+    const title = task.objective.split("\n")[0];
+    git(root, ["merge", "--no-ff", "-m", `Merge ${branch}: ${title.length > 72 ? `${title.slice(0, 71)}…` : title}`, branch]);
   } catch {
     const conflicts = git(root, ["diff", "--name-only", "--diff-filter=U"]).split("\n").filter(Boolean);
     return { task, merged, conflicts };

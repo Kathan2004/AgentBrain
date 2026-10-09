@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { delegate, listWorkers } from "../src/core/delegate.js";
 import { getTask, initStore } from "../src/core/store.js";
-import { FeedFormatter, inputBox, suggestions, welcomeBox } from "../src/ui/console.js";
+import { FeedFormatter, connectorLines, inputBox, suggestions, welcomeBox } from "../src/ui/console.js";
 import { visibleLength } from "../src/ui/tui.js";
 import { CLI, stubAgent, tempRepo } from "./helpers.js";
 
@@ -26,9 +26,30 @@ describe("console rendering", () => {
 
   it("suggests slash commands while the command name is being typed", () => {
     expect(suggestions("/re").map((c) => c.name)).toEqual(["review"]);
+    expect(suggestions("/n").map((c) => c.name)).toEqual(["now"]);
+    expect(suggestions("/li").map((c) => c.name)).toEqual(["live"]);
+    expect(suggestions("/con").map((c) => c.name)).toEqual(["continue", "connectors", "connect"]);
+    expect(suggestions("/dis").map((c) => c.name)).toEqual(["disconnect"]);
     expect(suggestions("/").length).toBeGreaterThan(8);
     expect(suggestions("/review ")).toEqual([]);
     expect(suggestions("fix the bug")).toEqual([]);
+  });
+
+  it("formats installed connectors by kind", () => {
+    const text = connectorLines([
+      { id: "codex", name: "Codex", kind: "terminal", installed: true, signedIn: true, capability: "start", connected: true, connect: { scope: "user", file: "~/.codex/config.toml" } },
+      { id: "claude-app", name: "Claude app", kind: "app", installed: true, signedIn: false, capability: "review", connected: false, connect: { scope: "user", file: "claude_desktop_config.json" }, hint: "claude auth login" },
+      { id: "chatgpt-app", name: "ChatGPT app", kind: "app", installed: false, capability: "none", connected: false, connect: null },
+      { id: "zed", name: "Zed", kind: "ide", installed: true, capability: "pickup", connected: false, connect: { manual: "Add a custom MCP server" } },
+    ], 120).map(plain).join("\n");
+    expect(text).toContain("Terminal agents");
+    expect(text).toContain("● codex");
+    expect(text).toContain("connected · can start tasks · user config ~/.codex/config.toml");
+    expect(text).toContain("Desktop apps");
+    expect(text).toContain("not signed in: claude auth login · plans & reviews");
+    expect(text).toContain("IDEs");
+    expect(text).toContain("Add a custom MCP server");
+    expect(text).not.toContain("ChatGPT app");
   });
 
   it("shows the welcome box with the worker and who decides", () => {
@@ -174,5 +195,28 @@ echo '{"type":"result","subtype":"success","result":"Added it"}'
     expect(fs.readFileSync(path.join(t.worktree!.path, "feature.ts"), "utf8")).toContain("feature");
     const texts = readActivity(repo).filter((e) => e.agent === "claude-code").map((e) => e.text);
     expect(texts).toContain("Wrote feature.ts");
+  });
+});
+
+describe("planning", { timeout: 90_000 }, () => {
+  it("runs the planner read-only in the main checkout, with the plan instructions and no worktree", async () => {
+    const { runPrint } = await import("../src/core/printrun.js");
+    const { createTask } = await import("../src/core/actions.js");
+    const repo = tempRepo("agentbrain-plan-");
+    initStore(repo);
+    const task = createTask(repo, "Add OAuth login");
+    // A stand-in planner that records the arguments and prompt it was given.
+    const fake = `${repo}-planner`;
+    const record = `${repo}-planner.txt`;
+    fs.writeFileSync(fake, `#!/usr/bin/env bash\necho "ARGS $*" > ${JSON.stringify(record)}\necho "CWD $PWD" >> ${JSON.stringify(record)}\ncat >> ${JSON.stringify(record)}\n`);
+    fs.chmodSync(fake, 0o755);
+    await runPrint(repo, task.id, { id: "claude-code", command: fake }, { cli: { command: "node", args: [CLI] }, plan: true });
+    const seen = fs.readFileSync(record, "utf8");
+    expect(seen).toMatch(/--allowedTools mcp__agentbrain Read Grep Glob LS/);
+    expect(seen).not.toMatch(/acceptEdits/);
+    expect(seen).toContain(`CWD ${fs.realpathSync(repo)}`);
+    expect(seen).toContain("Your job: plan and delegate");
+    expect(seen).toContain(`parent_task_id "${task.id}"`);
+    expect(getTask(repo, task.id).worktree).toBeUndefined();
   });
 });

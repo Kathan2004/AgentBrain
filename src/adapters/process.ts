@@ -46,7 +46,7 @@ export class ProcessAdapter implements AgentAdapter {
   resolve(): string | null {
     return (
       findOnPath(this.definition.command) ??
-      this.definition.fallbacks?.find((file) => findOnPath(file) !== null) ??
+      (process.env.AGENTBRAIN_ONLY_PATH ? undefined : this.definition.fallbacks?.find((file) => findOnPath(file) !== null)) ??
       null
     );
   }

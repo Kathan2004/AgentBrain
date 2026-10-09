@@ -5,6 +5,12 @@ import { sendMessage } from "./messages.js";
 import { checkpointsDir, brainDir, sessionFile, taskDir, tasksDir } from "./paths.js";
 import type { AgentSessionState, TaskState } from "./state.js";
 
+export interface AgentLimits {
+  maxParallel?: number;
+  maxRunMinutes?: number;
+  dailyTasks?: number;
+}
+
 export interface ProjectState {
   schemaVersion: "0.1";
   initializedAt: string;
@@ -27,6 +33,8 @@ export interface ProjectState {
   checks?: string[];
   /** Task ids waiting for `agentbrain queue run`, next first. */
   queue?: string[];
+  /** Per-agent concurrency, timeout, and daily delegation limits. */
+  limits?: Record<string, AgentLimits>;
 }
 
 export function writeJson(file: string, value: unknown): void {
@@ -184,8 +192,10 @@ export function listSessions(cwd: string): AgentSessionState[] {
   for (const agent of fs.readdirSync(agentsRoot, { withFileTypes: true })) {
     const dir = path.join(agentsRoot, agent.name, "sessions");
     if (!agent.isDirectory() || !fs.existsSync(dir)) continue;
-    for (const file of fs.readdirSync(dir).filter((f) => f.endsWith(".json"))) {
-      sessions.push(readJson<AgentSessionState>(path.join(dir, file)));
+    for (const file of fs.readdirSync(dir).filter((f) => f.endsWith(".json") && !f.endsWith(".mcp.json"))) {
+      const session = readJson<AgentSessionState>(path.join(dir, file));
+      // Anything else that ends up in the folder is not a session.
+      if (session && typeof session.startedAt === "string" && session.sessionId) sessions.push(session);
     }
   }
   return sessions.sort((a, b) => a.startedAt.localeCompare(b.startedAt));

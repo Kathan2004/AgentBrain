@@ -48,6 +48,9 @@ details summary{cursor:pointer;color:var(--muted);margin:24px 4px 8px;font-size:
 .set{display:grid;grid-template-columns:180px 1fr;gap:14px;padding:14px 0;border-bottom:1px solid var(--line);align-items:start}.set label{font-weight:600}.set .sub{margin-top:3px}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}.seg button{border:0;border-radius:0;background:var(--card)}.seg button.on{background:var(--soft);font-weight:600;color:var(--accent)}
 .agents{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.connectorbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px}.toggle{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}.toggle input{accent-color:var(--accent)}
+.connector-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.connector-grid .card{margin:0}.connector-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.connector-chip{border:1px solid var(--line);border-radius:999px;padding:2px 9px;font-size:12px;color:var(--muted);white-space:nowrap}.connector-chip.start{color:var(--blue);border-color:color-mix(in srgb,var(--blue) 35%,var(--line))}.connector-chip.pickup{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 35%,var(--line))}.connector-chip.review{color:var(--purple);border-color:color-mix(in srgb,var(--purple) 35%,var(--line))}
+.connector-status{margin-top:8px;font-size:13px}.connector-path{margin-top:8px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}.connector-manual{margin-top:8px;border-left:2px solid var(--line);padding-left:10px;color:var(--muted);font-size:13px}.connector-note{margin-top:8px;color:var(--faint);font-size:12.5px}.connector-off{opacity:.72}
 .detail pre{font:12px/1.5 var(--mono);background:var(--soft);border-radius:8px;padding:10px;overflow:auto;white-space:pre-wrap;max-height:360px}
 .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:9px;font-size:13.5px;display:none;z-index:20;max-width:90vw}
 .who-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:0}
@@ -57,7 +60,7 @@ details summary{cursor:pointer;color:var(--muted);margin:24px 4px 8px;font-size:
 <main id="main"></main><div class="toast" id="toast"></div>
 <script>
 (function(){
-var token=location.hash.replace(/^#token=/,'');var S=null;var pick=localGet('pick')||'auto';var view=localGet('view')||'home';var selectedTask=null;var drafts={};var composer='';var agentFilter=null;var settings=null;var taskFilter='all';var taskSearch='';var goKey=false;
+var token=location.hash.replace(/^#token=/,'');var S=null;var pick=localGet('pick')||'auto';var mode=localGet('mode')||'chat';var chatLog=[];var view=localGet('view')||'home';var selectedTask=null;var drafts={};var composer='';var agentFilter=null;var settings=null;var taskFilter='all';var taskSearch='';var goKey=false;var connectors=null;var connectorsAll=localGet('connectorsAll')==='1';var connectorsLoadedAll=null;var connectorsLoading=false;
 function localGet(k){try{return localStorage.getItem('ab.'+k)}catch(e){return null}}function localSet(k,v){try{localStorage.setItem('ab.'+k,v)}catch(e){}}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function api(p,o){o=o||{};o.headers=Object.assign({'x-agentbrain-token':token,'content-type':'application/json'},o.headers||{});return fetch(p,o).then(function(r){return r.json()})}
@@ -76,13 +79,14 @@ function workerName(){var w=S.workers.filter(function(x){return x.id===S.worker}
 
 /* ---------- navigation ---------- */
 function setTab(t){view=t==='tasks'?'task':t;localSet('view',view==='task'?'home':view);render()}
-function renderNav(){var tabs=[['home','Home'],['activity','Activity'],['brain','Brain'],['settings','Settings']];var el=document.getElementById('nav');el.innerHTML=tabs.map(function(t){return '<button data-v="'+t[0]+'" class="'+(view===t[0]?'on':'')+'">'+t[1]+'</button>'}).join('');el.querySelectorAll('[data-v]').forEach(function(b){b.onclick=function(){setTab(b.dataset.v)}})}
+function renderNav(){var tabs=[['home','Home'],['activity','Activity'],['brain','Brain'],['connectors','Connectors'],['settings','Settings']];var el=document.getElementById('nav');el.innerHTML=tabs.map(function(t){return '<button data-v="'+t[0]+'" class="'+(view===t[0]?'on':'')+'">'+t[1]+'</button>'}).join('');el.querySelectorAll('[data-v]').forEach(function(b){b.onclick=function(){setTab(b.dataset.v)}})}
 
 /* ---------- home ---------- */
 var STEPS=['Delegated','Working','Checks','Review','Done'];
 function stage(t){if(t.status==='done')return 4;if(t.status==='review')return (S.policy.checks.length&&!(t.review&&(t.review.checks||[]).length))?2:3;if(t.status==='running'||t.status==='checkpoint')return 1;return 0}
 function stepsHtml(t){var n=stage(t);var failed=t.review&&(t.review.checks||[]).some(function(c){return !c.ok});return '<div class="steps">'+STEPS.map(function(s,i){var cls=i<n?'done':i===n?'now':'';if(i===2&&failed)cls='bad';return '<div class="step '+cls+'">'+s+'</div>'}).join('')+'</div>'}
 function taskLog(t,n){return S.activity.filter(function(e){return e.task===t.id&&!(e.kind==='tool'&&/^(Read|Grep|Glob) /.test(e.text))}).slice(-n)}
+function nextAction(t){if(t.status==='review')return 'Decide: approve or send back with notes';if(t.status==='running')return t.liveSession&&t.liveSession.alive?'Open the live head to watch progress':'Agent is working; wait for its next update';if(t.status==='handoff'||t.status==='idle')return 'Continue: hand this task to an agent';if(t.status==='blocked'||t.status==='failed')return 'Needs attention before it can continue';return 'AgentBrain is tracking this task'}
 var GLYPH={message:'✉',progress:'✓',edit:'✎',command:'$',commit:'●',decision:'◆',handoff:'⇄',review:'⚖',status:'→',prompt:'›',tool:'·',session:'◎'};
 function logHtml(list){if(!list.length)return '';return '<div class="log">'+list.map(function(e){return '<div><span class="t">'+hhmm(e.at)+'</span><span class="g">'+(GLYPH[e.kind]||'·')+'</span><span><b style="color:'+color(e.agent)+';font-weight:600">'+esc(name(e.agent))+'</b> '+esc(e.text)+'</span></div>'}).join('')+'</div>'}
 function renderHome(){
@@ -91,18 +95,19 @@ function renderHome(){
   var ready=S.workers.filter(function(w){return w.available});var auto=ready[0];if(pick!=='auto'&&!ready.some(function(w){return w.id===pick}))pick='auto';
   var chosen=pick==='auto'?auto:ready.filter(function(w){return w.id===pick})[0];var wn=chosen?chosen.name:null;
   var h='<div class="composer"><textarea id="prompt" rows="2" placeholder="What should your agents do? e.g. Add a dark mode toggle to the settings page">'+esc(composer)+'</textarea><div class="row">'+
-    '<select id="workerPick" class="pick" title="Which agent takes this task">'+'<option value="auto"'+(pick==='auto'?' selected':'')+'>Auto'+(auto?' · '+esc(auto.name):'')+'</option>'+S.workers.map(function(w){return '<option value="'+esc(w.id)+'"'+(w.id===pick?' selected':'')+(w.available?'':' disabled')+'>'+esc(w.name)+(w.available?'':' · '+esc((w.note||'unavailable').replace(/:.*/,'')))+'</option>'}).join('')+'</select>'+
+    '<select id="workerPick" class="pick" title="Which agent takes this task">'+'<option value="auto"'+(pick==='auto'?' selected':'')+'>Auto'+(auto?' · '+esc(auto.name):'')+'</option>'+S.workers.map(function(w){return '<option value="'+esc(w.id)+'"'+(w.id===pick?' selected':'')+(w.available?'':' disabled')+'>'+esc(w.name)+(w.available?'':' · '+esc((w.note||'unavailable').replace(/:.*/,'')))+'</option>'}).join('')+'</select><select id="modePick" class="pick" title="Chat with a model or delegate a task"><option value="chat"'+(mode==='chat'?' selected':'')+'>Chat · root access</option><option value="task"'+(mode==='task'?' selected':'')+'>Task · isolated worktree</option></select>'+
     '<span class="hint">'+(chosen?(pick==='auto'?esc(chosen.reasons.slice(0,2).join(', ')):'In its own worktree')+' · Enter to send':'No agent ready: open VS Code with Copilot, or sign in to Claude Code or Codex')+'</span>'+'<button class="primary" id="send"'+(wn?'':' disabled')+'>Delegate</button></div></div>';
   var running=S.tasks.filter(function(t){return ['running','checkpoint','handoff','idle','blocked','failed'].indexOf(t.status)>=0});var review=S.tasks.filter(function(t){return t.status==='review'});var done=S.tasks.filter(function(t){return t.status==='done'});
   var live=S.sessions.filter(function(s){return s.state!=='ended'});
   h+='<div class="facts"><span><b>'+review.length+'</b> to review</span><span><b>'+running.filter(function(t){return t.status==='running'}).length+'</b> running</span><span><b>'+live.length+'</b> agent'+(live.length===1?'':'s')+' active</span><span>'+esc(decides())+'</span>'+(S.policy.checks.length?'<span>Checks: <span class="mono">'+S.policy.checks.map(esc).join(' · ')+'</span></span>':'')+'</div>';
+  if(chatLog.length)h+='<div class="card"><b>Chat</b>'+chatLog.slice(-8).map(function(x){return '<div class="sub" style="margin-top:8px"><b>'+esc(x.role==='user'?'You':name(x.worker||'agent'))+':</b> '+esc(x.text)+'</div>'}).join('')+'</div>';
   var query=taskSearch.trim().toLowerCase();var matches=function(t){return (!query||(t.objective+' '+t.id+' '+(t.agent||'')).toLowerCase().indexOf(query)>=0)&&(taskFilter==='all'||(taskFilter==='review'&&t.status==='review')||(taskFilter==='active'&&['running','checkpoint','handoff','blocked','idle','failed'].indexOf(t.status)>=0))};
   var visibleReview=review.filter(matches),visibleRunning=running.filter(matches),visibleDone=done.filter(matches);var visibleCount=visibleReview.length+visibleRunning.length+visibleDone.length;
   h+='<div class="triage"><label class="search"><span>⌕</span><input id="taskSearch" value="'+esc(taskSearch)+'" placeholder="Find a task, agent, or ID" aria-label="Find a task, agent, or ID"><kbd>/</kbd></label><div class="filters"><button class="chip'+(taskFilter==='all'?' on':'')+'" data-filter="all">All</button><button class="chip'+(taskFilter==='active'?' on':'')+'" data-filter="active">Active <span class="sub">'+running.length+'</span></button><button class="chip'+(taskFilter==='review'?' on':'')+'" data-filter="review">Review <span class="sub">'+review.length+'</span></button></div><span class="triage-note"><b>'+visibleCount+'</b> shown · <span class="mono">g</span> then view key</span></div>';
   h+='<h2>Needs you <span class="count">'+visibleReview.length+(visibleReview.length!==review.length?' / '+review.length:'')+'</span></h2>';
   if(!visibleReview.length)h+='<div class="empty">'+(review.length?'No review matches "'+esc(taskSearch)+'".':'Nothing to review. Finished work lands here with AgentBrain\'s own checks and any red flags.')+'</div>';
   visibleReview.forEach(function(t){var rv=t.review||{};var ty=t.tally;
-    h+='<div class="card need"><div class="title">'+esc(t.objective)+'</div><div class="sub">Finished by <b style="color:'+color(rv.worker||t.agent||'')+'">'+esc(name(rv.worker||t.agent||'?'))+'</b> '+ago(rv.requestedAt||t.updatedAt)+' · <span class="mono">'+esc(t.id)+'</span></div>'+stepsHtml(t);
+    h+='<div class="card need"><div class="title">'+esc(t.objective)+'</div><div class="sub">Finished by <b style="color:'+color(rv.worker||t.agent||'')+'">'+esc(name(rv.worker||t.agent||'?'))+'</b> '+ago(rv.requestedAt||t.updatedAt)+' · <span class="mono">'+esc(t.id)+'</span></div><div class="sub"><b>Next:</b> '+esc(nextAction(t))+'</div>'+stepsHtml(t);
     if(S.policy.checks.length){if((rv.checks||[]).length)h+=rv.checks.map(function(c){return '<div class="check '+(c.ok?'ok':'bad')+'" title="'+esc(c.tail)+'">'+(c.ok?'✓ passed':'✗ failed')+' · '+esc(c.command)+'</div>'}).join('');else if(t.review)h+='<div class="check sub">Running checks…</div>';else h+='<div class="sub">Checks have not run on this result yet. <button class="ghost" data-verify="'+esc(t.id)+'">Run checks</button></div>'}
     (rv.flags||[]).forEach(function(f){h+='<div class="flag"><b>⚠ '+esc({'no-change':'Nothing changed','false-claim':'False claim','hallucination':'Hallucination','dissent':'Dissent'}[f.kind]||f.kind)+'</b> · '+esc(name(f.agent))+': '+esc(f.text)+'</div>'});
     if(ty&&ty.total>0&&S.policy.mode!=='none'){h+='<div class="meter"><div class="a" style="width:'+(ty.approve/ty.total*100)+'%"></div><div class="c" style="width:'+(ty.changes/ty.total*100)+'%"></div><div class="q" style="left:'+(ty.quorum*100)+'%"></div></div><div class="sub">'+(S.policy.mode==='council'?'Council: '+ty.approve.toFixed(1)+' approve, '+ty.changes.toFixed(1)+' changes of '+ty.total.toFixed(1)+' (needs '+Math.round(ty.quorum*100)+'%)':'Lead: '+((rv.votes||[]).length?'voted':'has not voted yet'))+(function(){var w=ty.eligible.filter(function(x){return !(rv.votes||[]).some(function(v){return v.agent===x})});return w.length?' · <b>waiting for '+w.map(name).map(esc).join(', ')+'</b> (or decide yourself below)':''})()+'</div>';
@@ -113,13 +118,13 @@ function renderHome(){
   if(!visibleRunning.length)h+='<div class="empty">'+(running.length?'No active task matches "'+esc(taskSearch)+'".':'No work in progress. Describe a task above and an agent will pick it up.')+'</div>';
   visibleRunning.forEach(function(t){var s=S.sessions.filter(function(x){return x.taskId===t.id&&x.state!=='ended'})[0];
     h+='<div class="card"><div class="title">'+esc(t.objective)+'</div><div class="sub">'+(t.agent?'<span class="who-dot" style="background:'+color(t.agent)+'"></span>'+esc(name(t.agent)):'Unassigned')+' · '+esc(t.status==='handoff'?'handed off, waiting for an agent':t.status)+(t.warning?' · <span class="bad">'+esc(t.warning)+'</span>':'')+' · '+ago(t.updatedAt)+'</div>'+stepsHtml(t)+
-      (t.nextAction?'<div class="sub">Next: '+esc(t.nextAction)+'</div>':'')+logHtml(taskLog(t,4))+'<div class="actions">'+(t.status!=='running'?'<button data-continue="'+esc(t.id)+'">Hand to '+esc(wn||'a worker')+'</button>':'')+(t.liveSession&&t.liveSession.alive?'<button data-stop="'+esc(t.liveSession.sessionId)+'">Stop</button>':'')+'<button class="ghost" data-open="'+esc(t.id)+'">Details</button></div></div>'});
+      '<div class="sub"><b>Next:</b> '+esc(nextAction(t))+(t.nextAction?' · '+esc(t.nextAction):'')+'</div>'+logHtml(taskLog(t,4))+'<div class="actions">'+(t.status!=='running'?'<button data-continue="'+esc(t.id)+'">Hand to '+esc(wn||'a worker')+'</button>':'')+(t.liveSession&&t.liveSession.alive?'<button data-stop="'+esc(t.liveSession.sessionId)+'">Stop</button>':'')+'<button class="ghost" data-open="'+esc(t.id)+'">'+(t.liveSession&&t.liveSession.alive?'Open live head':'Details')+'</button></div></div>'});
   if(visibleDone.length)h+='<details open><summary>Finished ('+visibleDone.length+(visibleDone.length!==done.length?' / '+done.length:'')+')</summary>'+visibleDone.slice().sort(function(a,b){return (b.updatedAt||'').localeCompare(a.updatedAt||'')}).slice(0,30).map(function(t){return '<div class="row" role="button" tabindex="0" data-open="'+esc(t.id)+'" aria-label="Open finished task '+esc(t.objective)+'"><span class="ok">✓</span><span>'+esc(t.objective)+'</span><span class="sub">'+esc(t.agent?name(t.agent):'')+' · '+ago(t.updatedAt)+'</span></div>'}).join('')+'</details>';
   m.innerHTML=h;
   var p=document.getElementById('prompt');p.oninput=function(){composer=p.value};p.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}};if(refocus){p.focus();p.selectionStart=p.selectionEnd=pos}
   if(searching){var sn=document.getElementById('taskSearch');if(sn){sn.focus();sn.setSelectionRange(sn.value.length,sn.value.length)}}
   if(focusNotes){var f=m.querySelector('[data-notes="'+focusNotes+'"]');if(f){f.focus();f.selectionStart=f.selectionEnd=f.value.length}}
-  document.getElementById('send').onclick=send;var wp=document.getElementById('workerPick');if(wp)wp.onchange=function(){pick=wp.value;localSet('pick',pick);renderHome()};
+  document.getElementById('send').onclick=send;var wp=document.getElementById('workerPick');if(wp)wp.onchange=function(){pick=wp.value;localSet('pick',pick);renderHome()};var mp=document.getElementById('modePick');if(mp)mp.onchange=function(){mode=mp.value;localSet('mode',mode);renderHome()};
   var search=document.getElementById('taskSearch');search.oninput=function(){taskSearch=search.value;renderHome();var next=document.getElementById('taskSearch');next.focus();next.setSelectionRange(taskSearch.length,taskSearch.length)};m.querySelectorAll('[data-filter]').forEach(function(b){b.onclick=function(){taskFilter=b.dataset.filter;renderHome()}});
   m.querySelectorAll('[data-notes]').forEach(function(t){t.oninput=function(){drafts[t.dataset.notes]=t.value}});
   m.querySelectorAll('[data-approve]').forEach(function(b){b.onclick=function(){b.disabled=true;post('/api/review',{taskId:b.dataset.approve,verdict:'approved',notes:drafts[b.dataset.approve]||''}).then(function(r){if(r.ok)toast(r.conflicts&&r.conflicts.length?'Conflicts in '+r.conflicts.join(', ')+'; still in review':'Approved and merged');delete drafts[b.dataset.approve]})}});
@@ -129,8 +134,8 @@ function renderHome(){
   m.querySelectorAll('[data-stop]').forEach(function(b){b.onclick=function(){post('/api/stop',{sessionId:b.dataset.stop})}});
   m.querySelectorAll('[data-open]').forEach(function(b){b.onclick=function(){selectedTask=b.dataset.open;setTab('tasks')};b.onkeydown=function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();b.click()}}});
 }
-function send(){var text=composer.trim();if(!text)return;var b=document.getElementById('send');b.disabled=true;post('/api/delegate',pick==='auto'?{prompt:text}:{prompt:text,worker:pick}).then(function(r){b.disabled=false;if(r.ok){composer='';toast('Delegated to '+r.worker);renderHome()}})}
-document.addEventListener('keydown',function(e){if(e.target&&(/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)))return;if(e.key==='/'){e.preventDefault();var search=document.getElementById('taskSearch');if(search){search.focus();search.select()}}else if(e.key==='g'){goKey=true;setTimeout(function(){goKey=false},900)}else if(goKey&&{h:'home',a:'activity',b:'brain',s:'settings'}[e.key]){goKey=false;setTab({h:'home',a:'activity',b:'brain',s:'settings'}[e.key])}});
+function send(){var text=composer.trim();if(!text)return;var b=document.getElementById('send');b.disabled=true;var chatWorker=pick==='auto'?S.workers.filter(function(w){return w.available&&(w.id==='claude-code'||w.id==='codex')})[0]:S.workers.filter(function(w){return w.id===pick})[0];var request=mode==='chat'?post('/api/chat',{prompt:text,worker:chatWorker&&chatWorker.id}):post('/api/delegate',pick==='auto'?{prompt:text}:{prompt:text,worker:pick});request.then(function(r){b.disabled=false;if(r.ok){composer='';if(mode==='chat'){chatLog.push({role:'user',text:text});chatLog.push({role:'assistant',worker:r.worker,text:r.text||'(No response text returned.)'});renderHome()}else toast('Delegated to '+r.worker);if(mode==='task')renderHome()}})}
+document.addEventListener('keydown',function(e){if(e.target&&(/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)))return;if(e.key==='/'){e.preventDefault();var search=document.getElementById('taskSearch');if(search){search.focus();search.select()}}else if(e.key==='g'){goKey=true;setTimeout(function(){goKey=false},900)}else if(goKey&&{h:'home',a:'activity',b:'brain',c:'connectors',s:'settings'}[e.key]){goKey=false;setTab({h:'home',a:'activity',b:'brain',c:'connectors',s:'settings'}[e.key])}});
 
 /* ---------- activity ---------- */
 function renderActivity(){
@@ -139,6 +144,37 @@ function renderActivity(){
   var h='<div class="filters"><button class="chip'+(agentFilter?'':' on')+'" data-af="">Everyone</button>'+agents.map(function(a){return '<button class="chip'+(agentFilter===a?' on':'')+'" data-af="'+esc(a)+'"><span class="who-dot" style="background:'+color(a)+'"></span>'+esc(name(a))+'</button>'}).join('')+'</div>';
   h+=list.length?'<div class="card feed" style="padding:4px 14px">'+list.slice(0,300).map(function(e){var t=e.task&&taskById(e.task);return '<div class="row"><span class="t">'+hhmm(e.at)+'</span><span class="who" style="color:'+color(e.agent)+'">'+esc(name(e.agent))+'</span><span><span style="color:var(--faint)">'+(GLYPH[e.kind]||'·')+'</span> '+esc(e.text)+(t?' <span class="sub">· '+esc(t.objective.slice(0,60))+'</span>':'')+'</span></div>'}).join('')+'</div>':'<div class="empty">Nothing yet. Prompts, edits, commands, progress, handoffs and verdicts from every agent show up here.</div>';
   var m=document.getElementById('main');m.innerHTML=h;m.querySelectorAll('[data-af]').forEach(function(b){b.onclick=function(){agentFilter=b.dataset.af||null;renderActivity()}});
+}
+
+/* ---------- connectors ---------- */
+var CONNECTOR_GROUPS=[['terminal','Terminal agents'],['app','Desktop apps'],['ide','IDEs'],['extension','IDE extensions']];
+var CAPABILITY={start:'Can start tasks',pickup:'Picks up tasks',review:'Plans & reviews',none:"Can't connect"};
+function loadConnectors(){
+  var all=connectorsAll;connectorsLoading=true;api('/api/connectors'+(all?'?all=1':'')).then(function(d){connectorsLoading=false;connectorsLoadedAll=all;if(d&&d.error){toast(d.error);connectors=[]}else connectors=d;if(view==='connectors')renderConnectors()}).catch(function(){connectorsLoading=false;connectorsLoadedAll=all;connectors=[];toast('Could not load connectors');if(view==='connectors')renderConnectors()});
+}
+function connectorStatus(c){
+  if(c.installed&&c.signedIn===false)return '<span class="bad">Not signed in</span>'+(c.hint?' <span class="sub">· '+esc(c.hint)+'</span>':'');
+  if(c.connected)return '<span class="ok">Connected</span>';
+  if(c.installed&&c.capability==='none')return '<span class="sub">Installed</span>';
+  if(c.installed)return '<span>Not connected</span>';
+  return '<span class="sub">Not installed</span>'+(c.hint?' <span class="sub">· '+esc(c.hint)+'</span>':'');
+}
+function connectorCard(c){
+  var cls='card'+(c.installed?'':' connector-off');var h='<div class="'+cls+'"><div class="connector-head"><div><div class="title">'+esc(c.name)+'</div><div class="sub">'+esc(c.location||c.id)+'</div></div><span class="connector-chip '+esc(c.capability)+'">'+esc(CAPABILITY[c.capability]||c.capability)+'</span></div>';
+  h+='<div class="connector-status">'+connectorStatus(c)+'</div>';
+  if(c.connect&&c.connect.file){h+='<div class="connector-path">Connect writes the '+esc(c.connect.scope)+' config: <span class="mono">'+esc(c.connect.file)+'</span></div><div class="actions">'+(c.connected?'<button data-disconnect="'+esc(c.id)+'">Disconnect</button>':'<button class="primary" data-connect="'+esc(c.id)+'"'+(!c.installed||c.signedIn===false?' disabled':'')+'>Connect</button>')+'</div>'}
+  else if(c.connect&&c.connect.manual)h+='<div class="connector-manual">'+esc(c.connect.manual)+'</div>';
+  if(c.note)h+='<div class="connector-note">'+esc(c.note)+'</div>';
+  return h+'</div>';
+}
+function renderConnectors(){
+  var m=document.getElementById('main');if(!connectors||connectorsLoadedAll!==connectorsAll){if(!connectorsLoading)loadConnectors();m.innerHTML='<div class="empty">Loading connectors...</div>';return}
+  var h='<div class="connectorbar"><div class="sub">Connect tools to AgentBrain so they can start, pick up, or review work.</div><label class="toggle"><input type="checkbox" id="showAllConnectors"'+(connectorsAll?' checked':'')+'> Show tools that aren\'t installed</label></div>';
+  CONNECTOR_GROUPS.forEach(function(g){var items=connectors.filter(function(c){return c.kind===g[0]});if(!items.length)return;h+='<h2>'+g[1]+' <span class="count">'+items.length+'</span></h2><div class="connector-grid">'+items.map(connectorCard).join('')+'</div>'});
+  if(!connectors.length)h+='<div class="empty">No installed connector tools found. Turn on the toggle to see every known tool AgentBrain can connect.</div>';
+  m.innerHTML=h;var show=document.getElementById('showAllConnectors');show.onchange=function(){connectorsAll=show.checked;localSet('connectorsAll',connectorsAll?'1':'0');connectors=null;renderConnectors()};
+  m.querySelectorAll('[data-connect]').forEach(function(b){b.onclick=function(){var id=b.dataset.connect;var c=connectors.filter(function(x){return x.id===id})[0];b.disabled=true;post('/api/connectors/connect',{id:id}).then(function(r){if(r.ok){toast('Restart '+(c?c.name:id)+' so it loads AgentBrain');connectors=null;loadConnectors()}else{b.disabled=false}})}});
+  m.querySelectorAll('[data-disconnect]').forEach(function(b){b.onclick=function(){var id=b.dataset.disconnect;b.disabled=true;post('/api/connectors/disconnect',{id:id}).then(function(r){if(r.ok){toast('Disconnected');connectors=null;loadConnectors()}else{b.disabled=false}})}});
 }
 
 /* ---------- settings ---------- */
@@ -170,11 +206,11 @@ function renderTask(){
   Promise.all([api('/api/diff?task='+encodeURIComponent(t.id)),t.liveSession?api('/api/transcript?session='+encodeURIComponent(t.liveSession.sessionId)):Promise.resolve(null)]).then(function(r){
     function list(a){return a&&a.length?'<ul>'+a.map(function(x){return '<li>'+esc(x)+'</li>'}).join('')+'</ul>':'<div class="sub">None</div>'}
     var h='<div class="detail"><button class="ghost" id="back">← Back</button><div class="card" style="margin-top:8px"><div class="title" style="font-size:18px">'+esc(t.objective)+'</div><div class="sub">'+esc(t.status)+(t.agent?' · '+esc(name(t.agent)):'')+' · <span class="mono">'+esc(t.id)+'</span></div>'+stepsHtml(t)+(t.nextAction?'<div class="sub">Next: '+esc(t.nextAction)+'</div>':'')+'<div class="actions"><button id="openEditor">Open in VS Code</button></div></div>'+
-      '<div class="card"><b>Done</b>'+list(t.completed)+'<b>Remaining</b>'+list(t.remaining)+'<b>Decisions</b>'+list(t.decisions)+(t.failures.length?'<b>Known failures</b>'+list(t.failures):'')+'</div>'+
+      '<div class="card"><b>Next action</b><div class="sub" style="margin:6px 0 12px">'+esc(nextAction(t))+(t.nextAction?' · '+esc(t.nextAction):'')+'</div><b>Done</b>'+list(t.completed)+'<b>Remaining</b>'+list(t.remaining)+'<b>Decisions</b>'+list(t.decisions)+(t.failures.length?'<b>Known failures</b>'+list(t.failures):'')+'</div>'+
       (t.reviews.length?'<div class="card"><b>Review history</b>'+t.reviews.map(function(v){return '<div class="sub">'+esc(v.at.slice(0,16).replace('T',' '))+' · '+(v.verdict==='approved'?'<span class="ok">approved</span>':'<span class="bad">sent back</span>')+' by '+esc(v.reviewer)+(v.notes?': '+esc(v.notes):'')+'</div>'}).join('')+'</div>':'')+
       '<div class="card"><b>Activity</b>'+logHtml(taskLog(t,40))+'</div>'+
       '<div class="card"><b>Uncommitted changes</b><pre>'+esc(r[0].diff||'(none)')+'</pre></div>'+
-      (r[1]?'<div class="card"><b>Live transcript</b><pre>'+esc((r[1].transcript||[]).join('\n'))+'</pre></div>':'')+'<div class="sub mono">'+esc(t.workdir)+'</div></div>';
+      (r[1]?'<div class="card"><b>Live head</b><div class="sub">'+esc(name(t.liveSession.agentId))+' · session <span class="mono">'+esc(t.liveSession.sessionId)+'</span> · attach with <span class="mono">agentbrain attach '+esc(t.liveSession.sessionId)+'</span></div><pre>'+esc((r[1].transcript||[]).join('\n'))+'</pre></div>':'')+'<div class="sub mono">'+esc(t.workdir)+'</div></div>';
     m.innerHTML=h;document.getElementById('back').onclick=function(){setTab('home')};document.getElementById('openEditor').onclick=function(){post('/api/open',{taskId:t.id})};
   });
 }
@@ -279,7 +315,7 @@ function openNote(id){
 
 function renderBrainView(fresh){renderBrain(fresh)}
 function render(){if(!S)return;document.getElementById('repo').textContent=S.root.split('/').pop();renderNav();
-  if(view==='home')renderHome();else if(view==='activity')renderActivity();else if(view==='brain')renderBrainView(!document.getElementById('graph'));else if(view==='settings'){if(!(settings&&settings.dirty))renderSettings()}else renderTask()}
+  if(view==='home')renderHome();else if(view==='activity')renderActivity();else if(view==='brain')renderBrainView(!document.getElementById('graph'));else if(view==='connectors')renderConnectors();else if(view==='settings'){if(!(settings&&settings.dirty))renderSettings()}else renderTask()}
 api('/api/snapshot').then(function(x){if(x.error){document.getElementById('main').innerHTML='<div class="empty">'+esc(x.error)+'</div>';return}S=x;render()}).catch(function(){document.getElementById('live').classList.add('off')});
 var es=new EventSource('/api/events?token='+encodeURIComponent(token));es.addEventListener('snapshot',function(e){S=JSON.parse(e.data);render()});es.onerror=function(){document.getElementById('live').classList.add('off')};es.onopen=function(){document.getElementById('live').classList.remove('off')};
 })();

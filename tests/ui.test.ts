@@ -52,6 +52,9 @@ describe("local UI server", () => {
       const snapshot = await (await request(base, "/api/snapshot", { headers: { "x-agentbrain-token": token } })).json() as { tasks: { id: string }[]; queue: { id: string; objective: string; status: string }[] };
       expect(snapshot.tasks.map((item) => item.id)).toContain(task.id);
       expect(snapshot.queue).toEqual([{ id: queued.id, objective: "Queued dashboard follow-up", status: "idle" }]);
+      const connectors = await (await request(base, "/api/connectors?all=1", { headers: { "x-agentbrain-token": token } })).json() as { id: string; kind: string; capability: string }[];
+      expect(connectors.map((item) => item.id)).toContain("vscode");
+      expect(connectors.some((item) => item.kind === "terminal" && item.capability === "start")).toBe(true);
       const message = await request(base, "/api/message", {
         method: "POST",
         headers: { "x-agentbrain-token": token },
@@ -63,6 +66,8 @@ describe("local UI server", () => {
       expect(page.status).toBe(200);
       const html = await page.text();
       expect(html).toContain("AgentBrain");
+      expect(html).toContain("Connectors");
+      expect(html).toContain("/api/connectors");
       expect(html).toContain('data-open="\'+esc(t.id)+\'"');
     } finally {
       await server.close();

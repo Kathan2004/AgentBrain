@@ -11,7 +11,9 @@ import fs from "node:fs";
 import os from "node:os";
 import readline from "node:readline";
 import { activityFile, type ActivityEvent } from "../core/activity.js";
-import { delegate, deliverToChat, rankWorkers, setDefaultWorker } from "../core/delegate.js";
+import { connectConnector, detectConnectors, disconnectConnector, type Capability, type Connector, type ConnectorKind } from "../core/connectors.js";
+import { claudeBinary, codexBinary, delegate, deliverToChat, planGoal, rankWorkers, setDefaultWorker } from "../core/delegate.js";
+import { sessionControl } from "../core/headless.js";
 import { sendMessage } from "../core/messages.js";
 import {
   computeTally,
@@ -26,7 +28,8 @@ import {
   setLead,
 } from "../core/review.js";
 import type { TaskState } from "../core/state.js";
-import { getProject, getTask, listSessions, listTasks } from "../core/store.js";
+import { getProject, getTask, listSessions, listTasks, sessionAlive } from "../core/store.js";
+import { runChat } from "../core/printrun.js";
 import { openBrowser, startUiDaemon } from "./daemon.js";
 import { fit, visibleLength } from "./tui.js";
 
@@ -124,14 +127,22 @@ export interface Command {
 export const COMMANDS: Command[] = [
   { name: "help", help: "Show commands and how delegation works" },
   { name: "status", help: "What every task and agent is doing" },
+  { name: "now", help: "Plain-language next actions for active and review tasks" },
+  { name: "live", args: "[task]", help: "Show a headless agent's live transcript and attach command" },
+  { name: "mode", args: "[chat|task]", help: "Chat with the selected model or create sandboxed tasks" },
+  { name: "task", args: "<request>", help: "Explicitly delegate a request into its own worktree" },
   { name: "review", args: "[task]", help: "Results waiting for review: claims, diff, checks, flags, votes" },
   { name: "approve", args: "[task] [notes]", help: "Approve a result (merges its branch)" },
   { name: "changes", args: "[task] <notes>", help: "Send a result back with what to fix" },
+  { name: "plan", args: "<goal>", help: "A planner agent splits a big goal and delegates the pieces in parallel" },
   { name: "continue", args: "<task>", help: "Hand an unfinished task to the worker again" },
   { name: "worker", args: "[agent|auto]", help: "Which agents can take work, and who's picked next (and why)" },
   { name: "lead", args: "<agent|none>", help: "One agent reviews every other agent's work" },
   { name: "council", args: "<agent>... [quorum]", help: "Agents vote on every result; a quorum decides" },
   { name: "checks", args: "<command>...", help: "Commands AgentBrain runs itself on every result" },
+  { name: "connectors", help: "Installed tools and whether AgentBrain is connected" },
+  { name: "connect", args: "<id>", help: "Connect a tool by writing AgentBrain into its MCP config" },
+  { name: "disconnect", args: "<id>", help: "Remove AgentBrain from a tool's MCP config" },
   { name: "message", args: "<agent|all> <text>", help: "Talk to the agents working right now" },
   { name: "dashboard", help: "Open the control room in your browser" },
   { name: "clear", help: "Clear the screen" },
@@ -212,6 +223,57 @@ export class FeedFormatter {
 export interface ConsoleOptions {
   /** How to start AgentBrain itself in the background (for dispatch and the control room). */
   self: { command: string; args: string[] };
+  /** How connected tools should start AgentBrain's MCP server. */
+  config?: { command: string; args: string[] };
+}
+
+const CONNECTOR_HEADINGS: Record<ConnectorKind, string> = {
+  terminal: "Terminal agents",
+  app: "Desktop apps",
+  ide: "IDEs",
+  extension: "IDE extensions",
+};
+
+const CONNECTOR_KIND_ORDER: ConnectorKind[] = ["terminal", "app", "ide", "extension"];
+
+const CAPABILITY_TEXT: Record<Capability, string> = {
+  start: "can start tasks",
+  pickup: "picks up tasks",
+  review: "plans & reviews",
+  none: "can't connect",
+};
+
+function connectorStatus(connector: Connector): string {
+  if (connector.signedIn === false) return `not signed in${connector.hint ? `: ${connector.hint}` : ""}`;
+  return connector.connected ? "connected" : "not connected";
+}
+
+function connectorTarget(connector: Connector): string {
+  if (connector.connect && "file" in connector.connect) return `${connector.connect.scope} config ${connector.connect.file}`;
+  if (connector.connect && "manual" in connector.connect) return connector.connect.manual;
+  return connector.note ?? "";
+}
+
+export function connectorLines(connectors: Connector[], width = 100): string[] {
+  const installed = connectors.filter((connector) => connector.installed);
+  const lines: string[] = ["", style.bold(" Connectors")];
+  if (!installed.length) return [...lines, style.dim("  No installed tools found."), ""];
+  for (const kind of CONNECTOR_KIND_ORDER) {
+    const group = installed.filter((connector) => connector.kind === kind);
+    if (!group.length) continue;
+    lines.push("", `  ${style.bold(CONNECTOR_HEADINGS[kind])}`);
+    for (const connector of group) {
+      const dot = connector.connected ? style.green("●") : style.dim("○");
+      const details = [
+        connectorStatus(connector),
+        CAPABILITY_TEXT[connector.capability],
+        connectorTarget(connector),
+      ].filter(Boolean).join(" · ");
+      lines.push(fit(`  ${dot} ${style.accent(connector.id.padEnd(16))} ${connector.name} ${style.dim(details)}`, width));
+    }
+  }
+  lines.push("");
+  return lines;
 }
 
 export async function runConsole(root: string, options: ConsoleOptions): Promise<void> {
@@ -248,6 +310,8 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
   // Which agent the next prompt goes to: "auto" (best-placed ready agent) or one the
   // developer picked with Shift+Tab. Like an agent CLI's mode, it lasts for this session.
   let choice = getProject(root).worker ?? "auto";
+  let mode: "chat" | "task" = "chat";
+  const chatHistory: string[] = [];
   let ranked = rankWorkers(root);
   let rankedAt = Date.now();
   const ready = () => {
@@ -261,7 +325,7 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     const label = choice === "auto"
       ? `Auto ${style.dim("→")} ${pick ? pick.worker.name : "no agent ready"}${pick ? style.dim(`  (${pick.reasons.slice(0, 2).join(", ")})`) : ""}`
       : `${pick?.worker.name ?? choice}`;
-    return `  ${style.accent("⏵")} ${label}  ${style.dim("· shift+tab to switch agent · @agent in a prompt")}`;
+    return `  ${style.accent("⏵")} ${label}  ${style.dim(`· ${mode} mode · shift+tab to switch agent · /mode to change`)}`;
   };
 
   const header = () => {
@@ -362,17 +426,49 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     const tasks = listTasks(root).filter((t) => t.status !== "done");
     const sessions = listSessions(root).filter((s) => !s.endedAt);
     const lines = ["", style.bold(" Tasks")];
+    const reviewCount = tasks.filter((t) => t.status === "review").length;
+    const activeCount = tasks.filter((t) => t.status !== "review").length;
+    lines.push(style.dim(`  ${activeCount} active · ${reviewCount} waiting for your decision`));
     if (!tasks.length) lines.push(style.dim("  Nothing in progress."));
     const color: Record<string, (t: string) => string> = { running: style.green, review: style.purple, handoff: style.blue, blocked: style.red, failed: style.red };
     for (const t of tasks) {
+      const live = sessions.find((s) => s.taskId === t.id && s.mode === "headless" && sessionAlive(s));
+      const action = t.status === "review"
+        ? `Decide: /approve ${t.id} or /changes ${t.id} <what to fix>`
+        : t.status === "running"
+          ? live ? `Watch: /live ${t.id}` : "Agent is working; wait for its next update"
+          : t.status === "handoff" || t.status === "idle"
+            ? `Continue: /continue ${t.id}`
+            : t.status === "blocked" || t.status === "failed"
+              ? `Needs attention: inspect /status, then /continue ${t.id}`
+              : "AgentBrain is tracking this task";
       lines.push(`  ${(color[t.status] ?? style.yellow)(t.status.padEnd(10))} ${short(t.objective, 70)}`);
-      lines.push(style.dim(`             ${t.id}${t.agent ? ` · ${agentLabel(t.agent.id)}` : ""}${t.nextAction ? ` · next: ${short(t.nextAction, 60)}` : ""}`));
+      lines.push(style.dim(`             ${t.id}${t.agent ? ` · ${agentLabel(t.agent.id)}` : ""}`));
+      lines.push(`             ${style.bold(action)}`);
     }
     lines.push("", style.bold(" Agents"));
     const recent = sessions.filter((s) => s.lastSeenAt || s.mode === "headless").slice(-6);
     if (!recent.length) lines.push(style.dim("  No agent sessions reporting right now."));
     for (const s of recent) lines.push(`  ${agentColor(s.agentId)(agentLabel(s.agentId).padEnd(18))} ${s.activity ?? (s.mode ?? "")} ${style.dim(s.lastAction ? short(s.lastAction, 60) : "")}`);
     lines.push("", ` ${style.dim("Decides")} ${decidesText()}`, "");
+    return lines;
+  };
+
+  const liveReport = (arg?: string): string[] => {
+    const sessions = listSessions(root).filter((s) => s.mode === "headless" && sessionAlive(s));
+    const selected = arg ? sessions.filter((s) => s.taskId === arg || s.taskId.endsWith(arg)) : sessions;
+    if (!selected.length) return ["", style.dim("  No headless agent is running right now."), style.dim("  Start one with: agentbrain run <agent> <task> --headless --detach"), ""];
+    const lines = ["", style.bold(` Live heads (${selected.length})`)];
+    for (const session of selected) {
+      const control = sessionControl(root, session.agentId, session.sessionId);
+      const transcript = session.transcript ?? control.transcript;
+      const tail = fs.existsSync(transcript) ? fs.readFileSync(transcript, "utf8").trim().split("\n").slice(-8) : [];
+      lines.push(`  ${style.green("●")} ${agentLabel(session.agentId)} · ${session.taskId}`);
+      lines.push(style.dim(`    session ${session.sessionId} · attach: agentbrain attach ${session.sessionId}`));
+      if (session.lastAction) lines.push(`    ${style.bold("Now:")} ${short(session.lastAction, 90)}`);
+      if (tail.length) lines.push(style.dim(`    ${tail.join("\n    ")}`));
+    }
+    lines.push("", style.dim("  The console keeps this head live; /message <agent> <text> sends guidance."), "");
     return lines;
   };
 
@@ -401,6 +497,22 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
         return help();
       case "status":
         return statusReport();
+      case "now":
+        return statusReport();
+      case "live":
+        return liveReport(words[0]);
+      case "mode":
+        if (!words[0] || words[0] === mode) return [`  Mode: ${style.bold(mode)} · ${mode === "chat" ? "root access, no task created" : "isolated worktree tasks"}`];
+        if (words[0] !== "chat" && words[0] !== "task") return [style.yellow("  /mode chat or /mode task")];
+        mode = words[0];
+        return [style.green(`  ✓ ${mode === "chat" ? "Chat mode: prompts stay conversational in the project root." : "Task mode: prompts create isolated worktree tasks."}`)];
+      case "task": {
+        const prompt = words.join(" ");
+        if (!prompt) return [style.yellow("  /task <request>   creates an isolated worktree task")];
+        const result = delegate(root, { prompt, ...(choice === "auto" ? {} : { worker: choice }) }, options.self);
+        objectives.set(result.task.id, result.task.objective);
+        return [style.green(`  ✓ Delegated ${result.task.id} to ${result.worker.name}.`), style.dim("    /now shows what happens next.")];
+      }
       case "review":
         return reviewReport(words[0]);
       case "approve":
@@ -414,6 +526,11 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
         if (result.conflicts) return [style.red(`  ${task.id} conflicts with your branch in ${result.conflicts.join(", ")}; merge aborted, still in review.`)];
         if (name === "approve") return [style.green(`  ✓ Approved${result.merged ? ` and merged ${result.merged} commit(s)` : ""}: ${task.objective}`)];
         return [style.green(`  ✓ Sent back with your notes. /continue ${task.id} hands it to an agent now.`)];
+      }
+      case "plan": {
+        if (!rest) return [style.yellow("  /plan <goal>   e.g. /plan add OAuth login with Google and GitHub")];
+        const result = planGoal(root, rest, options.self);
+        return [style.dim(`    ${result.worker.name} is reading the code and splitting it into pieces; they'll show up here as they're delegated.`)];
       }
       case "continue": {
         const task = pickTask(words[0], (t) => t.status === "handoff" || t.status === "idle" || t.status === "blocked");
@@ -451,6 +568,32 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
         if (!rest) return [`  ${(getProject(root).checks ?? []).join(" · ") || style.dim("No checks. Example: /checks npm test")}`];
         setChecks(root, rest === "none" ? [] : rest.split(/\s*;\s*|\s*,\s*/).filter(Boolean));
         return [style.green(`  ✓ AgentBrain runs on every result: ${(getProject(root).checks ?? []).join(" · ") || "nothing"}`)];
+      case "connectors":
+        return connectorLines(detectConnectors(root), width() - 1);
+      case "connect": {
+        if (!words[0]) return [style.yellow("  /connect <id>   e.g. /connect codex")];
+        try {
+          const config = options.config ?? options.self;
+          const result = connectConnector(root, words[0], config.command, [...config.args, "mcp"]);
+          const connector = detectConnectors(root, { all: true }).find((c) => c.id === words[0]);
+          const name = connector?.name ?? words[0];
+          return [
+            style.green(`  ✓ ${result.action} ${result.file}`),
+            style.dim(`  restart ${name} so it loads AgentBrain`),
+          ];
+        } catch (error) {
+          return [style.yellow(`  ${error instanceof Error ? error.message : String(error)}`)];
+        }
+      }
+      case "disconnect": {
+        if (!words[0]) return [style.yellow("  /disconnect <id>   e.g. /disconnect codex")];
+        try {
+          const changed = disconnectConnector(root, words[0]);
+          return [changed ? style.green(`  ✓ Disconnected ${words[0]}.`) : style.dim(`  ${words[0]} was not connected.`)];
+        } catch (error) {
+          return [style.yellow(`  ${error instanceof Error ? error.message : String(error)}`)];
+        }
+      }
       case "message": {
         if (!words[0] || words.length < 2) return [style.yellow("  /message <agent|all> <text>   e.g. /message vscode hold off on page.ts, I'm editing it")];
         const to = ({ claude: "claude-code", copilot: "vscode" } as Record<string, string>)[words[0].toLowerCase()] ?? words[0];
@@ -487,10 +630,20 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     print(["", `${style.dim(">")} ${line}`]);
     try {
       if (line.startsWith("/")) print(await run(line));
-      else {
+      else if (mode === "task") {
         const result = delegate(root, { prompt: line, ...(choice === "auto" ? {} : { worker: choice }) }, options.self);
         objectives.set(result.task.id, result.task.objective);
         if (result.worker.how === "pull") print([`    ${style.dim("Open any agent on this repo (Claude app, Cursor, VS Code) and say \"continue\"; it picks this up.")}`]);
+      } else {
+        const selected = choice === "auto" ? ready()[0]?.worker : ready().find((c) => c.worker.id === choice)?.worker;
+        if (!selected) throw new Error("No selected model is ready. Use Shift+Tab or /worker to choose one.");
+        if (selected.id !== "claude-code" && selected.id !== "codex") throw new Error(`${selected.name} is a chat connector. Select Claude Code or Codex for root Chat mode.`);
+        const command = selected.id === "claude-code" ? claudeBinary() : codexBinary();
+        if (!command) throw new Error(`${selected.name} is not installed or signed in.`);
+        const prompt = [...chatHistory, `Developer: ${line}`].join("\n");
+        print([style.dim(`  ${selected.name} is thinking in Chat mode (project root)…`)]);
+        await runChat(root, { id: selected.id, command }, prompt, (text) => print(text.split("\n").map((part) => `  ${part}`)));
+        chatHistory.push(`Developer: ${line}`);
       }
     } catch (error) {
       print([style.red(`  ${error instanceof Error ? error.message : String(error)}`)]);

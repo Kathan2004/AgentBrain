@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { createTask } from "../src/core/actions.js";
+import { createTask, updateTask } from "../src/core/actions.js";
+import { recordActivity } from "../src/core/activity.js";
+import { setLead } from "../src/core/review.js";
+import { getTask, saveTask } from "../src/core/store.js";
 import { snapshot } from "../src/ui/model.js";
 import { fit, handleKey, initialState, parseInput, renderFrame, visibleLength } from "../src/ui/tui.js";
 import { ab, readJson, tempRepo } from "./helpers.js";
@@ -39,6 +42,27 @@ describe("terminal live view", () => {
     for (const line of frame.lines) expect(visibleLength(line)).toBeLessThanOrEqual(140);
   });
 
+  it("prioritizes automated review risks before ordinary reviews", () => {
+    const repo = tempRepo("agentbrain-tui-review-priority-");
+    ab(repo, ["init"]);
+    const older = createTask(repo, "Older review");
+    const newer = createTask(repo, "Newer review");
+    older.status = "review";
+    older.review = { worker: "codex", requestedAt: "2026-01-01T00:00:00.000Z", votes: [], checks: [], flags: [] };
+    newer.status = "review";
+    newer.review = {
+      worker: "codex",
+      requestedAt: "2026-01-02T00:00:00.000Z",
+      votes: [],
+      checks: [],
+      flags: [{ agent: "codex", kind: "hallucination", text: "Missing file", at: "2026-01-02T00:00:00.000Z" }],
+    };
+    saveTask(repo, older);
+    saveTask(repo, newer);
+
+    expect(snapshot(repo).tasks.slice(0, 2).map((task) => task.id)).toEqual([newer.id, older.id]);
+  });
+
   it("shows queued objectives and the queue count", () => {
     const { repo } = project();
     const queued = createTask(repo, "Queued report");
@@ -70,6 +94,49 @@ describe("terminal live view", () => {
     expect(plain(renderFrame(repo, snapshot(repo), state, 140, 40).lines)).toContain("No headless agent is running on this task");
   });
 
+  it("shows review tasks with checks, flags, and tally", () => {
+    const { repo, login } = project();
+    setLead(repo, "claude");
+    updateTask(repo, login, { status: "done", agent: { id: "codex", sessionId: "c1" } });
+    const task = getTask(repo, login);
+    task.review!.checks = [
+      { command: "npm test", ok: true, exitCode: 0, tail: "", ms: 1200, at: "2026-10-09T10:00:00.000Z" },
+      { command: "npm run lint", ok: false, exitCode: 1, tail: "lint failed", ms: 800, at: "2026-10-09T10:01:00.000Z" },
+    ];
+    task.review!.flags = [{ agent: "agentbrain", kind: "false-claim", text: "Claims checks pass, but lint failed.", at: "2026-10-09T10:01:00.000Z" }];
+    task.review!.verifiedAt = "2026-10-09T10:01:00.000Z";
+    saveTask(repo, task);
+
+    const state = initialState();
+    handleKey(state, "6", 2);
+    const frame = renderFrame(repo, snapshot(repo), state, 140, 30);
+    const text = plain(frame.lines);
+    expect(text).toContain("Review (1)");
+    expect(text).toContain(`by codex: ${task.objective}`);
+    expect(text).toContain("✓ npm test");
+    expect(text).toContain("✗ npm run lint");
+    expect(text).toContain("false-claim: Claims checks pass, but lint failed. (agentbrain)");
+    expect(text).toContain("tally 0/0 of 1 approve/changes");
+    expect(text).toContain("blocked: checks failed: npm run lint");
+    for (const line of frame.lines) expect(visibleLength(line)).toBeLessThanOrEqual(140);
+  });
+
+  it("shows recent activity newest first", () => {
+    const { repo, login } = project();
+    recordActivity(repo, { at: "2026-10-09T09:00:00.000Z", agent: "codex", task: login, kind: "edit", text: "Edited src/ui/tui.ts" });
+    recordActivity(repo, { at: "2026-10-09T09:01:00.000Z", agent: "agentbrain", task: login, kind: "review", text: "✓ npm test (1s)" });
+
+    const state = initialState();
+    handleKey(state, "7", 2);
+    const frame = renderFrame(repo, snapshot(repo), state, 100, 30);
+    const text = plain(frame.lines);
+    expect(text).toContain("Activity");
+    expect(text.indexOf("10-09 09:01 agentbrain")).toBeLessThan(text.indexOf("10-09 09:00 codex"));
+    expect(text).toContain("✓ ✓ npm test (1s)");
+    expect(text).toContain("✎ Edited src/ui/tui.ts");
+    for (const line of frame.lines) expect(visibleLength(line)).toBeLessThanOrEqual(100);
+  });
+
   it("maps keys and mouse clicks to state", () => {
     const state = initialState();
     expect(handleKey(state, "j", 2)).toEqual({ type: "none" });
@@ -78,6 +145,8 @@ describe("terminal live view", () => {
     expect(state.selected).toBe(1);
     handleKey(state, "\x1b[C", 2);
     expect(state.view).toBe("changes");
+    handleKey(state, "7", 2);
+    expect(state.view).toBe("activity");
     expect(handleKey(state, "o", 2)).toEqual({ type: "open" });
     handleKey(state, "m", 2);
     for (const ch of "hi there") handleKey(state, ch, 2);
@@ -107,6 +176,7 @@ describe("terminal live view", () => {
     const text = plain(frame.lines);
     expect(text).toContain("Build login");
     expect(text).toContain("1over");
+    expect(text).toContain("7acti");
     // Details get the full width instead of a sliver.
     expect(text).toContain("Use JWT");
   });

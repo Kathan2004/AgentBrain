@@ -115,10 +115,12 @@ describe("review council", () => {
     const { repo, task, wt } = setup();
     setCouncil(repo, ["claude-code", "gemini", "cursor"]);
     setChecks(repo, ["node -e \"process.exit(1)\""]);
+    fs.mkdirSync(path.join(wt, "src", "core"), { recursive: true });
+    fs.writeFileSync(path.join(wt, "src", "core", "limits.ts"), "export {}\n");
     commitIn(wt, "greet.ts", "x\n");
     updateTask(repo, task.id, {
       status: "done",
-      done: ["Added src/ghost.ts and all tests pass"],
+      done: ["Added .agentbrain/project.json, src/core/limits.ts and src/ghost.ts; all tests pass"],
       agent: worker("codex"),
     });
     const review = getTask(repo, task.id).review!;
@@ -126,6 +128,7 @@ describe("review council", () => {
     const kinds = review.flags!.map((f) => f.kind);
     expect(kinds).toContain("false-claim");
     expect(kinds).toContain("hallucination");
+    expect(review.flags!.find((f) => f.kind === "hallucination")!.text).toBe("Mentions files that do not exist: src/ghost.ts.");
     expect(readReputation(repo).codex.flagged).toBe(2);
 
     // Even unanimous approval cannot pass failing checks.
