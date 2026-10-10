@@ -13,6 +13,7 @@ import type { AgentSessionState, TaskState } from "../core/state.js";
 import { getProject, listSessions, listTasks, sessionAlive } from "../core/store.js";
 import { taskWorkdir } from "../core/worktree.js";
 import { gitBinary } from "../core/platform.js";
+import { checkpointsDir } from "../core/paths.js";
 
 /**
  * One read-only snapshot of everything AgentBrain knows, for live views (the
@@ -237,6 +238,41 @@ export interface TaskChanges {
   patch: string;
   truncated: boolean;
   uncommitted: boolean;
+  /** Worked straight on main: the commits made there while the task was open, which may include other work. */
+  approximate?: boolean;
+}
+
+const baseCache = new Map<string, string | null>();
+
+/**
+ * Where a finished task's branch started, once its worktree is gone: the
+ * recorded base, else the main-line parent of the merge that brought it in,
+ * else the branch's last commit from before the task was created.
+ */
+async function mergedBase(root: string, task: TaskState, tip: string): Promise<string | null> {
+  if (task.merged?.base) return task.merged.base;
+  if (baseCache.has(task.id)) return baseCache.get(task.id)!;
+  let base: string | null = null;
+  const merges = await gitOut(root, ["rev-list", "--all", "--merges", "--parents"]);
+  const merge = merges.split("\n").map((l) => l.trim().split(" ")).find((p) => p.slice(2).includes(tip));
+  if (merge) base = (await gitOut(root, ["merge-base", merge[1], tip])).trim() || null;
+  if (!base && task.createdAt) base = (await gitOut(root, ["rev-list", "-1", "--first-parent", `--before=${task.createdAt}`, tip])).trim() || null;
+  if (base === tip) base = null;
+  baseCache.set(task.id, base);
+  return base;
+}
+
+/** A task done straight on main (no worktree): the HEADs AgentBrain saw at its first and last checkpoint. */
+function checkpointRange(root: string, task: TaskState): { base: string; tip: string } | null {
+  const dir = checkpointsDir(root, task.id);
+  if (!fs.existsSync(dir)) return null;
+  const heads = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).sort().flatMap((f) => {
+    try {
+      const head = (JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as { git?: { head?: string; branch?: string } }).git;
+      return head?.head ? [head.head] : [];
+    } catch { return []; }
+  });
+  return heads.length >= 2 && heads[0] !== heads.at(-1) ? { base: heads[0], tip: heads.at(-1)! } : null;
 }
 
 const execFileAsync = promisify(execFile);
@@ -300,13 +336,19 @@ const changesCache = new Map<string, { key: string; at: number; value: TaskChang
  */
 export async function taskChanges(root: string, task: TaskState, maxBytes = 400_000): Promise<TaskChanges> {
   const workdir = taskWorkdir(root, task);
-  const base = task.worktree?.base;
+  let base = task.worktree?.base;
   // A finished task's worktree is gone: then the root's own edits aren't this task's.
   const live = Boolean(task.worktree && fs.existsSync(task.worktree.path));
   const refs = [task.worktree?.branch, task.merged?.commit].filter((r): r is string => Boolean(r));
   const shas = await Promise.all(refs.map((ref) => gitOut(root, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).then((x) => x.trim())));
   const tipIndex = shas.findIndex(Boolean);
-  const tip = tipIndex >= 0 ? refs[tipIndex] : undefined;
+  let tip = tipIndex >= 0 ? refs[tipIndex] : undefined;
+  let approximate = false;
+  if (!base && tip && tipIndex >= 0) base = (await mergedBase(root, task, shas[tipIndex])) ?? undefined;
+  if (!task.worktree && !task.merged) {
+    const span = checkpointRange(root, task);
+    if (span) { base = span.base; tip = span.tip; approximate = true; }
+  }
   const range = base && tip ? `${base}..${tip}` : null;
 
   // Same task state, same branch tip and (for live worktrees) a few seconds old: reuse.
@@ -365,6 +407,7 @@ export async function taskChanges(root: string, task: TaskState, maxBytes = 400_
     patch: full.slice(0, maxBytes),
     truncated: full.length > maxBytes,
     uncommitted: Boolean(pendingPatch),
+    ...(approximate ? { approximate } : {}),
   };
   changesCache.set(task.id, { key, at: Date.now(), value });
   return value;

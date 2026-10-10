@@ -400,7 +400,14 @@ export function planGoal(root: string, goal: string, self: { command: string; ar
  * hand the task to the next best ready agent, skipping the one that stopped.
  * At most three hand-overs per task; off with "autopilot": false in project.json.
  */
-export function autoContinue(root: string, taskId: string, stopped: string, reason: string, self: { command: string; args: string[] }): DelegateResult | null {
+export function autoContinue(
+  root: string,
+  taskId: string,
+  stopped: string,
+  reason: string,
+  self: { command: string; args: string[] },
+  options: { prefer?: string; sentBack?: boolean } = {},
+): DelegateResult | null {
   const project = getProject(root) as { autopilot?: boolean };
   if (project.autopilot === false) return null;
   const task = getTask(root, taskId);
@@ -410,13 +417,19 @@ export function autoContinue(root: string, taskId: string, stopped: string, reas
     recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot stopped: ${task.id} has been handed over ${autopilotRuns - 1} times; it waits for you` });
     return null;
   }
-  const failedHere = new Set((task.events ?? []).filter((e) => e.status === "handoff" && e.agent).map((e) => e.agent!));
-  failedHere.add(stopped);
-  const next = rankWorkers(root).find((c) => c.worker.available && !failedHere.has(c.worker.id) && c.worker.how !== "pull");
+  // A review sending work back is not an agent failing: its event (the last one) doesn't rule anyone out.
+  const handoffs = (task.events ?? []).slice(0, options.sentBack ? -1 : undefined).filter((e) => e.status === "handoff" && e.agent);
+  const failedHere = new Set(handoffs.map((e) => e.agent!));
+  if (!options.sentBack) failedHere.add(stopped);
+  const ready = rankWorkers(root).filter((c) => c.worker.available && !failedHere.has(c.worker.id) && c.worker.how !== "pull");
+  // The agent that did the work knows the code: it goes first when it can.
+  const next = ready.find((c) => c.worker.id === options.prefer) ?? ready[0];
+  const what = options.sentBack ? `${stopped} sent it back (${reason.slice(0, 100)})` : `${stopped} stopped (${reason.slice(0, 100)})`;
   if (!next) {
-    recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot: ${stopped} stopped (${reason.slice(0, 100)}) and no other agent is ready; the task waits` });
+    recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot: ${what} and no ${options.sentBack ? "" : "other "}agent is ready; the task waits` });
     return null;
   }
-  recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot: ${stopped} stopped (${reason.slice(0, 100)}); handing the task to ${next.worker.name}` });
+  recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot: ${what}; handing the task to ${next.worker.name}` });
+  if (options.sentBack) return delegate(root, { taskId, worker: next.worker.id, requestedBy: "agentbrain", why: `autopilot: sent back by ${stopped}` }, self);
   return delegate(root, { taskId, worker: next.worker.id, requestedBy: "agentbrain", why: `autopilot: ${stopped} stopped` }, self);
 }

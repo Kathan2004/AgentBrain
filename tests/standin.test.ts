@@ -106,3 +106,30 @@ describe("chat stand-ins", () => {
     expect(pick?.id).not.toBe("vscode");
   });
 });
+
+describe("approved but out of date", () => {
+  it("sends a result that conflicts with main back to be merged, instead of leaving it in review", () => {
+    const { repo, id } = submitted("codex", "vscode");
+    fs.writeFileSync(path.join(repo, "greet.ts"), "export const hi = 2;\n");
+    execFileSync("git", ["add", "-A"], { cwd: repo });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "main greet"], { cwd: repo });
+    reviewTask(repo, id, { verdict: "approved", reviewer: "codex" });
+    const task = getTask(repo, id);
+    expect(task.status).toBe("handoff");
+    expect(task.remaining[0]).toContain("greet.ts");
+    expect(task.review).toBeUndefined();
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" })).not.toMatch(/^UU/m);
+  });
+});
+
+describe("results that changed nothing", () => {
+  it("don't get a background reviewer: there's nothing to review", async () => {
+    const { askLead } = await import("../src/core/standin.js");
+    const { repo, id } = submitted("claude-code", "ollama");
+    const task = getTask(repo, id);
+    task.review!.flags = [{ agent: "ollama", kind: "no-change", text: "nothing changed", at: new Date().toISOString() }];
+    saveTask(repo, task);
+    expect(askLead(repo, id, { command: "true", args: [] })).toBe(false);
+    expect(standInReason(repo, getTask(repo, id), new Date(Date.now() + 60 * 60_000))).toBeNull();
+  });
+});

@@ -54,7 +54,7 @@ import { defaultNotificationSender, watchNotifications } from "../core/notify.js
 import { snapshot as liveSnapshot } from "../ui/model.js";
 
 const USAGE = `
-AgentBrain 0.14 — one console for every coding agent: delegate, review, remember
+AgentBrain 0.15 — one console for every coding agent: delegate, review, remember
 
 Control plane
   agentbrain on [--no-open]               Switch AgentBrain on for this repo, from any terminal or agent:
@@ -1145,7 +1145,9 @@ async function main(): Promise<void> {
     }
     const active = getProject(cwd).activeTaskId;
     for (const task of listTasks(cwd)) {
-      console.log(`${task.id === active ? "*" : " "} ${task.id}\t${task.status}\t${task.objective}`);
+      // One line per task: objectives can be whole paragraphs (`task show` has the rest).
+      const line = task.objective.split("\n")[0];
+      console.log(`${task.id === active ? "*" : " "} ${task.id}\t${task.status}\t${line.length > 120 ? `${line.slice(0, 119)}…` : line}`);
     }
   } else if (command === "checkpoint" || command === "handoff") {
     snapshot(command, subcommand);

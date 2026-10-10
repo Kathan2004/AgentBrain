@@ -162,6 +162,19 @@ describe("MCP server", () => {
     await client.close();
   });
 
+  it("refuses a late update to a task the developer closed, so it can't reopen", async () => {
+    const repo = project();
+    const { closeTask } = await import("../src/core/close.js");
+    closeTask(repo, activeTask(repo).id, "Closed manually: No longer needed");
+    const client = connect({ root: repo });
+    await client.initialize("claude-code");
+    const result = await client.call("agentbrain_update", { done: ["Rotated tokens"], status: "review" });
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/was closed/);
+    expect(activeTask(repo)).toMatchObject({ status: "done", nextAction: "Closed manually" });
+    await client.close();
+  });
+
   it("warns an agent that finishes while planned items are still open", async () => {
     const repo = project();
     const client = connect({ root: repo });

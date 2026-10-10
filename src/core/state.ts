@@ -40,7 +40,7 @@ export interface TaskState {
   /** Status changes, oldest first (capped): who moved the task where, and when. */
   events?: TaskEvent[];
   /** Set by `agentbrain worktree merge`: which branch tip was merged, so cleanup can trust it after a squash. */
-  merged?: { branch: string; commit: string; at: string };
+  merged?: { branch: string; commit: string; at: string; /** Where the branch started, to show its changes later. */ base?: string };
   /** Set while the task waits for review: who finished it, votes, AgentBrain's own checks, flags. */
   review?: ReviewState;
   /** Decisions on earlier submissions, oldest first. */
@@ -51,6 +51,8 @@ export interface TaskState {
   requestedBy?: string;
   /** Worker selected by delegation and when it was selected. */
   delegatedTo?: { worker: string; at: string };
+  /** When autopilot handed on a sent-back task: the `at` of the send-back event, so it happens once per send-back. */
+  sentBackResumed?: string;
   /** The task's own Git worktree, when it has one (`agentbrain worktree add`). */
   worktree?: { path: string; branch: string; base: string };
 }

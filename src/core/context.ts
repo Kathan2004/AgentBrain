@@ -77,7 +77,8 @@ export function sharedContext(root: string, options: { taskId?: string; objectiv
 /** What other agents did since `since` that this agent should hear about mid-task. */
 export function changesSince(root: string, since: string, me: string, taskId?: string, limit = 6): string {
   const notable = (e: ActivityEvent) =>
-    e.at > since && e.agent !== me && (
+    // Same millisecond counts: the agent's own events are filtered out by name, not time.
+    e.at >= since && e.agent !== me && (
       e.kind === "decision" ||
       (e.kind === "review" && !/^[✓✗]/.test(e.text)) ||
       (e.kind === "handoff" && e.task !== taskId) ||
@@ -87,4 +88,37 @@ export function changesSince(root: string, since: string, me: string, taskId?: s
   const events = readActivity(root, 400).filter(notable).slice(-limit);
   if (!events.length) return "";
   return `Since your last step, on this project:\n${events.map((e) => `- ${e.agent}${e.task && e.task !== taskId ? ` (${e.task})` : ""}: ${short(e.text, 160)}`).join("\n")}`;
+}
+
+/**
+ * What a chat agent gets before the question: everything AgentBrain already
+ * knows that a question about the project is likely to need (who is working on
+ * what, the tasks, today's commits and events, the memory), so it answers from
+ * the brain instead of exploring the repository again.
+ */
+export function chatBrief(root: string, question: string, commitsToday = ""): string {
+  const tasks = listTasks(root);
+  const dayStart = new Date();
+  dayStart.setHours(0, 0, 0, 0);
+  const today = dayStart.toISOString();
+  const open = tasks.filter((t) => t.status !== "done");
+  const finished = tasks
+    .filter((t) => t.status === "done" && (t.updatedAt ?? "") >= new Date(Date.now() - 24 * 3_600_000).toISOString())
+    .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
+    .slice(0, 12);
+  const line = (t: (typeof tasks)[number]) =>
+    `- ${t.id} [${t.status}${t.agent ? `, ${t.agent}` : ""}] ${short(t.objective.split("\n")[0], 140)}${t.nextAction ? ` (next: ${short(t.nextAction, 80)})` : ""}`;
+  const events = readActivity(root, 1500)
+    .filter((e) => e.at >= today && ["decision", "status", "commit", "review", "handoff"].includes(e.kind) && !/^[✓✗]/.test(e.text))
+    .slice(-30);
+  return [
+    "AgentBrain's shared memory for this project, current as of now. Answer from it directly when it covers the question; read files or run commands only for what it doesn't cover.",
+    liveTeam(root),
+    `Open tasks (${open.length}):\n${open.map(line).join("\n") || "- none"}`,
+    finished.length ? `Finished in the last 24 hours:\n${finished.map(line).join("\n")}` : "",
+    commitsToday.trim() ? `Commits today (all branches):\n${commitsToday.trim()}` : "",
+    events.length ? `Today's events:\n${events.map((e) => `- ${e.at.slice(11, 16)} ${e.agent}${e.task ? ` (${e.task})` : ""}: ${short(e.text, 150)}`).join("\n")}` : "",
+    projectMemory(root),
+    relevantMemory(root, question),
+  ].filter(Boolean).join("\n\n");
 }

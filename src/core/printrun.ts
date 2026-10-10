@@ -7,7 +7,7 @@ import { releaseStandIn } from "./standin.js";
 import { execFileSync } from "node:child_process";
 import { spawnPortable, gitBinary } from "./platform.js";
 import { autoContinue, claudeBinary, codexBinary } from "./delegate.js";
-import { localModel, ollamaEnv } from "./ollama.js";
+import { OLLAMA_URL, localModel, ollamaEnv } from "./ollama.js";
 import { recordActivity, type ActivityKind } from "./activity.js";
 import { describeTool } from "./claudehooks.js";
 import { sessionControl } from "./headless.js";
@@ -52,12 +52,17 @@ export function printAgent(name: string): PrintAgent {
   return { id, command, model, env: ollamaEnv(model) };
 }
 
+/**
+ * One chat turn. onText receives the answer in pieces, to be joined as they are:
+ * token by token from a local model, message by message from an agent CLI.
+ */
 export async function runChat(
   root: string,
   agent: PrintAgent,
   prompt: string,
   onText: (text: string) => void,
 ): Promise<void> {
+  if (agent.id === "ollama" && agent.model) return localChat(agent.model, prompt, onText);
   const args = claudeCli(agent.id)
     ? ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits", ...(agent.model ? ["--model", agent.model] : []), ...(agent.id === "ollama" ? LOCAL_FLAGS : [])]
     : ["exec", "--json", "-s", "workspace-write", "-C", root, "--skip-git-repo-check", "-"];
@@ -69,6 +74,9 @@ export async function runChat(
   child.stdin!.on("error", () => {});
   child.stdin!.end(`You are in AgentBrain Chat mode. Work from the project root. You may inspect the repository, .agentbrain task state, and .agentbrain/vault memory directly. Do not create a task or worktree unless explicitly asked.\n\n${prompt}\n`);
   let buffer = "";
+  // The final "result" event repeats the assistant's text: show it only when nothing else was said.
+  let said = false;
+  let stderr = "";
   const consume = (chunk: string) => {
     buffer += chunk;
     let end: number;
@@ -79,25 +87,58 @@ export async function runChat(
       try {
         const event = JSON.parse(line) as any;
         const content = event?.message?.content ?? event?.item?.content;
-        const text = typeof event?.result === "string" ? event.result
-          : typeof event?.item?.text === "string" ? event.item.text
-            : Array.isArray(content) ? content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("\n") : "";
-        if (text) onText(text);
+        if (event?.type === "result") {
+          if (!said && typeof event.result === "string" && event.result.trim()) onText(event.result);
+          said = true;
+          continue;
+        }
+        const text = typeof event?.item?.text === "string" ? event.item.text
+          : Array.isArray(content) ? content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("\n") : "";
+        if (text.trim()) { onText(said ? `\n\n${text}` : text); said = true; }
       } catch {
-        onText(line);
+        // Warnings the CLI prints between events (e.g. about a local model's name) aren't part of the answer.
+        if (!/^\[[\w-]+:[\w-]+\]/.test(line)) { onText(said ? `\n\n${line}` : line); said = true; }
       }
     }
   };
   child.stdout!.setEncoding("utf8");
   child.stderr!.setEncoding("utf8");
   child.stdout!.on("data", consume);
-  child.stderr!.on("data", (chunk: string) => { if (chunk.trim()) onText(chunk.trim()); });
+  child.stderr!.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-4000); });
   const code = await new Promise<number | null>((resolve) => {
     child.on("error", (error) => { onText(`Could not start ${agent.id}: ${error.message}`); resolve(null); });
     child.on("exit", (exitCode) => resolve(exitCode));
   });
-  if (buffer.trim()) onText(buffer.trim());
+  if (buffer.trim()) onText(`\n\n${buffer.trim()}`);
+  if (code !== 0 && stderr.trim()) onText(`\n\n${stderr.trim().split("\n").slice(-5).join("\n")}`);
   if (code !== 0) throw new Error(`${agent.id} chat ended${code === null ? " before it could start" : ` with exit code ${code}`}.`);
+}
+
+/**
+ * Chat with the local model straight through Ollama, streaming: no agent
+ * harness (whose long tool prompt a small model takes a minute to read) and no
+ * thinking pass. It answers from the brief AgentBrain puts in the prompt.
+ */
+async function localChat(model: string, prompt: string, onText: (text: string) => void): Promise<void> {
+  const response = await fetch(`${OLLAMA_URL}/api/chat`, {
+    method: "POST",
+    body: JSON.stringify({ model, stream: true, think: false, messages: [{ role: "user", content: prompt }] }),
+  }).catch((error: Error) => { throw new Error(`Ollama isn't reachable at ${OLLAMA_URL}: ${error.message}`); });
+  if (!response.ok || !response.body) throw new Error(`Ollama answered ${response.status}: ${(await response.text()).slice(0, 200)}`);
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let end: number;
+    while ((end = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, end).trim();
+      buffer = buffer.slice(end + 1);
+      if (!line) continue;
+      const event = JSON.parse(line) as { message?: { content?: string }; error?: string };
+      if (event.error) throw new Error(event.error);
+      if (event.message?.content) onText(event.message.content);
+    }
+  }
 }
 
 export interface PrintOptions {
@@ -149,7 +190,9 @@ You were started by AgentBrain with no developer at the keyboard; nobody will an
 - Work only inside your current directory: it is this task's own Git worktree.
 - Make reasonable decisions yourself and record them. If only the developer can unblock you,
   record a blocker and hand off.
-- Commit your work in this worktree when a step is complete.
+- If a file, function or command the task names doesn't exist here, don't create a stand-in for it:
+  record that as a blocker and hand off. Your branch may be older than the developer's checkout.
+- Commit your work in this worktree when a step is complete, with a plain one-line message.
 - When the objective is complete and verified, set the task's status to review.`;
 
 function args(agent: PrintAgent, mcpFile: string, workdir: string, plan = false, allowAll = false, review = false): string[] {
@@ -230,6 +273,12 @@ async function drive(
   });
   child.stdin!.on("error", () => {});
   child.stdin!.end(prompt);
+  // If this runner is stopped, its agent stops too, instead of working on unsupervised.
+  const killChild = () => { if (child.exitCode === null) child.kill("SIGTERM"); };
+  const onSignal = () => { killChild(); process.exit(143); };
+  process.once("exit", killChild);
+  process.once("SIGTERM", onSignal);
+  process.once("SIGINT", onSignal);
   let buffer = "";
   let lastText = "";
   child.stdout!.setEncoding("utf8");
@@ -265,6 +314,9 @@ async function drive(
   });
   clearTimeout(timer);
   clearInterval(stopWatch);
+  process.off("exit", killChild);
+  process.off("SIGTERM", onSignal);
+  process.off("SIGINT", onSignal);
   fs.rmSync(control.stop, { force: true });
   return { code, stopReason, lastText };
 }

@@ -3,8 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTask } from "../src/core/actions.js";
-import { getTask, initStore } from "../src/core/store.js";
-import { addWorktree } from "../src/core/worktree.js";
+import { getTask, initStore, saveTask } from "../src/core/store.js";
+import { addWorktree, mergeWorktree } from "../src/core/worktree.js";
 import { taskChanges } from "../src/ui/model.js";
 import { tempRepo } from "./helpers.js";
 
@@ -65,5 +65,26 @@ describe("taskChanges", () => {
     expect(firstChanges.patch).not.toContain("a/second.ts");
     expect(secondChanges.patch).toContain("a/second.ts");
     expect(secondChanges.patch).not.toContain("a/first.ts");
+  });
+
+  it("still shows a merged task's changes after its worktree is gone, even without a recorded base", async () => {
+    const repo = tempRepo("agentbrain-changes-");
+    initStore(repo);
+    const task = addWorktree(repo, createTask(repo, "Add a greeting").id);
+    const wt = task.worktree!.path;
+    fs.writeFileSync(path.join(wt, "hello.ts"), "export const hello = 'hi';\n");
+    execFileSync("git", ["add", "-A"], { cwd: wt });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add hello"], { cwd: wt });
+    mergeWorktree(repo, task.id);
+    const merged = getTask(repo, task.id);
+    expect(merged.worktree).toBeUndefined();
+    expect((await taskChanges(repo, merged)).files.map((f) => f.path)).toEqual(["hello.ts"]);
+    // Tasks merged before the base was recorded: found from the merge commit.
+    delete merged.merged!.base;
+    merged.updatedAt = new Date(Date.now() + 1000).toISOString();
+    saveTask(repo, merged);
+    const changes = await taskChanges(repo, getTask(repo, task.id));
+    expect(changes.commits.map((c) => c.subject)).toEqual(["Add hello"]);
+    expect(changes.files.map((f) => f.path)).toEqual(["hello.ts"]);
   });
 });

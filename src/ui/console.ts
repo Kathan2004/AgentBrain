@@ -30,6 +30,7 @@ import {
 import type { TaskState } from "../core/state.js";
 import { getProject, getTask, listSessions, listTasks, sessionAlive } from "../core/store.js";
 import { printAgent, runChat } from "../core/printrun.js";
+import { chatBrief } from "../core/context.js";
 import { openBrowser, startUiDaemon } from "./daemon.js";
 import { fit, visibleLength } from "./tui.js";
 
@@ -653,7 +654,15 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
         const agent = printAgent(selected.id);
         const prompt = [...chatHistory, `Developer: ${line}`].join("\n");
         print([style.dim(`  ${selected.name} is thinking in Chat mode (project root)…`)]);
-        await runChat(root, agent, prompt, (text) => print(text.split("\n").map((part) => `  ${part}`)));
+        // Pieces arrive token by token from a local model: print whole lines as they complete.
+        let pending = "";
+        await runChat(root, agent, `${chatBrief(root, line)}\n\n${prompt}`, (text) => {
+          pending += text;
+          const lines = pending.split("\n");
+          pending = lines.pop() ?? "";
+          if (lines.length) print(lines.map((part) => `  ${part}`));
+        });
+        if (pending) print([`  ${pending}`]);
         chatHistory.push(`Developer: ${line}`);
       }
     } catch (error) {

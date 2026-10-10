@@ -1,3 +1,4 @@
+import { CLOSE_REASONS, closeTask } from "../core/close.js";
 import { readActivity } from "../core/activity.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -9,15 +10,24 @@ import { readNote, vaultGraph, writeVault } from "../core/vault.js";
 import { snapshot, taskChanges, taskDiff, transcriptTail, watchProject, type LiveTask } from "./model.js";
 import { openInEditor } from "./open.js";
 import { PAGE } from "./page.js";
+import { gitFetch, gitGraph, gitToday } from "./gitgraph.js";
 import { reviewTask, setChecks, setCouncil, setLead, startVerification } from "../core/review.js";
 import { setPermissionMode } from "../core/permissions.js";
 import { standInSweep } from "../core/standin.js";
-import { rescueStalledChats } from "../core/rescue.js";
-import { sharedContext } from "../core/context.js";
+import { rescueStalledChats, resumeSentBack } from "../core/rescue.js";
+import { chatBrief, sharedContext } from "../core/context.js";
 import { claudeBinary, codexBinary, delegate, setDefaultWorker } from "../core/delegate.js";
 import { printAgent, runChat } from "../core/printrun.js";
 import { openUrl } from "../core/platform.js";
 import { connectConnector, detectConnectors, disconnectConnector } from "../core/connectors.js";
+
+/** Each chat message runs a fresh agent, so the conversation so far rides along with the new message. */
+export function chatPrompt(prompt: string, history: { role?: string; text?: string }[] = []): string {
+  const turns = (Array.isArray(history) ? history : []).slice(-12)
+    .filter((m) => typeof m?.text === "string" && m.text.trim())
+    .map((m) => `${m.role === "user" ? "User" : "You"}: ${m.text!.trim().slice(0, 2000)}`);
+  return turns.length ? `Conversation so far:\n${turns.join("\n\n")}\n\nThe user's new message:\n${prompt}` : prompt;
+}
 
 export interface UiServer {
   url: string;
@@ -107,8 +117,7 @@ export async function startUiServer(
     try {
       for (const task of listTasks(root)) {
         if (task.status !== "failed" || !task.failures.some((failure) => /accidental|created by mistake/i.test(failure))) continue;
-        const note = "Closed automatically: accidental task";
-        updateTask(root, task.id, { status: "done", todo: [note], done: [note], next: "Closed automatically" });
+        closeTask(root, task.id, "Closed automatically: accidental task", "Closed automatically");
       }
     } catch {
       // never let cleanup break the dashboard
@@ -122,6 +131,7 @@ export async function startUiServer(
     lastStandIn = Date.now();
     try { standInSweep(root, options.self); } catch { /* never break the dashboard */ }
     try { rescueStalledChats(root, options.self); } catch { /* same */ }
+    try { resumeSentBack(root, options.self); } catch { /* same */ }
   };
   let lastSent = "";
   let vaultTimer: NodeJS.Timeout | undefined;
@@ -174,6 +184,8 @@ export async function startUiServer(
         const cmd = options.config ?? options.self ?? { command: "agentbrain", args: [] };
         return json(response, { ok: true, ...connectConnector(root, body.id, cmd.command, [...cmd.args, "mcp"]) });
       }
+      if (url.pathname === "/api/git" && request.method === "GET") return json(response, await gitGraph(root));
+      if (url.pathname === "/api/git/fetch" && request.method === "POST") return json(response, await gitFetch(root));
       if (url.pathname === "/api/vault" && request.method === "GET") return json(response, vaultGraph(root));
       if (url.pathname === "/api/note" && request.method === "GET") return json(response, { id: url.searchParams.get("id"), markdown: readNote(root, url.searchParams.get("id") ?? "") });
       if (url.pathname === "/api/activity" && request.method === "GET") {
@@ -201,12 +213,28 @@ export async function startUiServer(
         return json(response, { ok: true, taskId: result.task.id, worker: result.worker.name });
       }
       if (request.method === "POST" && url.pathname === "/api/chat") {
-        const body = JSON.parse(await readBody(request)) as { prompt?: string; worker?: string };
+        const body = JSON.parse(await readBody(request)) as { prompt?: string; worker?: string; history?: { role?: string; text?: string }[] };
         if (!body.prompt?.trim()) throw new Error("Say something to chat about.");
         const agent = printAgent(body.worker ?? "");
-        const output: string[] = [];
-        await runChat(root, agent, body.prompt.trim(), (text) => output.push(text));
-        return json(response, { ok: true, worker: body.worker, text: output.join("\n") });
+        const commitsToday = await gitToday(root);
+        const prompt = `${chatBrief(root, body.prompt, commitsToday)}\n\n${chatPrompt(body.prompt.trim(), body.history)}`;
+        if (!String(request.headers.accept ?? "").includes("application/x-ndjson")) {
+          // A page from before streaming: answer in one piece.
+          const output: string[] = [];
+          await runChat(root, agent, prompt, (text) => output.push(text));
+          return json(response, { ok: true, worker: agent.id, text: output.join("") });
+        }
+        // Streamed as JSON lines, so the answer shows up while the model is still writing it.
+        response.writeHead(200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" });
+        const write = (value: unknown) => response.write(`${JSON.stringify(value)}\n`);
+        try {
+          await runChat(root, agent, prompt, (text) => write({ text }));
+          write({ done: true, worker: agent.id });
+        } catch (error) {
+          write({ error: error instanceof Error ? error.message : String(error) });
+        }
+        response.end();
+        return;
       }
       if (request.method === "POST" && url.pathname === "/api/verify") {
         const body = JSON.parse(await readBody(request)) as { taskId: string };
@@ -216,11 +244,9 @@ export async function startUiServer(
       if (request.method === "POST" && url.pathname === "/api/close") {
         const body = JSON.parse(await readBody(request)) as { taskId: string; reason?: string };
         const task = findTask(root, body.taskId);
-        const reasons = ["Accidental task", "Duplicate task", "No longer needed", "Already handled"];
         const reason = body.reason?.trim();
-        if (!reason || !reasons.includes(reason)) throw new Error(`Choose one of: ${reasons.join(", ")}.`);
-        const note = `Closed manually: ${reason}`;
-        updateTask(root, task.id, { status: "done", todo: [note], done: [note], next: "Closed manually" });
+        if (!reason || !CLOSE_REASONS.includes(reason)) throw new Error(`Choose one of: ${CLOSE_REASONS.join(", ")}.`);
+        closeTask(root, task.id, `Closed manually: ${reason}`);
         return json(response, { ok: true, reason });
       }
       if (request.method === "POST" && url.pathname === "/api/settings") {

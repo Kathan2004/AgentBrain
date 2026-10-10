@@ -81,7 +81,8 @@ export function saveProject(cwd: string, project: ProjectState): void {
 
 const MAX_EVENTS = 200;
 
-export function saveTask(cwd: string, task: TaskState): void {
+/** `by` names who changed the status when it isn't the task's agent (a reviewer, or AgentBrain itself). */
+export function saveTask(cwd: string, task: TaskState, by?: string): void {
   task.updatedAt = new Date().toISOString();
   // Record status changes (and changes of hands while running) wherever they come from.
   const file = path.join(taskDir(cwd, task.id), "task.json");
@@ -90,7 +91,7 @@ export function saveTask(cwd: string, task: TaskState): void {
     const events = [...(before?.events ?? task.events ?? []), {
       at: task.updatedAt,
       status: task.status,
-      ...(task.agent ? { agent: task.agent.id } : {}),
+      ...(by ? { agent: by } : task.agent ? { agent: task.agent.id } : {}),
     }];
     task.events = events.slice(-MAX_EVENTS);
     // An agent that delegated this task hears when it is ready, stuck or handed back.

@@ -1,0 +1,17 @@
+AgentBrain
+Copyright 2026 Kathan Somani (https://github.com/Kathan2004)
+
+This product is AgentBrain, created by Kathan Somani.
+Original source: https://github.com/Kathan2004/AgentBrain
+
+Under section 4 of the Apache License 2.0, anyone who redistributes AgentBrain,
+or a work derived from it, in source or binary form, must:
+  - keep this NOTICE file (or its attribution text) with the distribution,
+    in a NOTICE file, in the documentation, or wherever the product shows
+    third-party notices;
+  - keep the copyright notices in the source;
+  - include a copy of the Apache License 2.0;
+  - state prominently in any file they changed that they changed it.
+
+Suggested credit line: "Built on AgentBrain by Kathan Somani
+(https://github.com/Kathan2004/AgentBrain)".

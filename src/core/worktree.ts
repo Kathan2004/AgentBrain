@@ -145,9 +145,10 @@ export function mergeWorktree(root: string, taskId: string): MergeResult {
   }
   // Remember exactly what was merged: after a squash, Git alone can no longer tell.
   const tip = git(root, ["rev-parse", branch]);
+  const base = task.worktree?.base;
   removeWorktree(root, task.id);
   const after = getTask(root, task.id);
-  after.merged = { branch, commit: tip, at: new Date().toISOString() };
+  after.merged = { branch, commit: tip, at: new Date().toISOString(), ...(base ? { base } : {}) };
   saveTask(root, after);
   return { task: after, merged, conflicts: [] };
 }

@@ -1,6 +1,6 @@
 {
   "name": "agentbrain",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "private": true,
   "description": "Local-first continuity and handoff layer for AI coding agents",
   "keywords": [
@@ -16,7 +16,7 @@
     "developer-tools",
     "cli"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "Kathan Somani",
   "homepage": "https://github.com/Kathan2004/AgentBrain#readme",
   "repository": {
@@ -37,7 +37,8 @@
     "schemas",
     "README.md",
     "SPEC.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE"
   ],
   "engines": {
     "node": ">=20"

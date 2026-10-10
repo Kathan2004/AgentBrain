@@ -29,6 +29,7 @@ export function standInReason(root: string, task: TaskState, now = new Date()): 
   if (!lead || (review.votes ?? []).some((v) => v.agent === lead)) return null;
   // AgentBrain's own checks come first: the reviewer should see their results.
   if (policy.checks.length && task.review && !review.verifiedAt) return null;
+  if ((review.flags ?? []).some((f) => f.kind === "no-change")) return null;
   if (lead === review.worker) return `the lead (${lead}) did this work itself`;
   const leadWorker = rankWorkers(root, now).find((c) => c.worker.id === lead);
   if (leadWorker && !leadWorker.worker.available && /limit/i.test(leadWorker.worker.note ?? "")) {
@@ -120,6 +121,8 @@ export function askLead(root: string, taskId: string, self: { command: string; a
   if (policy.mode !== "lead" || !lead || task.status !== "review" || !review || review.leadAsked || review.standIn) return false;
   if (review.worker === lead || (review.votes ?? []).some((v) => v.agent === lead)) return false;
   if (policy.checks.length && !review.verifiedAt) return false;
+  // Nothing changed: there is nothing to review; it waits for the developer instead of spending a run.
+  if ((review.flags ?? []).some((f) => f.kind === "no-change")) return false;
   const choice = rankWorkers(root, now).find((c) => c.worker.id === lead);
   if (!choice || choice.worker.how !== "print" || !choice.worker.available) return false;
   review.leadAsked = now.toISOString();

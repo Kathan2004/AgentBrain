@@ -424,9 +424,8 @@ function decide(
         again.status = "handoff";
         again.remaining = [todo, ...again.remaining.filter((r) => !r.startsWith(CONFLICT_PREFIX))];
         again.nextAction = `${todo}, then set the task to review again (it was approved)`;
-        again.events = [...(again.events ?? []), { status: "handoff" as const, at: new Date().toISOString(), agent: "agentbrain" }].slice(-50);
         delete again.review;
-        saveTask(root, again);
+        saveTask(root, again, "agentbrain");
         recordActivity(root, { agent: "agentbrain", task: current.id, kind: "review", text: `Approved, but the branch conflicts with main (${result.conflicts.join(", ")}); sent back to merge main and resolve them` });
         return { task: again, conflicts: result.conflicts, tally: t };
       }
@@ -466,15 +465,16 @@ function decide(
     flags,
     at: new Date().toISOString(),
   }];
-  delete current.review;
-  saveTask(root, current);
-  if (outcome === "approved" && current.parent) closeFinishedPlan(root, current.parent);
   // With a lead (or its stand-in) one reviewer decides: name it rather than a "council".
   const mode = reviewPolicy(root).mode;
   const decider = decidedBy !== "consensus" ? decidedBy.replace(/ \(override\)$/, "")
     : mode === "council" ? "council" : (review.votes ?? []).at(-1)?.agent ?? "lead";
   const how = decidedBy !== "consensus" ? `by ${decidedBy}` : mode === "council" ? "by consensus"
     : review.standIn?.agent === decider ? `as stand-in for the lead (${review.standIn.why})` : "as the lead";
+  delete current.review;
+  // A send-back is the reviewer's move, not the worker stopping: autopilot (resumeSentBack) tells them apart by this.
+  saveTask(root, current, outcome === "changes" ? (decider === "council" || decider === "lead" ? "agentbrain" : decider) : undefined);
+  if (outcome === "approved" && current.parent) closeFinishedPlan(root, current.parent);
   recordActivity(root, {
     agent: decider,
     task: current.id,

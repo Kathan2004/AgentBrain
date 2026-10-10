@@ -2,7 +2,9 @@ import { readActivity, recordActivity } from "./activity.js";
 import { updateTask } from "./actions.js";
 import { autoContinue, rankWorkers } from "./delegate.js";
 import { taskActivity } from "./stall.js";
-import { listTasks } from "./store.js";
+import { CONFLICT_PREFIX, isReviewer } from "./review.js";
+import type { TaskState } from "./state.js";
+import { getTask, listTasks, saveTask } from "./store.js";
 
 /**
  * Autopilot for chats. A background run that stops is handed on by its own
@@ -33,4 +35,42 @@ export function rescueStalledChats(root: string, self: { command: string; args: 
     } catch { /* the task stays handed off for the next agent */ }
   }
   return rescued;
+}
+
+/**
+ * The send-back event when a review returned this task (changes requested, or
+ * approved but conflicting with main) and nobody has picked it up since; null
+ * when the last hand-off was an agent stopping (the run's own autopilot covers that).
+ */
+function sentBackEvent(root: string, task: TaskState): { at: string; by: string } | null {
+  const last = task.events?.at(-1);
+  if (task.status !== "handoff" || last?.status !== "handoff" || !last.agent) return null;
+  const review = task.reviews?.at(-1);
+  const byReview = last.agent === "agentbrain" || isReviewer(root, last.agent) ||
+    (review?.verdict === "changes" && review.at <= last.at && last.agent !== review.worker);
+  return byReview ? { at: last.at, by: last.agent } : null;
+}
+
+/**
+ * Autopilot for sent-back work: a task a review returned goes back to an
+ * agent, the one that did it first when it can (it knows the code). Once per
+ * send-back: if nobody is ready, it waits for the developer.
+ */
+export function resumeSentBack(root: string, self: { command: string; args: string[] }, now = new Date()): string[] {
+  const resumed: string[] = [];
+  for (const task of listTasks(root)) {
+    const sent = sentBackEvent(root, task);
+    if (!sent || task.sentBackResumed === sent.at || Date.parse(sent.at) > now.getTime()) continue;
+    const fresh = getTask(root, task.id);
+    fresh.sentBackResumed = sent.at;
+    saveTask(root, fresh);
+    const review = task.reviews?.at(-1);
+    const conflict = task.remaining.find((r) => r.startsWith(CONFLICT_PREFIX));
+    const reason = conflict ?? (review?.notes ?? task.nextAction ?? "changes requested").split("\n")[0];
+    const worker = conflict ? task.agent?.id : review?.worker ?? task.agent?.id;
+    try {
+      if (autoContinue(root, task.id, sent.by, reason, self, { prefer: worker, sentBack: true })) resumed.push(task.id);
+    } catch { /* the task stays handed off for the next agent */ }
+  }
+  return resumed;
 }

@@ -1,3 +1,4 @@
+import { isClosed } from "../core/close.js";
 /**
  * AgentBrain as an MCP server (stdio, newline-delimited JSON-RPC 2.0).
  *
@@ -37,7 +38,7 @@ import { getProject, getTask, listTasks } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-const SERVER_VERSION = "0.14.0";
+const SERVER_VERSION = "0.15.0";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 interface Message {
@@ -629,6 +630,8 @@ export class AgentBrainMcpServer {
       case "agentbrain_update": {
         const root = this.requireRoot();
         const taskId = resolveTaskId(root, args.task_id, this.agent.id, this.workdir);
+        // A late update must not reopen a task the developer closed.
+        if (isClosed(getTask(root, taskId))) throw new Error(`${taskId} was closed (${getTask(root, taskId).nextAction}). Stop working on it.`);
         this.claim(root, taskId);
         const patch: TaskPatch = {
           status: args.status,

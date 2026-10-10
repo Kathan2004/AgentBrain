@@ -663,8 +663,8 @@ keys, `password=` values, credentials in URLs). Add project patterns with
   picked up the task another agent had handed off, recorded its progress and
   moved it to review. Other agents' MCP configs are written but not yet tried
   live.
-- **Not built yet:** headless execution over ACP, worktree isolation, agent
-  routing. See [`SPEC.md`](SPEC.md) for the spec and roadmap.
+- **Not built yet:** headless execution over ACP. See [`SPEC.md`](SPEC.md)
+  for the spec and roadmap.
 
 ## Development
 
@@ -675,4 +675,14 @@ npm run smoke    # full CLI workflow in a throwaway repo
 
 ## License
 
-MIT
+Apache License 2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+
+AgentBrain is created by **Kathan Somani**. You may use, change and
+redistribute it, including commercially. If you redistribute AgentBrain or
+anything built on it, you must keep the [`NOTICE`](NOTICE) file's credit to
+Kathan Somani with it, keep the copyright notices, include the license, and
+mark the files you changed. A credit line such as "Built on AgentBrain by
+Kathan Somani (https://github.com/Kathan2004/AgentBrain)" is appreciated.
+
+Versions up to 0.14 were released under the MIT License, and copies already
+obtained under it stay under it.
