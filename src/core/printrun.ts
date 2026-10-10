@@ -1,15 +1,18 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildPrompt, closeSession, takeOver, updateTask, writeCheckpoint } from "./actions.js";
+import { buildPrompt, closeSession, recordSession, takeOver, updateTask, writeCheckpoint } from "./actions.js";
+import { reviewSummary } from "./review.js";
+import { releaseStandIn } from "./standin.js";
 import { execFileSync } from "node:child_process";
-import { spawnPortable } from "./platform.js";
+import { spawnPortable, gitBinary } from "./platform.js";
 import { autoContinue } from "./delegate.js";
 import { recordActivity, type ActivityKind } from "./activity.js";
 import { describeTool } from "./claudehooks.js";
 import { sessionControl } from "./headless.js";
 import { getSession, getTask, saveSession } from "./store.js";
 import { addWorktree, taskWorkdir } from "./worktree.js";
+import { permissionMode } from "./permissions.js";
 
 /**
  * Runs an agent CLI non-interactively on a task: `claude -p` or `codex exec`.
@@ -80,6 +83,8 @@ export interface PrintOptions {
    * into independent pieces and hands each to another agent with agentbrain_delegate.
    */
   plan?: boolean;
+  /** Review instead of build: the agent judges another agent's result (read-only) and votes with agentbrain_review. */
+  review?: boolean;
 }
 
 const PLAN = `## Your job: plan and delegate, don't build
@@ -96,6 +101,22 @@ Git worktree. Read the code you need (you can't edit anything), then:
    per piece naming its task id.
 4. Do not write code and do not mark this task done: it stays open until its pieces are reviewed.`;
 
+function reviewJob(root: string, taskId: string, me: string): string {
+  const task = getTask(root, taskId);
+  return `## Your job: review this result, don't build
+
+${task.review?.standIn?.agent === me ? `You are standing in for the lead reviewer because ${task.review.standIn.why}.` : "You are the lead reviewer on this project: work by other agents counts as done only when you approve it."}
+${reviewSummary(root, task, me)}
+
+1. Read the diff (git diff and git log in this directory) and the changed files. Run the tests or checks
+   that matter for this change.
+2. Judge it on the evidence: does it do what the objective asks, is it correct, are the claims true,
+   would you merge it? Don't trust the worker's summary; check.
+3. Call agentbrain_review with task_id "${taskId}" and verdict "approve", or "changes" with concrete notes
+   (what is wrong, where, and what to do). Cite only files that exist.
+4. Do not edit, commit or change the task's status yourself. Your verdict is the whole job.`;
+}
+
 const HOW = `## How to work (no one is watching)
 
 You were started by AgentBrain with no developer at the keyboard; nobody will answer questions.
@@ -105,7 +126,14 @@ You were started by AgentBrain with no developer at the keyboard; nobody will an
 - Commit your work in this worktree when a step is complete.
 - When the objective is complete and verified, set the task's status to review.`;
 
-function args(agent: PrintAgent, mcpFile: string, workdir: string, plan = false): string[] {
+function args(agent: PrintAgent, mcpFile: string, workdir: string, plan = false, allowAll = false, review = false): string[] {
+  if (agent.id === "claude-code" && review) {
+    // Read and run the tests, nothing else: a reviewer that edits the work is no longer reviewing it.
+    return ["-p", "--output-format", "stream-json", "--verbose", "--mcp-config", mcpFile,
+      "--allowedTools", "mcp__agentbrain", "Read", "Grep", "Glob", "LS",
+      "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)",
+      "Bash(npm test:*)", "Bash(npm run:*)", "Bash(npx vitest:*)", "Bash(npx tsc:*)", "Bash(npx jest:*)", "Bash(pytest:*)", "Bash(go test:*)", "Bash(cargo test:*)", "Bash(make test:*)"];
+  }
   if (agent.id === "claude-code" && plan) {
     // Read-only: AgentBrain's tools plus reading the code; anything else is refused in -p mode.
     return ["-p", "--output-format", "stream-json", "--verbose", "--mcp-config", mcpFile,
@@ -116,7 +144,7 @@ function args(agent: PrintAgent, mcpFile: string, workdir: string, plan = false)
       // The prompt goes in on stdin: no command-line length limit, no shell quoting (Windows).
       "-p",
       "--output-format", "stream-json", "--verbose",
-      "--permission-mode", "acceptEdits",
+      "--permission-mode", allowAll ? "bypassPermissions" : "acceptEdits",
       "--mcp-config", mcpFile,
       // Progress through AgentBrain; Git to commit; edits are already allowed by acceptEdits.
       // Build and test runners too: an agent that can't run the tests can't verify its work.
@@ -125,7 +153,8 @@ function args(agent: PrintAgent, mcpFile: string, workdir: string, plan = false)
     ];
   }
   const model = codexModel();
-  return ["exec", "--json", "-s", plan ? "read-only" : "workspace-write", "-C", workdir, "--skip-git-repo-check", ...(model ? ["-m", model] : []), "-"];
+  const sandbox = plan || review ? ["-s", "read-only"] : allowAll ? ["--dangerously-bypass-approvals-and-sandbox"] : ["-s", "workspace-write"];
+  return ["exec", "--json", ...sandbox, "-C", workdir, "--skip-git-repo-check", ...(model ? ["-m", model] : []), "-"];
 }
 
 /** One feed line for a line of the agent's JSON output, or null. */
@@ -160,30 +189,13 @@ export function describeOutput(agentId: string, line: string, root: string): { k
   return null;
 }
 
-export async function runPrint(root: string, taskId: string, agent: PrintAgent, options: PrintOptions): Promise<{ status: string; stopReason: string }> {
-  // A planner reads the main checkout; builders get their own worktree.
-  if (!options.plan && !getTask(root, taskId).worktree && fs.existsSync(path.join(root, ".git"))) addWorktree(root, taskId);
-  const workdir = taskWorkdir(root, getTask(root, taskId));
-  const me = { id: agent.id, sessionId: `${agent.id === "codex" ? "exec" : "print"}-${Date.now()}` };
-  takeOver(root, taskId, me);
-
-  const control = sessionControl(root, me.id, me.sessionId);
-  fs.mkdirSync(path.dirname(control.transcript), { recursive: true });
-  saveSession(root, { ...getSession(root, me.id, me.sessionId)!, mode: "headless", pid: process.pid, transcript: control.transcript });
-  const log = (text: string) => fs.appendFileSync(control.transcript, `[${new Date().toISOString()}] ${text}\n`);
-
-  // The agent reaches AgentBrain over MCP with this run's identity, and via the CLI.
-  // Not *.json: session records are the .json files in this folder.
-  const mcpFile = `${control.transcript.replace(/\.log$/, "")}.mcp-config`;
-  fs.writeFileSync(mcpFile, JSON.stringify({
-    mcpServers: { agentbrain: { command: options.cli.command, args: [...options.cli.args, "mcp", "--root", workdir, "--agent", me.id, "--session", me.sessionId] } },
-  }));
-  const cli = [options.cli.command, ...options.cli.args].map((x) => (x.includes(" ") ? JSON.stringify(x) : x)).join(" ");
-  const prompt = options.plan
-    ? `${buildPrompt(root, taskId, cli)}\n${PLAN}\n\nUse parent_task_id "${taskId}" for every piece you delegate.\n`
-    : `${buildPrompt(root, taskId, cli)}\n${HOW}\n`;
-
-  const child = spawnPortable(agent.command, args(agent, mcpFile, workdir, options.plan), {
+/** Runs the agent CLI with the prompt on stdin, streaming its progress to the transcript and the feed. */
+async function drive(
+  root: string, taskId: string, agent: PrintAgent, me: { id: string; sessionId: string }, workdir: string,
+  argv: string[], prompt: string, timeoutMinutes: number | undefined,
+  control: { stop: string }, log: (text: string) => void,
+): Promise<{ code: number | null; stopReason: string; lastText: string }> {
+  const child = spawnPortable(agent.command, argv, {
     cwd: workdir,
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, AGENTBRAIN_AGENT: me.id, AGENTBRAIN_SESSION: me.sessionId, AGENTBRAIN_TASK: taskId, AGENTBRAIN_ROOT: root },
@@ -215,7 +227,7 @@ export async function runPrint(root: string, taskId: string, agent: PrintAgent, 
   child.stderr!.on("data", (chunk: string) => { log(`stderr: ${chunk.trim()}`); lastText = chunk.trim() || lastText; });
 
   let stopReason = "";
-  const timer = setTimeout(() => { stopReason = `timed out after ${options.timeoutMinutes ?? 60} min`; child.kill("SIGTERM"); }, (options.timeoutMinutes ?? 60) * 60_000);
+  const timer = setTimeout(() => { stopReason = `timed out after ${timeoutMinutes ?? 60} min`; child.kill("SIGTERM"); }, (timeoutMinutes ?? 60) * 60_000);
   const stopWatch = setInterval(() => {
     if (fs.existsSync(control.stop)) { stopReason = "stopped by the developer"; child.kill("SIGTERM"); }
   }, 500);
@@ -226,6 +238,37 @@ export async function runPrint(root: string, taskId: string, agent: PrintAgent, 
   clearTimeout(timer);
   clearInterval(stopWatch);
   fs.rmSync(control.stop, { force: true });
+  return { code, stopReason, lastText };
+}
+
+export async function runPrint(root: string, taskId: string, agent: PrintAgent, options: PrintOptions): Promise<{ status: string; stopReason: string }> {
+  if (options.review) return runReview(root, taskId, agent, options);
+  // A planner reads the main checkout; builders get their own worktree.
+  if (!options.plan && !getTask(root, taskId).worktree && fs.existsSync(path.join(root, ".git"))) addWorktree(root, taskId);
+  const workdir = taskWorkdir(root, getTask(root, taskId));
+  const me = { id: agent.id, sessionId: `${agent.id === "codex" ? "exec" : "print"}-${Date.now()}` };
+  takeOver(root, taskId, me);
+
+  const control = sessionControl(root, me.id, me.sessionId);
+  fs.mkdirSync(path.dirname(control.transcript), { recursive: true });
+  saveSession(root, { ...getSession(root, me.id, me.sessionId)!, mode: "headless", pid: process.pid, transcript: control.transcript });
+  const log = (text: string) => fs.appendFileSync(control.transcript, `[${new Date().toISOString()}] ${text}\n`);
+
+  // The agent reaches AgentBrain over MCP with this run's identity, and via the CLI.
+  // Not *.json: session records are the .json files in this folder.
+  const mcpFile = `${control.transcript.replace(/\.log$/, "")}.mcp-config`;
+  fs.writeFileSync(mcpFile, JSON.stringify({
+    mcpServers: { agentbrain: { command: options.cli.command, args: [...options.cli.args, "mcp", "--root", workdir, "--agent", me.id, "--session", me.sessionId] } },
+  }));
+  const cli = [options.cli.command, ...options.cli.args].map((x) => (x.includes(" ") ? JSON.stringify(x) : x)).join(" ");
+  const prompt = options.plan
+    ? `${buildPrompt(root, taskId, cli)}\n${PLAN}\n\nUse parent_task_id "${taskId}" for every piece you delegate.\n`
+    : `${buildPrompt(root, taskId, cli)}\n${HOW}\n`;
+
+  const run = await drive(root, taskId, agent, me, workdir, args(agent, mcpFile, workdir, options.plan, permissionMode(root) === "all"), prompt, options.timeoutMinutes, control, log);
+  const code = run.code;
+  let stopReason = run.stopReason;
+  const lastText = run.lastText;
   if (!stopReason) stopReason = code === 0 ? "finished" : `exited with code ${code}: ${lastText.slice(0, 200)}`;
 
   // However it ended, the next agent (or the reviewer) can pick the task up.
@@ -250,10 +293,36 @@ export async function runPrint(root: string, taskId: string, agent: PrintAgent, 
   return { status: getTask(root, taskId).status, stopReason };
 }
 
+/**
+ * A review run: the agent reads the result in its worktree (read-only), runs
+ * the checks it needs and votes with agentbrain_review. The task stays in
+ * review; nothing here takes it over or changes its status.
+ */
+async function runReview(root: string, taskId: string, agent: PrintAgent, options: PrintOptions): Promise<{ status: string; stopReason: string }> {
+  const workdir = taskWorkdir(root, getTask(root, taskId));
+  const me = { id: agent.id, sessionId: `review-${Date.now()}` };
+  recordSession(root, me, taskId);
+  const control = sessionControl(root, me.id, me.sessionId);
+  fs.mkdirSync(path.dirname(control.transcript), { recursive: true });
+  saveSession(root, { ...getSession(root, me.id, me.sessionId)!, mode: "headless", pid: process.pid, transcript: control.transcript });
+  const log = (text: string) => fs.appendFileSync(control.transcript, `[${new Date().toISOString()}] ${text}\n`);
+  const mcpFile = `${control.transcript.replace(/\.log$/, "")}.mcp-config`;
+  fs.writeFileSync(mcpFile, JSON.stringify({
+    mcpServers: { agentbrain: { command: options.cli.command, args: [...options.cli.args, "mcp", "--root", workdir, "--agent", me.id, "--session", me.sessionId] } },
+  }));
+  recordActivity(root, { agent: me.id, session: me.sessionId, task: taskId, kind: "review", text: `Reviewing ${getTask(root, taskId).review?.worker ?? "the"}'s result` });
+  const run = await drive(root, taskId, agent, me, workdir, args(agent, mcpFile, workdir, false, false, true), `${reviewJob(root, taskId, me.id)}\n`, options.timeoutMinutes ?? 20, control, log);
+  const stopReason = run.stopReason || (run.code === 0 ? "finished" : `exited with code ${run.code}: ${run.lastText.slice(0, 200)}`);
+  closeSession(root, me, `${agent.id} review ended: ${stopReason}`);
+  log(`ended: ${stopReason}`);
+  releaseStandIn(root, taskId, me.id, stopReason);
+  return { status: getTask(root, taskId).status, stopReason };
+}
+
 function hasWork(workdir: string, base: string | undefined): boolean {
   try {
-    if (execFileSync("git", ["status", "--porcelain"], { cwd: workdir, encoding: "utf8" }).trim()) return true;
-    return Boolean(base) && execFileSync("git", ["rev-list", "--count", `${base}..HEAD`], { cwd: workdir, encoding: "utf8" }).trim() !== "0";
+    if (execFileSync(gitBinary(), ["status", "--porcelain"], { cwd: workdir, encoding: "utf8" }).trim()) return true;
+    return Boolean(base) && execFileSync(gitBinary(), ["rev-list", "--count", `${base}..HEAD`], { cwd: workdir, encoding: "utf8" }).trim() !== "0";
   } catch {
     return false;
   }
@@ -266,9 +335,9 @@ function finished0(root: string, taskId: string, sessionId: string): boolean {
 
 function commitLeftovers(workdir: string, message: string): void {
   try {
-    if (!execFileSync("git", ["status", "--porcelain"], { cwd: workdir, encoding: "utf8" }).trim()) return;
-    execFileSync("git", ["add", "-A"], { cwd: workdir });
-    execFileSync("git", ["commit", "-q", "-m", message], { cwd: workdir });
+    if (!execFileSync(gitBinary(), ["status", "--porcelain"], { cwd: workdir, encoding: "utf8" }).trim()) return;
+    execFileSync(gitBinary(), ["add", "-A"], { cwd: workdir });
+    execFileSync(gitBinary(), ["commit", "-q", "-m", message], { cwd: workdir });
   } catch {
     // leave it uncommitted; review shows it
   }

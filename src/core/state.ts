@@ -89,6 +89,14 @@ export interface ReviewState {
   verifiedAt?: string;
   /** Claude Code sessions already asked to review this submission. */
   nudged?: string[];
+  /** Another agent reviewing in the lead's place (the lead did the work, is out of quota, or stayed silent). */
+  standIn?: { agent: string; at: string; why: string };
+  /** Agents already asked to stand in for this submission (each gets one try). */
+  standInsTried?: string[];
+  /** When a stand-in was wanted but no agent could review. */
+  standInWanted?: string;
+  /** When AgentBrain started the lead's own review run for this submission. */
+  leadAsked?: string;
 }
 
 export interface ReviewVerdict {

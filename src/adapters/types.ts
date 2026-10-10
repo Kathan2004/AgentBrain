@@ -20,6 +20,8 @@ export interface AgentContext {
   env: Record<string, string>;
   /** Deliver to the agent's already-open session instead of opening the task's folder (`run vscode --here`). */
   here?: boolean;
+  /** Start the agent in its own "don't ask" mode (`agentbrain permissions all`). */
+  allowAll?: boolean;
 }
 
 export interface ExitInfo {

@@ -1,4 +1,5 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import { getGitState, type GitState } from "../core/git.js";
@@ -11,6 +12,7 @@ import { describeActivity, taskActivity } from "../core/stall.js";
 import type { AgentSessionState, TaskState } from "../core/state.js";
 import { getProject, listSessions, listTasks, sessionAlive } from "../core/store.js";
 import { taskWorkdir } from "../core/worktree.js";
+import { gitBinary } from "../core/platform.js";
 
 /**
  * One read-only snapshot of everything AgentBrain knows, for live views (the
@@ -42,6 +44,7 @@ export interface LiveTask {
   active: boolean;
   workdir: string;
   worktree?: TaskState["worktree"];
+  merged?: boolean;
   completed: string[];
   remaining: string[];
   decisions: string[];
@@ -58,6 +61,15 @@ export interface LiveTask {
   events: NonNullable<TaskState["events"]>;
   /** Where the votes stand, while in review. */
   tally?: Tally;
+  /** What the task's branch adds on top of its base, PR-style (worktree tasks that are running, in review or handed off). */
+  changes?: ChangeSummary;
+}
+
+export interface ChangeSummary {
+  commits: number;
+  files: number;
+  added: number;
+  removed: number;
 }
 
 export interface Snapshot {
@@ -68,6 +80,7 @@ export interface Snapshot {
   sessions: LiveSession[];
   lead?: string;
   activity: ActivityEvent[];
+  permissions: "ask" | "all";
   policy: { mode: "none" | "lead" | "council"; reviewers: string[]; quorum: number; checks: string[]; tolerates: number };
   reputation: Record<string, Reputation>;
   /** Agents the developer can pick as reviewers: built-in ones plus any seen in this repo. */
@@ -111,11 +124,17 @@ const ORDER: Record<string, number> = { running: 0, blocked: 1, handoff: 2, chec
 
 const NO_CHANGES: GitState = { head: null, branch: null, dirty: false, changedFiles: [] };
 
+/** Git state per folder, reused for a few seconds: the control room polls every 3 s, and git is a process per call. */
+const gitStates = new Map<string, { at: number; state: GitState }>();
+const GIT_STATE_TTL_MS = 10_000;
+
 export function snapshot(root: string, options: { includeDone?: boolean } = {}): Snapshot {
-  const gitCache = new Map<string, GitState>();
   const gitFor = (dir: string) => {
-    if (!gitCache.has(dir)) gitCache.set(dir, getGitState(dir));
-    return gitCache.get(dir)!;
+    const hit = gitStates.get(dir);
+    if (hit && Date.now() - hit.at < GIT_STATE_TTL_MS) return hit.state;
+    const state = getGitState(dir);
+    gitStates.set(dir, { at: Date.now(), state });
+    return state;
   };
   const stallMinutes = getProject(root).stallMinutes;
   const active = getProject(root).activeTaskId;
@@ -141,6 +160,7 @@ export function snapshot(root: string, options: { includeDone?: boolean } = {}):
       // and not at all for finished tasks.
       const git = task.status === "done" ? NO_CHANGES : gitFor(workdir);
       const live = sessions.find((s) => s.taskId === task.id && s.alive);
+      const changes = changeSummary(root, task);
       return {
         id: task.id,
         objective: task.objective,
@@ -150,6 +170,7 @@ export function snapshot(root: string, options: { includeDone?: boolean } = {}):
         active: task.id === active,
         workdir,
         worktree: task.worktree,
+        ...(task.merged ? { merged: true } : {}),
         completed: task.completed,
         remaining: task.remaining,
         decisions: task.decisions,
@@ -163,6 +184,7 @@ export function snapshot(root: string, options: { includeDone?: boolean } = {}):
         reviews: task.reviews ?? [],
         events: task.events ?? [],
         ...(task.status === "review" ? { tally: computeTally(root, task) } : {}),
+        ...(changes ? { changes } : {}),
       };
     })
     .sort((a, b) =>
@@ -186,6 +208,7 @@ export function snapshot(root: string, options: { includeDone?: boolean } = {}):
     knownAgents: [...known].sort(),
     workers: rankWorkers(root).map((c) => ({ ...c.worker, reasons: c.reasons })),
     ...(project.worker ? { worker: project.worker } : {}),
+    permissions: project.permissions === "all" ? "all" : "ask",
   };
 }
 
@@ -199,10 +222,152 @@ export function transcriptTail(file: string | undefined, lines = 40): string[] {
 /** Unified diff of a task's uncommitted changes (tracked files), capped. */
 export function taskDiff(workdir: string, maxBytes = 200_000): string {
   try {
-    return execFileSync("git", ["diff", "HEAD", "--no-color"], { cwd: workdir, encoding: "utf8", maxBuffer: maxBytes * 4 }).slice(0, maxBytes);
+    return execFileSync(gitBinary(), ["diff", "HEAD", "--no-color"], { cwd: workdir, encoding: "utf8", maxBuffer: maxBytes * 4 }).slice(0, maxBytes);
   } catch {
     return "";
   }
+}
+
+export interface TaskChanges {
+  /** What the work amounts to: the agent's own words, else its commit subjects. */
+  summary: string;
+  commits: { sha: string; subject: string; body: string; author: string; at: string }[];
+  files: { path: string; added: number; removed: number; status: string }[];
+  /** Unified diff of everything the task changed (commits plus uncommitted edits), capped. */
+  patch: string;
+  truncated: boolean;
+  uncommitted: boolean;
+}
+
+const execFileAsync = promisify(execFile);
+
+/** git, without blocking the control room's event loop; "" on failure. */
+async function gitOut(cwd: string, args: string[], maxBytes = 2_000_000): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(gitBinary(), args, { cwd, encoding: "utf8", maxBuffer: maxBytes * 4 });
+    return stdout;
+  } catch {
+    return "";
+  }
+}
+
+/** git for the snapshot's cheap per-task summary (cached by branch tip, so rarely run); "" on failure. */
+function gitSync(cwd: string, args: string[]): string {
+  try {
+    return execFileSync(gitBinary(), args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return "";
+  }
+}
+
+const SUMMARY_STATUSES: TaskState["status"][] = ["running", "review", "handoff"];
+/** Keyed by root, base and branch tip: the snapshot poll only reruns git when the branch moved. */
+const summaryCache = new Map<string, ChangeSummary>();
+
+/**
+ * Commits, files and +/- lines on a task's branch since its base, for the task
+ * list. One rev-parse per call; rev-list and diff only when the tip changed.
+ */
+export function changeSummary(root: string, task: TaskState): ChangeSummary | undefined {
+  const wt = task.worktree;
+  if (!wt?.base || !wt.branch || !SUMMARY_STATUSES.includes(task.status)) return undefined;
+  const tip = gitSync(root, ["rev-parse", "--verify", "--quiet", `refs/heads/${wt.branch}^{commit}`]).trim();
+  if (!tip) return undefined;
+  const key = `${root}\0${wt.base}\0${tip}`;
+  const cached = summaryCache.get(key);
+  if (cached) return cached;
+  const range = `${wt.base}..${tip}`;
+  const stat = gitSync(root, ["diff", "--shortstat", range]);
+  const count = (re: RegExp) => Number(re.exec(stat)?.[1] ?? 0);
+  const summary: ChangeSummary = {
+    commits: Number(gitSync(root, ["rev-list", "--count", range]).trim()) || 0,
+    files: count(/(\d+) files? changed/),
+    added: count(/(\d+) insertions?\(\+\)/),
+    removed: count(/(\d+) deletions?\(-\)/),
+  };
+  if (summaryCache.size > 500) summaryCache.clear();
+  summaryCache.set(key, summary);
+  return summary;
+}
+
+const changesCache = new Map<string, { key: string; at: number; value: TaskChanges }>();
+
+/**
+ * Everything a task changed, the way a pull request shows it: from the commit
+ * its worktree branched from to the branch tip (or the tip that was merged),
+ * plus edits not yet committed. Git runs in parallel and off the event loop;
+ * the result is reused until the task or its branch moves.
+ */
+export async function taskChanges(root: string, task: TaskState, maxBytes = 400_000): Promise<TaskChanges> {
+  const workdir = taskWorkdir(root, task);
+  const base = task.worktree?.base;
+  // A finished task's worktree is gone: then the root's own edits aren't this task's.
+  const live = Boolean(task.worktree && fs.existsSync(task.worktree.path));
+  const refs = [task.worktree?.branch, task.merged?.commit].filter((r): r is string => Boolean(r));
+  const shas = await Promise.all(refs.map((ref) => gitOut(root, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).then((x) => x.trim())));
+  const tipIndex = shas.findIndex(Boolean);
+  const tip = tipIndex >= 0 ? refs[tipIndex] : undefined;
+  const range = base && tip ? `${base}..${tip}` : null;
+
+  // Same task state, same branch tip and (for live worktrees) a few seconds old: reuse.
+  const key = `${task.updatedAt}|${tipIndex >= 0 ? shas[tipIndex] : ""}|${base ?? ""}`;
+  const hit = changesCache.get(task.id);
+  if (hit && hit.key === key && (!live || Date.now() - hit.at < 5_000)) return hit.value;
+
+  const [log, committedPatch, pendingPatch, numCommitted, numPending, namesCommitted, namesPending] = await Promise.all([
+    range ? gitOut(root, ["log", "--no-merges", "--format=%H%x1f%s%x1f%b%x1f%an%x1f%aI%x1e", range]) : "",
+    range ? gitOut(root, ["diff", "--no-color", "-M", base!, tip!]) : "",
+    live ? gitOut(workdir, ["diff", "HEAD", "--no-color", "-M"]) : "",
+    range ? gitOut(root, ["diff", "--numstat", "-M", base!, tip!]) : "",
+    live ? gitOut(workdir, ["diff", "--numstat", "HEAD", "-M"]) : "",
+    range ? gitOut(root, ["diff", "--name-status", "-M", base!, tip!]) : "",
+    live ? gitOut(workdir, ["diff", "--name-status", "-M", "HEAD"]) : "",
+  ]);
+  const commits = log.split("\x1e").map((r) => r.trim()).filter(Boolean).map((r) => {
+    const [sha, subject, body, author, at] = r.split("\x1f");
+    return { sha, subject, body: (body ?? "").trim(), author, at };
+  });
+  const stats = new Map<string, { path: string; added: number; removed: number; status: string }>();
+  for (const out of [numCommitted, numPending]) {
+    for (const line of out.split("\n")) {
+      const [a, r, ...rest] = line.split("\t");
+      if (!rest.length) continue;
+      const file = rest.join("\t");
+      const prev = stats.get(file) ?? { path: file, added: 0, removed: 0, status: "modified" };
+      prev.added += a === "-" ? 0 : Number(a);
+      prev.removed += r === "-" ? 0 : Number(r);
+      stats.set(file, prev);
+    }
+  }
+  // What the branch did to a file wins over a later uncommitted edit (a new file stays "added").
+  const named = new Set<string>();
+  for (const out of [namesCommitted, namesPending]) {
+    for (const line of out.split("\n")) {
+      const [code, ...names] = line.split("\t");
+      const file = names[names.length - 1];
+      const entry = file && stats.get(file);
+      if (!entry || named.has(file)) continue;
+      named.add(file);
+      entry.status = code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : code.startsWith("R") ? "renamed" : "modified";
+    }
+  }
+  const full = committedPatch + pendingPatch;
+  // What the agent recorded as done; else its own handoff note; else its commit subjects.
+  const system = /run ended|exited with code|exit code|session limit|usage limit|end_turn|stop reason|timed out|^error|^stopped|^killed/i;
+  const said = listSessions(root)
+    .filter((x) => x.taskId === task.id && x.stopReason && !system.test(x.stopReason))
+    .sort((a, b) => (b.endedAt ?? b.startedAt).localeCompare(a.endedAt ?? a.startedAt))[0]?.stopReason;
+  const summary = task.completed.length ? task.completed.slice(-4).join(" · ") : said ?? commits.map((c) => c.subject).reverse().join(" · ");
+  const value: TaskChanges = {
+    summary,
+    commits,
+    files: [...stats.values()],
+    patch: full.slice(0, maxBytes),
+    truncated: full.length > maxBytes,
+    uncommitted: Boolean(pendingPatch),
+  };
+  changesCache.set(task.id, { key, at: Date.now(), value });
+  return value;
 }
 
 /** Watches AgentBrain state and task worktrees; calls `onChange` (debounced). */

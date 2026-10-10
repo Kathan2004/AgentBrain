@@ -7,6 +7,7 @@ import { findRoot } from "./paths.js";
 import { readQueue } from "./queue.js";
 import { RULES_TARGETS } from "./rules.js";
 import { listTasks } from "./store.js";
+import { gitBinary } from "./platform.js";
 
 export interface DoctorCheck {
   name: string;
@@ -17,7 +18,7 @@ export interface DoctorCheck {
 
 function gitRoot(cwd: string): string | null {
   try {
-    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    return execFileSync(gitBinary(), ["rev-parse", "--show-toplevel"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
@@ -29,7 +30,7 @@ function gitRoot(cwd: string): string | null {
 
 function hookFile(cwd: string): string | null {
   try {
-    const hooks = execFileSync("git", ["rev-parse", "--git-path", "hooks"], {
+    const hooks = execFileSync(gitBinary(), ["rev-parse", "--git-path", "hooks"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],

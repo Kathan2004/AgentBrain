@@ -62,6 +62,15 @@ describe("local UI server", () => {
       });
       expect(message.status).toBe(200);
       expect(fs.readFileSync(sessionControl(repo, "test-agent", sessionId).inbox, "utf8")).toContain("Please continue");
+      const close = await request(base, "/api/close", {
+        method: "POST",
+        headers: { "x-agentbrain-token": token },
+        body: JSON.stringify({ taskId: task.id, reason: "Accidental task" }),
+      });
+      expect(close.status).toBe(200);
+      const closed = await (await request(base, "/api/snapshot", { headers: { "x-agentbrain-token": token } })).json() as { tasks: { id: string; status: string; completed: string[] }[] };
+      expect(closed.tasks.find((item) => item.id === task.id)).toMatchObject({ status: "done" });
+      expect(closed.tasks.find((item) => item.id === task.id)?.completed).toContain("Closed manually: Accidental task");
       const page = await request(base, "/");
       expect(page.status).toBe(200);
       const html = await page.text();

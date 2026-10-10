@@ -92,6 +92,35 @@ export function openUrl(url: string): void {
 }
 
 /** VS Code's `code` command: on PATH, or where the installer puts it on each OS. */
+/**
+ * Agents AgentBrain starts are their own sessions, even when AgentBrain itself
+ * was started by one (an MCP server under Claude Code, a delegate call, a hook).
+ * Claude Code refuses to start when it sees these markers of a parent session.
+ */
+export function clearParentSession(env: NodeJS.ProcessEnv = process.env): void {
+  for (const key of ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"]) delete env[key];
+}
+
+/** Where npm, pipx and friends put tools installed without root (often missing from PATH). */
+export function userBinDirs(): string[] {
+  const home = os.homedir();
+  const dirs = [
+    process.env.npm_config_prefix && (isWindows ? process.env.npm_config_prefix : path.join(process.env.npm_config_prefix, "bin")),
+    path.join(home, ".local", "bin"),
+    path.join(home, ".npm-global", "bin"),
+    path.join(home, ".bun", "bin"),
+    isWindows ? path.join(process.env.APPDATA ?? path.join(home, "AppData", "Roaming"), "npm") : "",
+    isWindows ? "" : "/opt/homebrew/bin",
+  ];
+  return [...new Set(dirs.filter((d): d is string => Boolean(d)))];
+}
+
+/** `command` on PATH, or in a user-level install folder (e.g. `npm i -g --prefix ~/.local`). */
+export function findTool(command: string): string | null {
+  if (process.env.AGENTBRAIN_ONLY_PATH) return findOnPath(command);
+  return findOnPath(command) ?? findOnPath(command, userBinDirs().join(path.delimiter));
+}
+
 export function vscodeCommand(): string | null {
   const candidates = process.platform === "darwin"
     ? ["/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"]
@@ -111,4 +140,25 @@ export function vscodeCommand(): string | null {
  */
 export function selfCommand(script = process.argv[1]): { command: string; args: string[] } {
   return { command: process.execPath, args: [fs.realpathSync(script)] };
+}
+
+let resolvedGit: string | undefined;
+
+/**
+ * The git binary. On macOS /usr/bin/git is a shim that asks xcrun for the real
+ * one on every call (0.3-1 s each); AgentBrain runs git constantly, so it
+ * resolves the real binary once.
+ */
+export function gitBinary(): string {
+  if (resolvedGit) return resolvedGit;
+  resolvedGit = "git";
+  if (process.platform === "darwin" && findOnPath("git") === "/usr/bin/git") {
+    try {
+      const real = spawnSync("xcrun", ["--find", "git"], { encoding: "utf8", timeout: 10_000 }).stdout?.trim();
+      if (real && executable(real)) resolvedGit = real;
+    } catch {
+      // keep the shim
+    }
+  }
+  return resolvedGit;
 }

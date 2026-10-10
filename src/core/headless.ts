@@ -1,9 +1,12 @@
+import { findTool } from "./platform.js";
 import fs from "node:fs";
 import { recordActivity } from "./activity.js";
 import path from "node:path";
-import { AcpClient, DEFAULT_ALLOWED_KINDS, type AcpEvent, type ToolKind } from "../adapters/acp.js";
+import { AcpClient, DEFAULT_ALLOWED_KINDS, TOOL_KINDS, type AcpEvent, type ToolKind } from "../adapters/acp.js";
+import { permissionMode } from "./permissions.js";
 import { briefContext, closeSession, takeOver, writeCheckpoint } from "./actions.js";
 import { brainDir } from "./paths.js";
+import { sharedContext } from "./context.js";
 import { getSession, getTask, saveSession } from "./store.js";
 import { addWorktree, taskWorkdir } from "./worktree.js";
 
@@ -53,7 +56,9 @@ You are running headless: no developer is watching and nobody will answer questi
 - When the objective is complete and verified, call agentbrain_update with status "review".`;
 
 export function headlessPrompt(root: string, taskId: string): string {
-  return `${briefContext(root, taskId)}\n${PROTOCOL}\n`;
+  const task = getTask(root, taskId);
+  const shared = sharedContext(root, { taskId, objective: task.objective, agentId: task.agent?.id });
+  return `${briefContext(root, taskId)}\n${shared ? `${shared}\n\n` : ""}${PROTOCOL}\n`;
 }
 
 /**
@@ -129,10 +134,10 @@ export async function runHeadless(
   };
 
   const client = new AcpClient({
-    command: def.command,
+    command: findTool(def.command) ?? def.command,
     args: def.args,
     cwd: workdir,
-    allowedKinds: options.allowed ?? DEFAULT_ALLOWED_KINDS,
+    allowedKinds: options.allowed ?? (permissionMode(root) === "all" ? [...TOOL_KINDS] : DEFAULT_ALLOWED_KINDS),
     onEvent: log,
   });
 

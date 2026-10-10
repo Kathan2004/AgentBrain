@@ -6,6 +6,7 @@ import { makeCheckpoint, renderHandoff, type Checkpoint } from "./handoff.js";
 import { tasksDir } from "./paths.js";
 import { compilePatterns, redact, redactAll } from "./redact.js";
 import { gateFinish, startVerification } from "./review.js";
+import { sharedContext } from "./context.js";
 import { describeActivity, taskActivity } from "./stall.js";
 import { taskForDir, taskWorkdir } from "./worktree.js";
 import { SCHEMA_VERSION, isTaskStatus, TASK_STATUSES } from "./state.js";
@@ -199,7 +200,7 @@ export function updateTask(root: string, taskId: string, patch: TaskPatch): Task
  * Creates or updates a session record without losing its history: the start
  * time is kept and every task the session touches is remembered.
  */
-function recordSession(
+export function recordSession(
   root: string,
   agent: Required<AgentRef>,
   taskId: string,
@@ -351,8 +352,12 @@ function taskCommitsSection(root: string, task: TaskState): string {
 }
 
 export function buildPrompt(root: string, taskId: string, cli: string): string {
-  const id = getTask(root, taskId).id;
+  const task = getTask(root, taskId);
+  const id = task.id;
+  // The same project picture every agent gets, whichever tool it is.
+  const shared = sharedContext(root, { taskId: id, objective: task.objective, agentId: task.agent?.id });
   return `${briefContext(root, taskId)}
+${shared ? `\n${shared}\n` : ""}
 ## Keeping AgentBrain up to date
 
 You may be cut off at any time (usage limit, crash, session end), so record

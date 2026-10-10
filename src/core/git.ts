@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { gitBinary } from "./platform.js";
 
 export interface GitState {
   /** null when the repository has no commits yet. */
@@ -11,7 +12,7 @@ export interface GitState {
 
 function git(cwd: string, args: string[]): string | null {
   try {
-    return execFileSync("git", args, {
+    return execFileSync(gitBinary(), args, {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
@@ -50,13 +51,14 @@ export function commitsSince(cwd: string, since: string | null | undefined, max 
 }
 
 export function getGitState(cwd: string): GitState {
-  if (git(cwd, ["rev-parse", "--is-inside-work-tree"])?.trim() !== "true") {
-    throw new Error("AgentBrain requires a Git repository.");
-  }
-
+  // Two processes, not four: status with -b also names the branch (and fails outside a repository).
+  const status = git(cwd, ["status", "--porcelain", "-b", "-z", "--untracked-files=all"]);
+  if (status === null) throw new Error("AgentBrain requires a Git repository.");
+  const [header, ...entries] = status.split("\0");
+  const porcelain = header.startsWith("## ") ? entries.join("\0") : status;
+  const named = header.startsWith("## ") ? header.slice(3).replace(/^No commits yet on /, "").split("...")[0] : "";
+  const branch = named && !named.startsWith("HEAD (") ? named : null;
   const head = git(cwd, ["rev-parse", "--verify", "-q", "HEAD"])?.trim() || null;
-  const branch = git(cwd, ["branch", "--show-current"])?.trim() || null;
-  const porcelain = git(cwd, ["status", "--porcelain", "-z", "--untracked-files=all"]) ?? "";
 
   // AgentBrain's own state should not make the working tree look dirty.
   const changedFiles = parsePorcelainZ(porcelain).filter(

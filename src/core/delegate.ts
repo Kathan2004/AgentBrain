@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { spawnPortable, spawnSyncPortable, vscodeCommand } from "./platform.js";
+import { findTool, spawnPortable, spawnSyncPortable, vscodeCommand } from "./platform.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -68,7 +68,8 @@ const signInCache = new Map<string, { at: number; ok: boolean }>();
 /** Asks the CLI itself whether it is signed in (cached for a minute; it costs a process). */
 function signedIn(id: string, command: string): boolean {
   const cached = signInCache.get(id);
-  if (cached && Date.now() - cached.at < 60_000) return cached.ok;
+  // Signed in rarely changes: trust a yes for 10 minutes, re-check a no every minute.
+  if (cached && Date.now() - cached.at < (cached.ok ? 600_000 : 60_000)) return cached.ok;
   let ok = false;
   try {
     if (id === "claude-code") {
@@ -118,7 +119,7 @@ export function listWorkers(): Worker[] {
 
   for (const def of ACP_AGENTS) {
     if (workers.some((w) => w.id === def.id && w.installed)) continue;
-    const found = findOnPath(def.command);
+    const found = findTool(def.command);
     const existing = workers.findIndex((w) => w.id === def.id);
     const worker: Worker = {
       id: def.id,
@@ -171,6 +172,18 @@ export interface WorkerChoice {
  * recent usage limits and crashes, and the developer's preferences. No
  * guesses about which model is "smarter".
  */
+/**
+ * When a usage limit says it lifts ("try again at Nov 8th, 2026 9:42 PM"), or
+ * null when it doesn't say (then the usual window applies). Only dates after
+ * the limit was hit count.
+ */
+export function limitResetsAt(reason: string, hitAt: Date): Date | null {
+  const text = /try again (?:at|on|after) ([^)\n]+?)\.?$/im.exec(reason)?.[1];
+  if (!text) return null;
+  const when = new Date(text.replace(/(\d+)(st|nd|rd|th)\b/, "$1"));
+  return Number.isNaN(when.getTime()) || when <= hitAt ? null : when;
+}
+
 export function rankWorkers(root: string, now = new Date()): WorkerChoice[] {
   const project = getProject(root);
   const records = agentRecords(root);
@@ -216,9 +229,11 @@ export function rankWorkers(root: string, now = new Date()): WorkerChoice[] {
     if (rep && rep.score !== 1) { score += (rep.score - 1) * 10; reasons.push(`reputation ${rep.score.toFixed(2)}`); }
 
     const record = records.get(worker.id);
-    if (record?.lastLimit && now.getTime() - record.lastLimit.at.getTime() < LIMIT_WINDOW_HOURS * 3_600_000) {
-      score -= 100;
-      reasons.push("hit a usage limit recently");
+    const until = record?.lastLimit ? limitResetsAt(record.lastLimit.reason, record.lastLimit.at) : null;
+    if (record?.lastLimit && (until ? now < until : now.getTime() - record.lastLimit.at.getTime() < LIMIT_WINDOW_HOURS * 3_600_000)) {
+      // Out of quota: handing it work would only fail again (and autopilot would bounce it).
+      const resets = /resets? ([^)\n.]+)/i.exec(record.lastLimit.reason)?.[1] ?? /try again (?:at|on|after) ([^)\n]+?)\.?$/i.exec(record.lastLimit.reason)?.[1];
+      return { worker: { ...worker, available: false, note: `hit its usage limit${resets ? `; resets ${resets}` : ""}` }, score: -1e9, reasons: [`hit its usage limit${resets ? `, resets ${resets}` : ""}`] };
     }
     if (record?.failed) { score -= record.failed * 3; reasons.push(`${record.failed} crashed or failed run(s)`); }
     // Background runs don't need anyone at the keyboard; a chat needs VS Code open;
@@ -265,7 +280,7 @@ export interface DelegateResult {
  */
 export function delegate(
   root: string,
-  input: { prompt?: string; taskId?: string; worker?: string; parent?: string; requestedBy?: string },
+  input: { prompt?: string; taskId?: string; worker?: string; parent?: string; requestedBy?: string; why?: string },
   self: { command: string; args: string[] },
 ): DelegateResult {
   const mention: { worker?: string; prompt?: string } = input.prompt ? parseMention(input.prompt) : {};
@@ -285,7 +300,7 @@ export function delegate(
   }
   const { worker } = choice;
   const others = ranked.filter((c) => c !== choice && c.worker.available).length;
-  const why = wanted ? "you asked for it" : others ? choice.reasons.join(", ") : `the only agent ready (${choice.reasons.join(", ")})`;
+  const why = input.why ? input.why : wanted ? "you asked for it" : others ? choice.reasons.join(", ") : `the only agent ready (${choice.reasons.join(", ")})`;
 
   let task = input.taskId ? getTask(root, input.taskId) : createTask(root, mention.prompt ?? "", { activate: !input.parent });
   if (!input.taskId && (input.parent || input.requestedBy)) {
@@ -370,10 +385,18 @@ export function autoContinue(root: string, taskId: string, stopped: string, reas
   if (project.autopilot === false) return null;
   const task = getTask(root, taskId);
   if (task.status !== "handoff") return null;
-  const attempts = (task.events ?? []).filter((e) => e.status === "handoff").length;
-  if (attempts > 3) return null;
-  const next = rankWorkers(root).find((c) => c.worker.available && c.worker.id !== stopped && c.worker.how !== "pull");
-  if (!next) return null;
-  recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot: ${stopped} stopped (${reason.slice(0, 120)}); handing the task to ${next.worker.name}` });
-  return delegate(root, { taskId, worker: next.worker.id }, self);
+  const autopilotRuns = (task.events ?? []).filter((e) => e.status === "running" && e.agent && e.at > (task.createdAt ?? "")).length;
+  if (autopilotRuns > 3) {
+    recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot stopped: ${task.id} has been handed over ${autopilotRuns - 1} times; it waits for you` });
+    return null;
+  }
+  const failedHere = new Set((task.events ?? []).filter((e) => e.status === "handoff" && e.agent).map((e) => e.agent!));
+  failedHere.add(stopped);
+  const next = rankWorkers(root).find((c) => c.worker.available && !failedHere.has(c.worker.id) && c.worker.how !== "pull");
+  if (!next) {
+    recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot: ${stopped} stopped (${reason.slice(0, 100)}) and no other agent is ready; the task waits` });
+    return null;
+  }
+  recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot: ${stopped} stopped (${reason.slice(0, 100)}); handing the task to ${next.worker.name}` });
+  return delegate(root, { taskId, worker: next.worker.id, requestedBy: "agentbrain", why: `autopilot: ${stopped} stopped` }, self);
 }

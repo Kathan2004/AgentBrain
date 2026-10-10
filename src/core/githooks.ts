@@ -6,6 +6,7 @@ import { recordActivity } from "./activity.js";
 import { findRoot } from "./paths.js";
 import { getProject, getTask } from "./store.js";
 import { taskForDir } from "./worktree.js";
+import { gitBinary } from "./platform.js";
 
 const START = "# agentbrain:start";
 const END = "# agentbrain:end";
@@ -13,7 +14,7 @@ const BODY = "command -v agentbrain >/dev/null 2>&1 && agentbrain hook post-comm
 const BLOCK = `${START}\n${BODY}\n${END}`;
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  return execFileSync(gitBinary(), args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
 }
 
 function hooksFile(cwd: string): string {

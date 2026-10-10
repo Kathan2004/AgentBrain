@@ -619,6 +619,7 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     }
   };
 
+  let confirmShort = "";
   const submit = async () => {
     const line = buffer.trim();
     buffer = "";
@@ -629,8 +630,19 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     historyIndex = -1;
     print(["", `${style.dim(">")} ${line}`]);
     try {
+      const word = line.toLowerCase();
       if (line.startsWith("/")) print(await run(line));
-      else if (mode === "task") {
+      // A bare command name ("clear", "help", "status", "agentbrain") is that command, not a task.
+      else if (/^\S+$/.test(line) && (word === "agentbrain" || COMMANDS.some((c) => c.name === word))) print(await run(word === "agentbrain" ? "/help" : `/${word}`));
+      else if (mode === "task" && line.split(/\s+/).length < 3 && confirmShort !== line) {
+        // Too short to be a real task more often than not: ask once.
+        confirmShort = line;
+        print([style.yellow(`    That's a very short task. Press Enter on it again to delegate "${line}", or describe it in more detail.`)]);
+        buffer = line;
+        cursor = [...line].length;
+        return redraw();
+      } else if (mode === "task") {
+        confirmShort = "";
         const result = delegate(root, { prompt: line, ...(choice === "auto" ? {} : { worker: choice }) }, options.self);
         objectives.set(result.task.id, result.task.objective);
         if (result.worker.how === "pull") print([`    ${style.dim("Open any agent on this repo (Claude app, Cursor, VS Code) and say \"continue\"; it picks this up.")}`]);

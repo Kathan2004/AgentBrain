@@ -220,3 +220,38 @@ describe("planning", { timeout: 90_000 }, () => {
     expect(getTask(repo, task.id).worktree).toBeUndefined();
   });
 });
+
+describe("autopilot and usage limits", { timeout: 90_000 }, () => {
+  it("treats an agent that hit its usage or session limit as unavailable, with when it resets", async () => {
+    const { rankWorkers } = await import("../src/core/delegate.js");
+    const { saveSession } = await import("../src/core/store.js");
+    const repo = tempRepo("agentbrain-limit-");
+    initStore(repo);
+    const bin = `${repo}-bin`;
+    stubAgent(bin, "gemini", "exit 0");
+    const before = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${before}`;
+    try {
+      saveSession(repo, { schemaVersion: "0.1", agentId: "gemini", sessionId: "g1", taskId: "t", startedAt: new Date().toISOString(), endedAt: new Date().toISOString(), stopReason: "gemini run ended: exited with code 1: You've hit your session limit · resets 12am (Asia/Calcutta)" });
+      const gemini = rankWorkers(repo).find((c) => c.worker.id === "gemini")!;
+      expect(gemini.worker.available).toBe(false);
+      expect(gemini.worker.note).toMatch(/usage limit; resets 12am/);
+    } finally {
+      process.env.PATH = before;
+    }
+  });
+
+  it("never bounces a task back to an agent that already stopped on it, and says when nothing is ready", async () => {
+    const { autoContinue } = await import("../src/core/delegate.js");
+    const { createTask, writeCheckpoint, takeOver } = await import("../src/core/actions.js");
+    const { readActivity } = await import("../src/core/activity.js");
+    const repo = tempRepo("agentbrain-auto-");
+    initStore(repo);
+    const task = createTask(repo, "Do the thing");
+    takeOver(repo, task.id, { id: "codex", sessionId: "c1" });
+    writeCheckpoint(repo, task.id, { agent: { id: "codex", sessionId: "c1" }, reason: "codex run ended: usage limit", status: "handoff" });
+    // Only the "next agent you open" option is ready in tests: autopilot must not use it, and must say so.
+    expect(autoContinue(repo, task.id, "codex", "usage limit", { command: "node", args: [CLI] })).toBeNull();
+    expect(readActivity(repo).at(-1)!.text).toMatch(/no other agent is ready; the task waits/);
+  });
+});

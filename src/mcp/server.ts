@@ -28,7 +28,8 @@ import { awaitingVote, reviewerNotice, reviewSummary, reviewTask } from "../core
 import { routeTask } from "../core/routing.js";
 import { sendMessage, takeUnread, unreadFor } from "../core/messages.js";
 import { delegate } from "../core/delegate.js";
-import { lessonsDigest, recall, remember } from "../core/vault.js";
+import { recall, remember } from "../core/vault.js";
+import { changesSince, liveTeam, relevantMemory, sharedContext } from "../core/context.js";
 import { listSessions } from "../core/store.js";
 import { taskTimeline } from "../core/timeline.js";
 import { taskForDir } from "../core/worktree.js";
@@ -492,7 +493,9 @@ export class AgentBrainMcpServer {
 - Never put secrets in AgentBrain fields.`;
     if (!this.root) return protocol;
     const reviewer = reviewerNotice(this.root, this.agent.id);
-    const parts = [this.stateInstructions(protocol), lessonsDigest(this.root), this.waitingNotice(), reviewer].filter(Boolean);
+    const pending = this.pendingTask();
+    const shared = sharedContext(this.root, { taskId: pending?.id, objective: pending?.objective, agentId: this.agent.id });
+    const parts = [this.stateInstructions(protocol), shared, this.waitingNotice(), reviewer].filter(Boolean);
     return parts.join("\n\n");
   }
 
@@ -524,8 +527,15 @@ export class AgentBrainMcpServer {
 
   private brief(taskId?: string): string {
     const root = this.requireRoot();
-    return briefContext(root, resolveTaskId(root, taskId, this.agent.id, this.workdir));
+    const id = resolveTaskId(root, taskId, this.agent.id, this.workdir);
+    const task = getTask(root, id);
+    // The live team and the memory relevant to this task: the same as any other agent would get.
+    const extra = [liveTeam(root, this.agent.id, id), relevantMemory(root, task.objective)].filter(Boolean).join("\n\n");
+    return extra ? `${briefContext(root, id)}\n${extra}\n` : briefContext(root, id);
   }
+
+  /** When this connection last heard from AgentBrain: what others did since then is news. */
+  private lastStep = new Date().toISOString();
 
   /** First write by this connection takes the task over (status running, session recorded). */
   private claim(root: string, taskId: string): void {
@@ -538,8 +548,12 @@ export class AgentBrainMcpServer {
     try {
       // Every tool result carries messages other agents sent this one since its last call.
       const text = this.runTool(name, args);
+      // Every result carries messages for this agent and what other agents did since its last step.
+      const news = this.root ? changesSince(this.root, this.lastStep, this.agent.id, [...this.claimed].at(-1)) : "";
+      this.lastStep = new Date().toISOString();
       const inbox = this.root ? takeUnread(this.root, this.agent.id) : "";
-      return { content: [{ type: "text", text: inbox ? `${text}\n\n${inbox}` : text }] };
+      const extra = [news, inbox].filter(Boolean).join("\n\n");
+      return { content: [{ type: "text", text: extra ? `${text}\n\n${extra}` : text }] };
     } catch (error) {
       return { content: [{ type: "text", text: `Error: ${(error as Error).message}` }], isError: true };
     }

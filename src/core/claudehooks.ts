@@ -4,7 +4,7 @@ import { recordActivity, type ActivityKind } from "./activity.js";
 import { findRoot } from "./paths.js";
 import { compilePatterns, redact } from "./redact.js";
 import { takeUnread } from "./messages.js";
-import { lessonsDigest } from "./vault.js";
+import { changesSince, sharedContext } from "./context.js";
 import { awaitingVote, isReviewer } from "./review.js";
 import { SCHEMA_VERSION, type AgentSessionState } from "./state.js";
 import { getProject, getSession, getTask, listTasks, saveSession, saveTask } from "./store.js";
@@ -239,7 +239,9 @@ export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = proce
     // and before it goes idle, so agents working in parallel can coordinate.
     if (event === "SessionStart" || event === "UserPromptSubmit" || event === "PostToolUse") {
       // A new session starts with the project's hardest-won lessons, like any other agent.
-      const digest = event === "SessionStart" ? lessonsDigest(root) : "";
+      const digest = event === "SessionStart"
+        ? sharedContext(root, { taskId, objective: taskId ? getTask(root, taskId).objective : undefined, agentId: AGENT })
+        : existing?.lastSeenAt ? changesSince(root, existing.lastSeenAt, AGENT, taskId, 4) : "";
       const inbox = [digest, takeUnread(root, AGENT)].filter(Boolean).join("\n\n");
       if (inbox) {
         const previous = output ? JSON.parse(output).hookSpecificOutput?.additionalContext : "";

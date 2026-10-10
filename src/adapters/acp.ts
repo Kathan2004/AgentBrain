@@ -62,6 +62,9 @@ export class AcpClient {
     this.root = fs.realpathSync(options.cwd);
   }
 
+  /** Tool kinds announced in tool_call updates, by toolCallId. */
+  private readonly kinds = new Map<string, string>();
+
   private emit(kind: AcpEvent["kind"], text: string): void {
     this.options.onEvent?.({ kind, text });
   }
@@ -184,7 +187,9 @@ export class AcpClient {
 
   /** Permission policy: allow the configured tool kinds, reject the rest. */
   private decide(params: any): unknown {
-    const kind: string = params.toolCall?.kind ?? "other";
+    // Permission requests often carry only the call's id and title; the kind came in its tool_call update.
+    const call = params.toolCall ?? {};
+    const kind: string = call.kind ?? this.kinds.get(call.toolCallId) ?? kindFromTitle(call.title) ?? "other";
     const title: string = params.toolCall?.title ?? kind;
     const options: { optionId: string; kind: string }[] = params.options ?? [];
     const allow = this.allowed.has(kind);
@@ -208,6 +213,7 @@ export class AcpClient {
         break;
       case "tool_call":
       case "tool_call_update":
+        if (update.toolCallId && update.kind) this.kinds.set(update.toolCallId, update.kind);
         if (update.title || update.status) {
           this.emit("tool", `${update.status ?? "pending"} ${update.kind ?? ""} ${update.title ?? update.toolCallId ?? ""}`.trim());
         }
@@ -252,4 +258,15 @@ export class AcpClient {
       setTimeout(() => child.exitCode === null && child.kill("SIGTERM"), 2000).unref();
     }
   }
+}
+
+/** Best guess at a tool's kind from its title ("Edit `a.ts`", "Read File", "Terminal"). */
+export function kindFromTitle(title: unknown): string | undefined {
+  const t = String(title ?? "");
+  if (/^(Edit|Write|MultiEdit|NotebookEdit|Create|Delete|Move)\b/i.test(t)) return /^Delete/i.test(t) ? "delete" : /^Move/i.test(t) ? "move" : "edit";
+  if (/^(Read|View|Open)\b/i.test(t)) return "read";
+  if (/^(Find|Grep|Glob|Search|LS|List)\b/i.test(t)) return "search";
+  if (/^(Terminal|Bash|Run|Shell|`)/i.test(t)) return "execute";
+  if (/^(Fetch|Web)/i.test(t)) return "fetch";
+  return undefined;
 }

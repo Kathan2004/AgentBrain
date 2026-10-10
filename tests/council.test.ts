@@ -15,7 +15,7 @@ import {
   setCouncil,
   setLead,
 } from "../src/core/review.js";
-import { getTask, initStore } from "../src/core/store.js";
+import { getTask, initStore, saveTask } from "../src/core/store.js";
 import { addWorktree } from "../src/core/worktree.js";
 import { tempRepo } from "./helpers.js";
 
@@ -35,6 +35,36 @@ function commitIn(dir: string, file: string, content: string) {
 }
 
 describe("lead agent", () => {
+  it("closes a parent plan only after all child tasks are approved", () => {
+    const repo = tempRepo("agentbrain-plan-close-");
+    initStore(repo);
+    setLead(repo, "claude-code");
+    const parent = createTask(repo, "Complete the plan");
+    const first = createTask(repo, "First piece");
+    const second = createTask(repo, "Second piece");
+    saveTask(repo, { ...first, parent: parent.id });
+    saveTask(repo, { ...second, parent: parent.id });
+
+    updateTask(repo, first.id, { status: "done", agent: worker("codex") });
+    updateTask(repo, second.id, { status: "done", agent: worker("codex") });
+    expect(reviewTask(repo, first.id, { verdict: "approved", reviewer: "claude-code" }).outcome).toBe("approved");
+    expect(getTask(repo, parent.id).status).not.toBe("done");
+
+    expect(reviewTask(repo, second.id, { verdict: "approved", reviewer: "claude-code" }).outcome).toBe("approved");
+    expect(getTask(repo, parent.id)).toMatchObject({
+      status: "done",
+      decisions: [`All pieces done: ${first.id}, ${second.id}`],
+    });
+    expect(readActivity(repo)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        agent: "agentbrain",
+        kind: "status",
+        task: parent.id,
+        text: "Plan complete: all 2 pieces done",
+      }),
+    ]));
+  });
+
   it("holds a worker's finished task for the lead, who approves and merges it", () => {
     const { repo, task, wt } = setup();
     setLead(repo, "claude");

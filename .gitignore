@@ -8,3 +8,5 @@ coverage/
 
 # AgentBrain state for working on AgentBrain itself
 .agentbrain/
+.codex/
+.vscode/settings.json

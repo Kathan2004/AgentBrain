@@ -1,4 +1,4 @@
-import { findOnPath } from "../adapters/process.js";
+import { findTool } from "./platform.js";
 import { ACP_AGENTS, BUILTIN_AGENTS, builtinAdapter } from "../adapters/registry.js";
 import { getProject, getTask, listSessions, listTasks } from "./store.js";
 import { DEFAULT_STALL_MINUTES, taskActivity } from "./stall.js";
@@ -33,7 +33,7 @@ export interface AgentRecord {
   lastLimit?: { at: Date; reason: string };
 }
 
-const LIMIT = /usage limit|rate limit|rate-limit|quota|too many requests|\b429\b|limit reached/i;
+const LIMIT = /usage limit|session limit|rate limit|rate-limit|quota|too many requests|\b429\b|limit reached|hit your .{0,20}limit|upgrade to (plus|pro)/i;
 const FAILURE = /exited with code [1-9]|crash|timed out|failed to start|stopped by SIG|error:/i;
 /** How long a usage limit is assumed to last when the agent didn't say. */
 export const LIMIT_WINDOW_HOURS = 5;
@@ -100,7 +100,7 @@ export function routeTask(root: string, taskId: string, now = new Date()): Route
       id: def.id,
       name: `${def.name}, headless`,
       mode: "headless" as LaunchMode,
-      available: findOnPath(def.command) !== null,
+      available: findTool(def.command) !== null,
       command: `agentbrain run ${def.id} ${task.id} --headless --timeout 30`,
     })),
   ];

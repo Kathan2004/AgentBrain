@@ -1,13 +1,18 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { requestStop, sendToSession } from "../core/headless.js";
+import { updateTask } from "../core/actions.js";
 import { taskTimeline } from "../core/timeline.js";
-import { findSession, getProject, listTasks } from "../core/store.js";
+import { findSession, getProject, getTask, listTasks } from "../core/store.js";
 import { readNote, vaultGraph, writeVault } from "../core/vault.js";
-import { snapshot, taskDiff, transcriptTail, watchProject, type LiveTask } from "./model.js";
+import { snapshot, taskChanges, taskDiff, transcriptTail, watchProject, type LiveTask } from "./model.js";
 import { openInEditor } from "./open.js";
 import { PAGE } from "./page.js";
 import { reviewTask, setChecks, setCouncil, setLead, startVerification } from "../core/review.js";
+import { setPermissionMode } from "../core/permissions.js";
+import { standInSweep } from "../core/standin.js";
+import { rescueStalledChats } from "../core/rescue.js";
+import { sharedContext } from "../core/context.js";
 import { claudeBinary, codexBinary, delegate, setDefaultWorker } from "../core/delegate.js";
 import { runChat } from "../core/printrun.js";
 import { openUrl } from "../core/platform.js";
@@ -93,10 +98,36 @@ export async function startUiServer(
       // never let this break the dashboard
     }
   };
+  // Close only tasks whose own record explicitly says they were accidental.
+  // A failed or idle task is otherwise left alone: status alone is not evidence
+  // that its work can be discarded.
+  const autoCloseAccidental = () => {
+    if (!options.self) return;
+    try {
+      for (const task of listTasks(root)) {
+        if (task.status !== "failed" || !task.failures.some((failure) => /accidental|created by mistake/i.test(failure))) continue;
+        const note = "Closed automatically: accidental task";
+        updateTask(root, task.id, { status: "done", todo: [note], done: [note], next: "Closed automatically" });
+      }
+    } catch {
+      // never let cleanup break the dashboard
+    }
+  };
+  // A lead that did the work itself, is out of quota or stays silent would stall every
+  // result: another agent stands in (checked at most once a minute).
+  let lastStandIn = 0;
+  const autoStandIn = () => {
+    if (!options.self || Date.now() - lastStandIn < 60_000) return;
+    lastStandIn = Date.now();
+    try { standInSweep(root, options.self); } catch { /* never break the dashboard */ }
+    try { rescueStalledChats(root, options.self); } catch { /* same */ }
+  };
   let lastSent = "";
   let vaultTimer: NodeJS.Timeout | undefined;
   const sendEvent = () => {
     autoVerify();
+    autoCloseAccidental();
+    autoStandIn();
     if (vaultTimer) clearTimeout(vaultTimer);
     vaultTimer = setTimeout(() => {
       vaultTimer = undefined;
@@ -130,6 +161,11 @@ export async function startUiServer(
         return;
       }
       if (url.pathname === "/api/diff" && request.method === "GET") return json(response, { diff: taskDiff(findTask(root, url.searchParams.get("task") ?? "").workdir) });
+      if (url.pathname === "/api/context" && request.method === "GET") {
+        const task = getTask(root, findTask(root, url.searchParams.get("task") ?? "").id);
+        return json(response, { context: sharedContext(root, { taskId: task.id, objective: task.objective }) });
+      }
+      if (url.pathname === "/api/changes" && request.method === "GET") return json(response, await taskChanges(root, getTask(root, findTask(root, url.searchParams.get("task") ?? "").id)));
       if (url.pathname === "/api/connectors" && request.method === "GET") return json(response, detectConnectors(root, { all: url.searchParams.get("all") === "1" }));
       if (request.method === "POST" && (url.pathname === "/api/connectors/connect" || url.pathname === "/api/connectors/disconnect")) {
         const body = JSON.parse(await readBody(request)) as { id: string };
@@ -173,9 +209,23 @@ export async function startUiServer(
         startVerification(root, findTask(root, body.taskId).id);
         return json(response, { ok: true });
       }
+      if (request.method === "POST" && url.pathname === "/api/close") {
+        const body = JSON.parse(await readBody(request)) as { taskId: string; reason?: string };
+        const task = findTask(root, body.taskId);
+        const reasons = ["Accidental task", "Duplicate task", "No longer needed", "Already handled"];
+        const reason = body.reason?.trim();
+        if (!reason || !reasons.includes(reason)) throw new Error(`Choose one of: ${reasons.join(", ")}.`);
+        const note = `Closed manually: ${reason}`;
+        updateTask(root, task.id, { status: "done", todo: [note], done: [note], next: "Closed manually" });
+        return json(response, { ok: true, reason });
+      }
       if (request.method === "POST" && url.pathname === "/api/settings") {
-        const body = JSON.parse(await readBody(request)) as { worker?: string; checks?: string[] };
+        const body = JSON.parse(await readBody(request)) as { worker?: string; checks?: string[]; permissions?: string };
         if (body.worker) setDefaultWorker(root, body.worker);
+        if (body.permissions === "all" || body.permissions === "ask") {
+          const result = setPermissionMode(root, body.permissions);
+          if (result.warning) return json(response, { ok: true, warning: result.warning });
+        }
         if (body.checks) setChecks(root, body.checks.map((c) => c.trim()).filter(Boolean));
         return json(response, { ok: true });
       }

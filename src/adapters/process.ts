@@ -3,6 +3,7 @@ import type { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentAdapter, AgentCapabilities, AgentContext, AgentSession, ExitInfo } from "./types.js";
+import { ALLOW_ALL_FLAGS } from "../core/permissions.js";
 
 /** Resolves a command name against PATH the way a shell would. */
 export { findOnPath } from "../core/platform.js";
@@ -77,7 +78,8 @@ export class ProcessAdapter implements AgentAdapter {
       });
       if (result.error) throw result.error;
     }
-    const child = spawnPortable(executable, this.definition.args(context.handoff, context.promptFile, context.cwd, Boolean(context.here)), {
+    const extra = context.allowAll ? ALLOW_ALL_FLAGS[this.definition.id] ?? [] : [];
+    const child = spawnPortable(executable, [...extra, ...this.definition.args(context.handoff, context.promptFile, context.cwd, Boolean(context.here))], {
       cwd: context.cwd,
       env,
       stdio: "inherit",

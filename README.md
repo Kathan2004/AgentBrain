@@ -187,6 +187,22 @@ where the tool has one, the user-level file only where it has nothing else
 (Codex, Windsurf, Cline, the Claude app), and plain steps where a tool only
 takes MCP servers through its settings screen (Zed, JetBrains, Warp, Augment).
 
+### Every agent works from the same memory
+
+Whichever tool picks a task up (a background Claude Code or Codex run, the VS
+Code chat, an MCP agent in Cursor or the Claude app, Claude Code through its
+hooks), AgentBrain gives it the same context, built in one place: who is working
+on what right now and which files they are touching, how work is judged here
+(reviewers and checks), the lessons from work reviewers sent back, recent
+decisions, and the notes from the memory palace that bear on this task. While it
+works, every AgentBrain tool result (and Claude Code's hooks) carries what other
+agents decided, merged or handed over since its last step. See exactly what an
+agent is given:
+
+```bash
+agentbrain context [task-id]
+```
+
 ### Choosing the agent
 
 Each prompt goes to the agent best placed to do it right now: who is free,
@@ -208,6 +224,39 @@ result. Other agents see the queue in their MCP instructions and tools.
 Limits, stated plainly: reviewers built on the same model can share the same
 blind spot, so mix vendors in a council. Flags catch claims that can be checked
 mechanically, not every wrong answer.
+
+### When a chat agent stalls
+
+Background runs that stop early are handed to the next agent by AgentBrain
+(autopilot). A chat agent such as Copilot in VS Code can stall silently instead:
+waiting on an approval prompt, or never getting the message. When its task shows
+no sign of life (no update, file edit or tool call) for 20 minutes, the control
+room hands the task to the next ready agent too.
+
+### When the lead can't review
+
+With a lead, every result waits for its review. If the lead did the work itself,
+hit its usage limit, or hasn't reviewed for 15 minutes, the control room appoints
+a **stand-in**: the best-placed other agent that can run in the background
+reviews the result the same way (packet, diff, AgentBrain's checks) and votes
+with `agentbrain_review`. Its vote decides unless the lead votes first. Each agent
+gets one try per result; if nobody can stand in, the result waits for the lead or you.
+
+### Let agents work without asking
+
+By default each agent keeps its own approval prompts. To stop clicking Allow
+(or switching a VS Code chat to bypass mode) every time AgentBrain hands work over:
+
+```sh
+agentbrain permissions all   # this project only; `agentbrain permissions ask` undoes it
+```
+
+Then Claude Code starts with `--permission-mode bypassPermissions`, Codex with
+`--dangerously-bypass-approvals-and-sandbox`, Gemini with `--yolo`, Cursor with
+`--force` and Copilot CLI with `--allow-all-tools`; headless (ACP) runs allow
+every tool; and Copilot in VS Code gets `chat.tools.global.autoApprove` in this
+project's `.vscode/settings.json` (never your user settings). Agents can then run
+any command in their worktree without asking: turn it on only for projects you trust.
 
 ## Use it
 

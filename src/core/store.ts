@@ -33,6 +33,8 @@ export interface ProjectState {
   checks?: string[];
   /** Task ids waiting for `agentbrain queue run`, next first. */
   queue?: string[];
+  /** "all": agents AgentBrain starts run without asking for approval (`agentbrain permissions all`). */
+  permissions?: "all";
   /** Per-agent concurrency, timeout, and daily delegation limits. */
   limits?: Record<string, AgentLimits>;
 }

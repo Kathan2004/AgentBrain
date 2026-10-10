@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { worktreesDir } from "./paths.js";
 import type { TaskState } from "./state.js";
+import { applyToWorkdir } from "./permissions.js";
 import { getTask, listTasks, saveTask } from "./store.js";
+import { gitBinary } from "./platform.js";
 
 /**
  * One Git worktree per task, so agents working on different tasks at the same
@@ -14,7 +16,7 @@ import { getTask, listTasks, saveTask } from "./store.js";
  */
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return execFileSync(gitBinary(), args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
 /** Where a task's code lives: its worktree, or the main checkout. */
@@ -63,6 +65,8 @@ export function addWorktree(root: string, taskId: string, base = "HEAD"): TaskSt
 
   task.worktree = { path: wtPath, branch, base: baseCommit };
   saveTask(root, task);
+  // Copilot opened on this folder shouldn't ask for approval when the developer said not to.
+  applyToWorkdir(root, wtPath);
   return task;
 }
 
@@ -158,7 +162,7 @@ export function mergeWorktree(root: string, taskId: string): MergeResult {
 export function branchMerged(root: string, branch: string): boolean {
   try {
     if (Number(git(root, ["rev-list", "--count", `HEAD..${branch}`])) === 0) return true;
-    const base = spawnSync("git", ["merge-base", "HEAD", branch], { cwd: root, encoding: "utf8" });
+    const base = spawnSync(gitBinary(), ["merge-base", "HEAD", branch], { cwd: root, encoding: "utf8" });
     if (base.status !== 0) return false; // no shared history: can't tell
     const patch = git(root, ["diff", "--binary", base.stdout.trim(), branch]);
     if (!patch) return true;
@@ -166,8 +170,8 @@ export function branchMerged(root: string, branch: string): boolean {
     const index = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "agentbrain-idx-")), "index");
     const env = { ...process.env, GIT_INDEX_FILE: index };
     try {
-      if (spawnSync("git", ["read-tree", "HEAD"], { cwd: root, env }).status !== 0) return false;
-      const check = spawnSync("git", ["apply", "--cached", "--check", "--reverse", "-C1"], { cwd: root, env, input: patch + "\n" });
+      if (spawnSync(gitBinary(), ["read-tree", "HEAD"], { cwd: root, env }).status !== 0) return false;
+      const check = spawnSync(gitBinary(), ["apply", "--cached", "--check", "--reverse", "-C1"], { cwd: root, env, input: patch + "\n" });
       return check.status === 0;
     } finally {
       fs.rmSync(path.dirname(index), { recursive: true, force: true });

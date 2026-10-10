@@ -51,6 +51,18 @@ details summary{cursor:pointer;color:var(--muted);margin:24px 4px 8px;font-size:
 .connectorbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px}.toggle{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}.toggle input{accent-color:var(--accent)}
 .connector-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.connector-grid .card{margin:0}.connector-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}.connector-chip{border:1px solid var(--line);border-radius:999px;padding:2px 9px;font-size:12px;color:var(--muted);white-space:nowrap}.connector-chip.start{color:var(--blue);border-color:color-mix(in srgb,var(--blue) 35%,var(--line))}.connector-chip.pickup{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 35%,var(--line))}.connector-chip.review{color:var(--purple);border-color:color-mix(in srgb,var(--purple) 35%,var(--line))}
 .connector-status{margin-top:8px;font-size:13px}.connector-path{margin-top:8px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}.connector-manual{margin-top:8px;border-left:2px solid var(--line);padding-left:10px;color:var(--muted);font-size:13px}.connector-note{margin-top:8px;color:var(--faint);font-size:12.5px}.connector-off{opacity:.72}
+.prmeta{margin:2px 0 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.title.link{cursor:pointer}.title.link:hover{color:var(--accent)}.prhead{margin:10px 0 14px}.prhead h1{font-size:24px;font-weight:600;letter-spacing:-.01em;margin:0 0 6px;line-height:1.25}.faint{color:var(--faint);font-weight:400}
+.prmeta{color:var(--muted);font-size:13px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}.branch{background:var(--soft);border-radius:6px;padding:1px 6px;font-size:12px}
+.pill{border-radius:999px;padding:3px 10px;font-size:12px;font-weight:600;color:#fff;background:var(--muted)}.pill.s-done{background:var(--purple)}.pill.s-review,.pill.s-running{background:var(--ok)}.pill.s-failed,.pill.s-blocked{background:var(--bad)}.pill.s-handoff{background:var(--warn)}
+.label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}.summary{font-size:15px;line-height:1.5;margin-bottom:8px}.ctx{max-height:none!important;white-space:pre-wrap}.objective{color:var(--muted);font-size:13px;line-height:1.5;margin-bottom:14px;white-space:pre-wrap}
+.prtabs{display:flex;gap:4px;align-items:center;border-bottom:1px solid var(--line);margin:18px 0 12px}.prtabs button{background:none;border:0;border-bottom:2px solid transparent;border-radius:0;padding:8px 12px;color:var(--muted);font:inherit;cursor:pointer}.prtabs button.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}.count{background:var(--soft);border-radius:999px;padding:0 7px;font-size:12px}.grow{flex:1}
+.dstat{font:12px var(--mono);display:inline-flex;gap:4px;align-items:center}.dbar{display:inline-flex;gap:1px;margin-left:4px}.dbar i{width:8px;height:8px;border-radius:1px;background:var(--line)}.dbar i.g{background:var(--ok)}.dbar i.r{background:var(--bad)}
+.filelist{padding:6px 0}.filelist a{display:flex;gap:10px;align-items:center;padding:5px 16px;color:var(--ink);text-decoration:none;font-size:13px}.filelist a:hover{background:var(--soft)}.fs{width:18px;text-align:center;font:600 11px var(--mono);border-radius:4px}.fs.added{color:var(--ok)}.fs.deleted{color:var(--bad)}.fs.modified{color:var(--warn)}.fs.renamed{color:var(--blue)}
+.dfile{border:1px solid var(--line);border-radius:10px;margin-bottom:12px;overflow:hidden;background:var(--card)}.dhead{display:flex;gap:10px;align-items:center;padding:8px 14px;background:var(--soft);border-bottom:1px solid var(--line);cursor:pointer;font-size:13px;position:sticky;top:0}.dhead .dstat{margin-left:auto}.caret{color:var(--muted);width:10px}
+table.diff{width:100%;border-collapse:collapse;font:12px/1.55 var(--mono);table-layout:fixed}table.diff td{padding:0 8px;vertical-align:top}table.diff col.lnc{width:52px}table.diff td.ln{text-align:right;color:var(--faint);user-select:none;border-right:1px solid var(--line)}table.diff td.code{white-space:pre-wrap;word-break:break-all}.sign{display:inline-block;width:14px;color:var(--faint);user-select:none}
+tr.add td{background:color-mix(in srgb,var(--ok) 13%,transparent)}tr.add td.ln{background:color-mix(in srgb,var(--ok) 22%,transparent)}tr.del td{background:color-mix(in srgb,var(--bad) 13%,transparent)}tr.del td.ln{background:color-mix(in srgb,var(--bad) 22%,transparent)}tr.hunk td{background:color-mix(in srgb,var(--blue) 10%,transparent);color:var(--muted);padding:4px 10px}
+.commit{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}.commit:last-child{border-bottom:0}.csub{font-weight:600;font-size:14px}.cbody{white-space:pre-wrap;margin:4px 0}.sha{color:var(--muted);font-size:12px}
+@media (max-width:640px){.prhead h1{font-size:20px}table.diff col.lnc{width:36px}table.diff td.ln{padding:0 4px}.prtabs{overflow-x:auto}}
 .detail pre{font:12px/1.5 var(--mono);background:var(--soft);border-radius:8px;padding:10px;overflow:auto;white-space:pre-wrap;max-height:360px}
 .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:9px;font-size:13.5px;display:none;z-index:20;max-width:90vw}
 .who-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:0}
@@ -87,8 +99,13 @@ function stage(t){if(t.status==='done')return 4;if(t.status==='review')return (S
 function stepsHtml(t){var n=stage(t);var failed=t.review&&(t.review.checks||[]).some(function(c){return !c.ok});return '<div class="steps">'+STEPS.map(function(s,i){var cls=i<n?'done':i===n?'now':'';if(i===2&&failed)cls='bad';return '<div class="step '+cls+'">'+s+'</div>'}).join('')+'</div>'}
 function taskLog(t,n){return S.activity.filter(function(e){return e.task===t.id&&!(e.kind==='tool'&&/^(Read|Grep|Glob) /.test(e.text))}).slice(-n)}
 function nextAction(t){if(t.status==='review')return 'Decide: approve or send back with notes';if(t.status==='running')return t.liveSession&&t.liveSession.alive?'Open the live head to watch progress':'Agent is working; wait for its next update';if(t.status==='handoff'||t.status==='idle')return 'Continue: hand this task to an agent';if(t.status==='blocked'||t.status==='failed')return 'Needs attention before it can continue';return 'AgentBrain is tracking this task'}
+function metaHtml(t){var c=t.changes,p=S.policy,si=t.review&&t.review.standIn,lead=p.mode==='lead'&&p.reviewers[0],parts=[];
+  if(c&&(c.commits||c.files))parts.push('<span class="mono">'+c.commits+' commit'+(c.commits===1?'':'s')+' · '+c.files+' file'+(c.files===1?'':'s')+' · <span class="ok">+'+c.added+'</span> <span class="bad">−'+c.removed+'</span></span>');
+  parts.push('Review: '+(si?'<b style="color:'+color(si.agent)+'">'+esc(name(si.agent))+'</b> standing in · '+esc(si.why):lead?'<b style="color:'+color(lead)+'">'+esc(name(lead))+'</b> (lead)':p.mode==='council'?'council of '+p.reviewers.length:'you'));
+  return '<div class="sub prmeta" title="'+esc(si?'Stand-in reviewer: '+si.why:'')+'">'+parts.join(' · ')+'</div>'}
 var GLYPH={message:'✉',progress:'✓',edit:'✎',command:'$',commit:'●',decision:'◆',handoff:'⇄',review:'⚖',status:'→',prompt:'›',tool:'·',session:'◎'};
 function logHtml(list){if(!list.length)return '';return '<div class="log">'+list.map(function(e){return '<div><span class="t">'+hhmm(e.at)+'</span><span class="g">'+(GLYPH[e.kind]||'·')+'</span><span><b style="color:'+color(e.agent)+';font-weight:600">'+esc(name(e.agent))+'</b> '+esc(e.text)+'</span></div>'}).join('')+'</div>'}
+var lastHome='';
 function renderHome(){
   var m=document.getElementById('main');var active=document.activeElement;var refocus=active&&active.id==='prompt';var pos=refocus?active.selectionStart:0;var searching=active&&active.id==='taskSearch';
   m.querySelectorAll('[data-notes]').forEach(function(t){drafts[t.dataset.notes]=t.value});var focusNotes=active&&active.dataset&&active.dataset.notes;
@@ -107,7 +124,7 @@ function renderHome(){
   h+='<h2>Needs you <span class="count">'+visibleReview.length+(visibleReview.length!==review.length?' / '+review.length:'')+'</span></h2>';
   if(!visibleReview.length)h+='<div class="empty">'+(review.length?'No review matches "'+esc(taskSearch)+'".':'Nothing to review. Finished work lands here with AgentBrain\'s own checks and any red flags.')+'</div>';
   visibleReview.forEach(function(t){var rv=t.review||{};var ty=t.tally;
-    h+='<div class="card need"><div class="title">'+esc(t.objective)+'</div><div class="sub">Finished by <b style="color:'+color(rv.worker||t.agent||'')+'">'+esc(name(rv.worker||t.agent||'?'))+'</b> '+ago(rv.requestedAt||t.updatedAt)+' · <span class="mono">'+esc(t.id)+'</span></div><div class="sub"><b>Next:</b> '+esc(nextAction(t))+'</div>'+stepsHtml(t);
+    h+='<div class="card need"><div class="title link" data-open="'+esc(t.id)+'" title="'+esc(t.objective)+'">'+esc(shortTitle(t.objective))+'</div>'+metaHtml(t)+'<div class="sub">Finished by <b style="color:'+color(rv.worker||t.agent||'')+'">'+esc(name(rv.worker||t.agent||'?'))+'</b> '+ago(rv.requestedAt||t.updatedAt)+' · <span class="mono">'+esc(t.id)+'</span></div><div class="sub"><b>Next:</b> '+esc(nextAction(t))+'</div>'+stepsHtml(t);
     if(S.policy.checks.length){if((rv.checks||[]).length)h+=rv.checks.map(function(c){return '<div class="check '+(c.ok?'ok':'bad')+'" title="'+esc(c.tail)+'">'+(c.ok?'✓ passed':'✗ failed')+' · '+esc(c.command)+'</div>'}).join('');else if(t.review)h+='<div class="check sub">Running checks…</div>';else h+='<div class="sub">Checks have not run on this result yet. <button class="ghost" data-verify="'+esc(t.id)+'">Run checks</button></div>'}
     (rv.flags||[]).forEach(function(f){h+='<div class="flag"><b>⚠ '+esc({'no-change':'Nothing changed','false-claim':'False claim','hallucination':'Hallucination','dissent':'Dissent'}[f.kind]||f.kind)+'</b> · '+esc(name(f.agent))+': '+esc(f.text)+'</div>'});
     if(ty&&ty.total>0&&S.policy.mode!=='none'){h+='<div class="meter"><div class="a" style="width:'+(ty.approve/ty.total*100)+'%"></div><div class="c" style="width:'+(ty.changes/ty.total*100)+'%"></div><div class="q" style="left:'+(ty.quorum*100)+'%"></div></div><div class="sub">'+(S.policy.mode==='council'?'Council: '+ty.approve.toFixed(1)+' approve, '+ty.changes.toFixed(1)+' changes of '+ty.total.toFixed(1)+' (needs '+Math.round(ty.quorum*100)+'%)':'Lead: '+((rv.votes||[]).length?'voted':'has not voted yet'))+(function(){var w=ty.eligible.filter(function(x){return !(rv.votes||[]).some(function(v){return v.agent===x})});return w.length?' · <b>waiting for '+w.map(name).map(esc).join(', ')+'</b> (or decide yourself below)':''})()+'</div>';
@@ -117,9 +134,11 @@ function renderHome(){
   h+='<h2>In progress <span class="count">'+visibleRunning.length+(visibleRunning.length!==running.length?' / '+running.length:'')+'</span></h2>';
   if(!visibleRunning.length)h+='<div class="empty">'+(running.length?'No active task matches "'+esc(taskSearch)+'".':'No work in progress. Describe a task above and an agent will pick it up.')+'</div>';
   visibleRunning.forEach(function(t){var s=S.sessions.filter(function(x){return x.taskId===t.id&&x.state!=='ended'})[0];
-    h+='<div class="card"><div class="title">'+esc(t.objective)+'</div><div class="sub">'+(t.agent?'<span class="who-dot" style="background:'+color(t.agent)+'"></span>'+esc(name(t.agent)):'Unassigned')+' · '+esc(t.status==='handoff'?'handed off, waiting for an agent':t.status)+(t.warning?' · <span class="bad">'+esc(t.warning)+'</span>':'')+' · '+ago(t.updatedAt)+'</div>'+stepsHtml(t)+
+    h+='<div class="card"><div class="title link" data-open="'+esc(t.id)+'" title="'+esc(t.objective)+'">'+esc(shortTitle(t.objective))+'</div>'+metaHtml(t)+'<div class="sub">'+(t.agent?'<span class="who-dot" style="background:'+color(t.agent)+'"></span>'+esc(name(t.agent)):'Unassigned')+' · '+esc(t.status==='handoff'?'handed off, waiting for an agent':t.status)+(t.warning?' · <span class="bad">'+esc(t.warning)+'</span>':'')+' · '+ago(t.updatedAt)+'</div>'+stepsHtml(t)+
       '<div class="sub"><b>Next:</b> '+esc(nextAction(t))+(t.nextAction?' · '+esc(t.nextAction):'')+'</div>'+logHtml(taskLog(t,4))+'<div class="actions">'+(t.status!=='running'?'<button data-continue="'+esc(t.id)+'">Hand to '+esc(wn||'a worker')+'</button>':'')+(t.liveSession&&t.liveSession.alive?'<button data-stop="'+esc(t.liveSession.sessionId)+'">Stop</button>':'')+'<button class="ghost" data-open="'+esc(t.id)+'">'+(t.liveSession&&t.liveSession.alive?'Open live head':'Details')+'</button></div></div>'});
-  if(visibleDone.length)h+='<details open><summary>Finished ('+visibleDone.length+(visibleDone.length!==done.length?' / '+done.length:'')+')</summary>'+visibleDone.slice().sort(function(a,b){return (b.updatedAt||'').localeCompare(a.updatedAt||'')}).slice(0,30).map(function(t){return '<div class="row" role="button" tabindex="0" data-open="'+esc(t.id)+'" aria-label="Open finished task '+esc(t.objective)+'"><span class="ok">✓</span><span>'+esc(t.objective)+'</span><span class="sub">'+esc(t.agent?name(t.agent):'')+' · '+ago(t.updatedAt)+'</span></div>'}).join('')+'</details>';
+  if(visibleDone.length)h+='<details open><summary>Finished ('+visibleDone.length+(visibleDone.length!==done.length?' / '+done.length:'')+')</summary>'+visibleDone.slice().sort(function(a,b){return (b.updatedAt||'').localeCompare(a.updatedAt||'')}).slice(0,30).map(function(t){return '<div class="row" role="button" tabindex="0" data-open="'+esc(t.id)+'" aria-label="Open finished task '+esc(t.objective)+'"><span class="ok">✓</span><span>'+esc(shortTitle(t.objective))+'</span><span class="sub">'+esc(t.agent?name(t.agent):'')+' · '+ago(t.updatedAt)+'</span></div>'}).join('')+'</details>';
+  // Agents add activity every few seconds: rebuilding identical markup would eat clicks and selections.
+  if(h===lastHome&&m.querySelector('.composer'))return;lastHome=h;
   m.innerHTML=h;
   var p=document.getElementById('prompt');p.oninput=function(){composer=p.value};p.onkeydown=function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}};if(refocus){p.focus();p.selectionStart=p.selectionEnd=pos}
   if(searching){var sn=document.getElementById('taskSearch');if(sn){sn.focus();sn.setSelectionRange(sn.value.length,sn.value.length)}}
@@ -181,6 +200,7 @@ function renderConnectors(){
 function renderSettings(){
   if(!settings||!settings.dirty)settings={mode:S.policy.mode,agents:S.policy.reviewers.slice(),quorum:S.policy.quorum||0.67,checks:S.policy.checks.join('\n'),dirty:false};var d=settings;
   var h='<div class="card"><div class="set"><div><label>New tasks go to</label><div class="sub">The agent that picks up what you type.</div></div><div><select id="worker">'+S.workers.map(function(w){return '<option value="'+esc(w.id)+'"'+(w.id===S.worker?' selected':'')+(w.available?'':' disabled')+'>'+esc(w.name)+(w.available?'':' (not installed)')+'</option>'}).join('')+'</select></div></div>';
+  h+='<div class="set"><div><label>Agent permissions</label><div class="sub">'+(S.permissions==='all'?'Agents run any tool or command without asking, including Copilot in VS Code (this project only).':'Each agent asks before running commands.')+'</div></div><div><span class="seg">'+[['ask','Ask'],['all','Allow all']].map(function(x){return '<button data-perm="'+x[0]+'" class="'+(S.permissions===x[0]?'on':'')+'">'+x[1]+'</button>'}).join('')+'</span></div></div>';
   h+='<div class="set"><div><label>Who decides</label><div class="sub">Whose approval finished work needs.</div></div><div><span class="seg">'+[['none','Me'],['lead','A lead agent'],['council','A council']].map(function(x){return '<button data-mode="'+x[0]+'" class="'+(d.mode===x[0]?'on':'')+'">'+x[1]+'</button>'}).join('')+'</span>';
   if(d.mode==='lead')h+='<div class="agents">'+S.knownAgents.map(function(a){return '<button class="chip'+(d.agents[0]===a?' on':'')+'" data-lead="'+esc(a)+'">'+esc(name(a))+'</button>'}).join('')+'</div><div class="sub" style="margin-top:6px">The lead reviews every other agent\'s work. You can always override.</div>';
   if(d.mode==='council'){var f=Math.max(0,Math.floor(d.agents.length*(1-d.quorum)+1e-9));h+='<div class="agents">'+S.knownAgents.map(function(a){return '<button class="chip'+(d.agents.indexOf(a)>=0?' on':'')+'" data-member="'+esc(a)+'">'+esc(name(a))+' <span class="sub">w '+weight(a).toFixed(2)+'</span></button>'}).join('')+'</div><div class="actions"><span class="sub">Quorum</span><select id="quorum">'+[[0.51,'51%'],[0.67,'67%'],[0.75,'75%'],[1,'100%']].map(function(q){return '<option value="'+q[0]+'"'+(Math.abs(d.quorum-q[0])<0.02?' selected':'')+'>'+q[1]+'</option>'}).join('')+'</select><span class="sub">'+d.agents.length+' members · a result survives '+f+' broken, compromised or hallucinating reviewer'+(f===1?'':'s')+'</span></div><div class="sub" style="margin-top:6px">Votes are sealed until each member votes and weighted by reputation; mix vendors so one model\'s blind spot can\'t decide.</div>'}
@@ -189,6 +209,7 @@ function renderSettings(){
   if(Object.keys(S.reputation).length)h+='<h2>Reputation</h2><div class="card">'+Object.keys(S.reputation).map(function(a){var r=S.reputation[a];return '<div class="sub" style="padding:3px 0"><b style="color:'+color(a)+'">'+esc(name(a))+'</b> · weight '+r.score.toFixed(2)+' · agreed '+r.agreed+' · dissented '+r.dissented+' · flagged '+r.flagged+'</div>'}).join('')+'</div>';
   var m=document.getElementById('main');m.innerHTML=h;
   document.getElementById('worker').onchange=function(e){post('/api/settings',{worker:e.target.value}).then(function(r){if(r.ok)toast('New tasks go to '+e.target.selectedOptions[0].text)})};
+  m.querySelectorAll('[data-perm]').forEach(function(b){b.onclick=function(){var p=b.dataset.perm;if(p==='all'&&!confirm('Let every agent AgentBrain starts run any tool or command in this project without asking?'))return;post('/api/settings',{permissions:p}).then(function(r){if(r.ok){S.permissions=p;toast(r.warning||(p==='all'?'Agents no longer ask for approval':'Agents ask for approval again'));renderSettings()}})}});
   m.querySelectorAll('[data-mode]').forEach(function(b){b.onclick=function(){d.mode=b.dataset.mode;if(d.mode==='lead'&&!d.agents.length)d.agents=['claude-code'];if(d.mode==='lead')d.agents=d.agents.slice(0,1);if(d.mode==='council'&&d.quorum>=1)d.quorum=0.67;d.dirty=true;renderSettings()}});
   m.querySelectorAll('[data-lead]').forEach(function(b){b.onclick=function(){d.agents=[b.dataset.lead];d.dirty=true;renderSettings()}});
   m.querySelectorAll('[data-member]').forEach(function(b){b.onclick=function(){var a=b.dataset.member,i=d.agents.indexOf(a);if(i>=0)d.agents.splice(i,1);else d.agents.push(a);d.dirty=true;renderSettings()}});
@@ -198,21 +219,86 @@ function renderSettings(){
   var cc=document.getElementById('cancel');if(cc)cc.onclick=function(){d.dirty=false;renderSettings()};
 }
 
-/* ---------- task detail ---------- */
-var detailKey='';
+/* ---------- task detail: reads like a pull request ---------- */
+var detailKey='',detailTab='changes',openFiles={},detailCache={};
+function shortTitle(o){var first=String(o).split(/(?<=[.!?])\s|:\s|\n/)[0];if(first.length>90)first=first.slice(0,87).replace(/\s+\S*$/,'')+'…';return first}
+function parseDiff(patch){
+  var files=[],cur=null,oldN=0,newN=0;
+  (patch||'').split('\n').forEach(function(l){
+    if(l.indexOf('diff --git ')===0){var m=/ b\/(.*)$/.exec(l);cur={path:m?m[1]:l.slice(11),rows:[],added:0,removed:0,binary:false};files.push(cur);return}
+    if(!cur)return;
+    if(/^(index |similarity |rename |new file|deleted file|old mode|new mode)/.test(l))return;
+    if(l.indexOf('--- ')===0||l.indexOf('+++ ')===0){if(l.indexOf('+++ b/')===0)cur.path=l.slice(6);return}
+    if(l.indexOf('Binary files')===0){cur.binary=true;return}
+    var h=/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(l);
+    if(h){oldN=+h[1];newN=+h[2];cur.rows.push({t:'hunk',text:l});return}
+    if(l[0]==='+'){cur.rows.push({t:'add',n:newN++,text:l.slice(1)});cur.added++}
+    else if(l[0]==='-'){cur.rows.push({t:'del',o:oldN++,text:l.slice(1)});cur.removed++}
+    else if(l[0]===' '||l===''){if(!cur.rows.length)return;cur.rows.push({t:'ctx',o:oldN++,n:newN++,text:l.slice(1)})}
+  });
+  return files;
+}
+function bar(a,r){var t=a+r||1,g=Math.round(5*a/t),b=Math.min(5-g,Math.round(5*r/t));var s='';for(var i=0;i<5;i++)s+='<i class="'+(i<g?'g':i<g+b?'r':'n')+'"></i>';return '<span class="dbar">'+s+'</span>'}
+function fileHtml(f,i){
+  var open=openFiles[f.path]!==undefined?openFiles[f.path]:f.rows.length<=400;
+  var h='<div class="dfile" id="f'+i+'"><div class="dhead" data-file="'+esc(f.path)+'"><span class="caret">'+(open?'▾':'▸')+'</span><span class="mono">'+esc(f.path)+'</span><span class="dstat"><span class="ok">+'+f.added+'</span> <span class="bad">−'+f.removed+'</span> '+bar(f.added,f.removed)+'</span></div>';
+  if(open){
+    if(f.binary)h+='<div class="sub" style="padding:10px 14px">Binary file</div>';
+    else h+='<table class="diff"><colgroup><col class="lnc"><col class="lnc"><col></colgroup>'+f.rows.map(function(r){
+      if(r.t==='hunk')return '<tr class="hunk"><td colspan="3">'+esc(r.text)+'</td></tr>';
+      return '<tr class="'+r.t+'"><td class="ln">'+(r.o||'')+'</td><td class="ln">'+(r.n||'')+'</td><td class="code"><span class="sign">'+(r.t==='add'?'+':r.t==='del'?'−':' ')+'</span>'+esc(r.text)+'</td></tr>'}).join('')+'</table>';
+  }
+  return h+'</div>';
+}
 function renderTask(){
   var t=taskById(selectedTask);var m=document.getElementById('main');if(!t){setTab('home');return}
-  var key=t.id+t.updatedAt+S.activity.length;if(key===detailKey&&m.querySelector('.detail'))return;detailKey=key;
-  Promise.all([api('/api/diff?task='+encodeURIComponent(t.id)),t.liveSession?api('/api/transcript?session='+encodeURIComponent(t.liveSession.sessionId)):Promise.resolve(null)]).then(function(r){
+  var key=t.id+t.updatedAt+detailTab+(detailTab==='activity'||detailTab==='live'?S.activity.length:'');if(key===detailKey&&m.querySelector('.detail'))return;var keepScroll=detailKey.indexOf(t.id)===0?scrollY:0;detailKey=key;
+  var cached=[detailCache['c'+t.id]||null,detailCache['x'+t.id]||null,t.liveSession?detailCache['l'+t.liveSession.sessionId]||null:null];
+  // Draw now from what we have (the snapshot, the last fetch), then again when fresh data arrives.
+  draw(cached,true);
+  Promise.all([api('/api/changes?task='+encodeURIComponent(t.id)),detailTab==='context'?api('/api/context?task='+encodeURIComponent(t.id)):Promise.resolve(null),t.liveSession?api('/api/transcript?session='+encodeURIComponent(t.liveSession.sessionId)):Promise.resolve(null)]).then(function(r){if(r[0]&&!r[0].error)detailCache['c'+t.id]=r[0];if(r[1])detailCache['x'+t.id]=r[1];if(r[2]&&t.liveSession)detailCache['l'+t.liveSession.sessionId]=r[2];if(selectedTask!==t.id||view!=='task'||detailKey!==key)return;draw(r,false)});
+  function draw(r,first){
+    var loading=first&&!r[0];var c=r[0]||{commits:[],files:[],patch:'',summary:t.completed.slice(-4).join(' · ')};var files=parseDiff(c.patch);
+    var add=c.files.reduce(function(s,f){return s+f.added},0),del=c.files.reduce(function(s,f){return s+f.removed},0);
     function list(a){return a&&a.length?'<ul>'+a.map(function(x){return '<li>'+esc(x)+'</li>'}).join('')+'</ul>':'<div class="sub">None</div>'}
-    var h='<div class="detail"><button class="ghost" id="back">← Back</button><div class="card" style="margin-top:8px"><div class="title" style="font-size:18px">'+esc(t.objective)+'</div><div class="sub">'+esc(t.status)+(t.agent?' · '+esc(name(t.agent)):'')+' · <span class="mono">'+esc(t.id)+'</span></div>'+stepsHtml(t)+(t.nextAction?'<div class="sub">Next: '+esc(t.nextAction)+'</div>':'')+'<div class="actions"><button id="openEditor">Open in VS Code</button></div></div>'+
-      '<div class="card"><b>Next action</b><div class="sub" style="margin:6px 0 12px">'+esc(nextAction(t))+(t.nextAction?' · '+esc(t.nextAction):'')+'</div><b>Done</b>'+list(t.completed)+'<b>Remaining</b>'+list(t.remaining)+'<b>Decisions</b>'+list(t.decisions)+(t.failures.length?'<b>Known failures</b>'+list(t.failures):'')+'</div>'+
-      (t.reviews.length?'<div class="card"><b>Review history</b>'+t.reviews.map(function(v){return '<div class="sub">'+esc(v.at.slice(0,16).replace('T',' '))+' · '+(v.verdict==='approved'?'<span class="ok">approved</span>':'<span class="bad">sent back</span>')+' by '+esc(v.reviewer)+(v.notes?': '+esc(v.notes):'')+'</div>'}).join('')+'</div>':'')+
-      '<div class="card"><b>Activity</b>'+logHtml(taskLog(t,40))+'</div>'+
-      '<div class="card"><b>Uncommitted changes</b><pre>'+esc(r[0].diff||'(none)')+'</pre></div>'+
-      (r[1]?'<div class="card"><b>Live head</b><div class="sub">'+esc(name(t.liveSession.agentId))+' · session <span class="mono">'+esc(t.liveSession.sessionId)+'</span> · attach with <span class="mono">agentbrain attach '+esc(t.liveSession.sessionId)+'</span></div><pre>'+esc((r[1].transcript||[]).join('\n'))+'</pre></div>':'')+'<div class="sub mono">'+esc(t.workdir)+'</div></div>';
-    m.innerHTML=h;document.getElementById('back').onclick=function(){setTab('home')};document.getElementById('openEditor').onclick=function(){post('/api/open',{taskId:t.id})};
-  });
+    var status=t.status==='done'?(t.merged?'Merged':'Done'):t.status==='review'?'In review':t.status[0].toUpperCase()+t.status.slice(1);
+    var h='<div class="detail"><button class="ghost" id="back">← All tasks</button>';
+    var title=shortTitle(t.objective);h+='<div class="prhead"><h1>'+esc(title)+' <span class="faint mono">'+esc(t.id.replace('task-','#'))+'</span></h1>';
+    h+='<div class="prmeta"><span class="pill s-'+esc(t.status)+'">'+esc(status)+'</span>'+(t.agent?'<b style="color:'+color(t.agent)+'">'+esc(name(t.agent))+'</b> ':'')+(c.commits.length?'wants to merge '+c.commits.length+' commit'+(c.commits.length===1?'':'s')+' ':'')+(t.worktree?'from <span class="mono branch">'+esc(t.worktree.branch)+'</span> ':'')+'· updated '+esc(ago(t.updatedAt))+'</div></div>';
+    h+='<div class="card">'+(title!==t.objective?'<div class="label">Task</div><div class="objective">'+esc(t.objective)+'</div>':'')+'<div class="label">Summary</div><div class="summary">'+(c.summary?esc(c.summary):'<span class="sub">No summary yet: the agent hasn\'t recorded what it did.</span>')+'</div>'+stepsHtml(t)+
+      '<div class="actions">'+(t.status==='review'?'<button class="primary" id="approve">Approve and merge</button><button id="sendBack">Send back…</button>':'')+'<button class="ghost" id="closeTask">Close task</button><button class="ghost" id="openEditor">Open in VS Code</button></div></div>';
+    var tabs=[['changes','Files changed',c.files.length],['commits','Commits',c.commits.length],['activity','Activity',null],['notes','Notes',null],['context','Context',null]];if(r[2])tabs.push(['live','Live',null]);
+    h+='<div class="prtabs">'+tabs.map(function(x){return '<button data-dtab="'+x[0]+'" class="'+(detailTab===x[0]?'on':'')+'">'+x[1]+(x[2]!==null?' <span class="count">'+x[2]+'</span>':'')+'</button>'}).join('')+'<span class="grow"></span>'+(c.files.length?'<span class="dstat"><span class="ok">+'+add+'</span> <span class="bad">−'+del+'</span> '+bar(add,del)+'</span>':'')+'</div>';
+    if(detailTab==='changes'){
+      if(!files.length)h+='<div class="empty">'+(loading?'Loading changes…':'No changes yet.')+'</div>';
+      else{
+        h+='<div class="card filelist">'+c.files.map(function(f){var i=files.findIndex(function(x){return x.path===f.path});return '<a href="#" data-jump="'+i+'"><span class="fs '+esc(f.status)+'">'+esc(f.status[0].toUpperCase())+'</span><span class="mono">'+esc(f.path)+'</span><span class="grow"></span><span class="ok">+'+f.added+'</span> <span class="bad">−'+f.removed+'</span></a>'}).join('')+'</div>';
+        if(c.uncommitted)h+='<div class="sub" style="margin:0 0 8px">Includes edits the agent hasn\'t committed yet.</div>';
+        h+=files.map(fileHtml).join('');
+        if(c.truncated)h+='<div class="sub">Diff truncated; open the worktree for the rest.</div>';
+      }
+    }else if(detailTab==='commits'){
+      h+=loading&&!c.commits.length?'<div class="empty">Loading commits…</div>':c.commits.length?'<div class="card commits">'+c.commits.map(function(x){return '<div class="commit"><div><div class="csub">'+esc(x.subject)+'</div>'+(x.body?'<div class="sub cbody">'+esc(x.body)+'</div>':'')+'<div class="sub">'+esc(x.author)+' committed '+esc(ago(x.at))+'</div></div><span class="mono sha">'+esc(x.sha.slice(0,7))+'</span></div>'}).join('')+'</div>':'<div class="empty">No commits yet.</div>';
+    }else if(detailTab==='activity'){
+      h+='<div class="card">'+(logHtml(taskLog(t,80))||'<div class="sub">Nothing yet.</div>')+'</div>';
+    }else if(detailTab==='notes'){
+      h+='<div class="card"><b>Next</b><div class="sub" style="margin:6px 0 12px">'+esc(nextAction(t))+(t.nextAction?' · '+esc(t.nextAction):'')+'</div><b>Done</b>'+list(t.completed)+'<b>Remaining</b>'+list(t.remaining)+'<b>Decisions</b>'+list(t.decisions)+(t.failures.length?'<b>Known failures</b>'+list(t.failures):'')+'</div>'+
+        (t.reviews.length?'<div class="card"><b>Review history</b>'+t.reviews.map(function(v){return '<div class="sub">'+esc(v.at.slice(0,16).replace('T',' '))+' · '+(v.verdict==='approved'?'<span class="ok">approved</span>':'<span class="bad">sent back</span>')+' by '+esc(v.reviewer)+(v.notes?': '+esc(v.notes):'')+'</div>'}).join('')+'</div>':'')+'<div class="sub mono">'+esc(t.workdir)+'</div>';
+    }else if(detailTab==='context'){
+      h+='<div class="card"><div class="sub" style="margin-bottom:8px">What every agent gets on this task, whichever tool it is: Claude Code, Codex, Copilot or any MCP agent. It is built live from the project\'s memory (the vault), the team and the review rules.</div><pre class="ctx">'+esc((r[1]&&r[1].context)||(first?'Loading…':'(empty)'))+'</pre></div>';
+    }else if(detailTab==='live'&&r[2]){
+      h+='<div class="card"><div class="sub">'+esc(name(t.liveSession.agentId))+' · attach with <span class="mono">agentbrain attach '+esc(t.liveSession.sessionId)+'</span></div><pre>'+esc((r[2].transcript||[]).join('\n'))+'</pre></div>';
+    }
+    m.innerHTML=h+'</div>';if(keepScroll)scrollTo(0,keepScroll);else if(first)scrollTo(0,0);
+    document.getElementById('back').onclick=function(){detailTab='changes';setTab('home')};
+    document.getElementById('openEditor').onclick=function(){post('/api/open',{taskId:t.id})};
+    var ap=document.getElementById('approve');if(ap)ap.onclick=function(){post('/api/review',{taskId:t.id,verdict:'approved'}).then(function(x){if(x.ok)toast('Approved')})};
+    var sb=document.getElementById('sendBack');if(sb)sb.onclick=function(){var n=prompt('What should change?');if(n)post('/api/review',{taskId:t.id,verdict:'changes',notes:n}).then(function(x){if(x.ok)toast('Sent back')})};
+    var close=document.getElementById('closeTask');if(close)close.onclick=function(){var choices=['Accidental task','Duplicate task','No longer needed','Already handled'];var answer=prompt('Close task as:\n1. Accidental task\n2. Duplicate task\n3. No longer needed\n4. Already handled','1');if(!answer)return;var index=Number(answer.trim());if(!/^[1-4]$/.test(answer.trim())){toast('Choose 1, 2, 3, or 4');return}close.disabled=true;post('/api/close',{taskId:t.id,reason:choices[index-1]}).then(function(x){if(x.ok){toast('Task closed');setTab('home')}else close.disabled=false})};
+    m.querySelectorAll('[data-dtab]').forEach(function(b){b.onclick=function(){detailTab=b.dataset.dtab;detailKey='';renderTask()}});
+    m.querySelectorAll('[data-file]').forEach(function(d){d.onclick=function(){var p=d.dataset.file,f=files.find(function(x){return x.path===p});var cur=openFiles[p]!==undefined?openFiles[p]:f.rows.length<=400;openFiles[p]=!cur;detailKey='';renderTask()}});
+    m.querySelectorAll('[data-jump]').forEach(function(a){a.onclick=function(e){e.preventDefault();var el=document.getElementById('f'+a.dataset.jump);if(el)el.scrollIntoView({behavior:'smooth',block:'start'})}});
+  }
 }
 
 function role(id){var p=S.policy;if(p.mode==='lead'&&p.reviewers[0]===id)return ' <span class="sub">· lead</span>';if(p.mode==='council'&&p.reviewers.indexOf(id)>=0)return ' <span class="sub">· council</span>';return ''}
@@ -314,7 +400,10 @@ function openNote(id){
 }
 
 function renderBrainView(fresh){renderBrain(fresh)}
-function render(){if(!S)return;document.getElementById('repo').textContent=S.root.split('/').pop();renderNav();
+var pointerDown=false,pendingRender=false;
+document.addEventListener('pointerdown',function(){pointerDown=true},true);
+document.addEventListener('pointerup',function(){setTimeout(function(){pointerDown=false;if(pendingRender){pendingRender=false;render()}},0)},true);
+function render(){if(!S)return;if(pointerDown){pendingRender=true;return}document.getElementById('repo').textContent=S.root.split('/').pop();renderNav();
   if(view==='home')renderHome();else if(view==='activity')renderActivity();else if(view==='brain')renderBrainView(!document.getElementById('graph'));else if(view==='connectors')renderConnectors();else if(view==='settings'){if(!(settings&&settings.dirty))renderSettings()}else renderTask()}
 api('/api/snapshot').then(function(x){if(x.error){document.getElementById('main').innerHTML='<div class="empty">'+esc(x.error)+'</div>';return}S=x;render()}).catch(function(){document.getElementById('live').classList.add('off')});
 var es=new EventSource('/api/events?token='+encodeURIComponent(token));es.addEventListener('snapshot',function(e){S=JSON.parse(e.data);render()});es.onerror=function(){document.getElementById('live').classList.add('off')};es.onopen=function(){document.getElementById('live').classList.remove('off')};

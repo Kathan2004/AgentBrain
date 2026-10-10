@@ -16,7 +16,8 @@ import { claudeBinary, codexBinary, delegate, planGoal } from "../core/delegate.
 import { getLimits, runTimeoutMinutes, setLimits, effectiveLimits } from "../core/limits.js";
 import { runPrint } from "../core/printrun.js";
 import { connectConnector, detectConnectors, disconnectConnector } from "../core/connectors.js";
-import { selfCommand as platformSelf } from "../core/platform.js";
+import { clearParentSession, findTool, selfCommand as platformSelf, gitBinary } from "../core/platform.js";
+import { permissionMode, setPermissionMode } from "../core/permissions.js";
 import { markRead, sendMessage, unreadFor } from "../core/messages.js";
 import { deliverToChat } from "../core/delegate.js";
 import {
@@ -58,6 +59,7 @@ Control plane
   agentbrain on [--no-open]               Switch AgentBrain on for this repo, from any terminal or agent:
                                           connect every agent, stream their activity, open the control room
   agentbrain off                          Stop streaming activity and close the control room
+  agentbrain permissions [all | ask]      all: agents AgentBrain starts never ask for approval (incl. Copilot in VS Code)
   agentbrain lead [<agent-id> | --none]   Show or set the lead agent, who reviews every other agent's work
   agentbrain council <agent>... [--quorum 0.67] | --none
                                           Instead of one lead, a council votes on every result: sealed votes,
@@ -69,6 +71,7 @@ Control plane
                                           Hand a task to the best-placed agent (or the one named), no window
   agentbrain message <agent|all> "<text>" Message the agents working on this project (they see it in their next step)
   agentbrain inbox                        Messages for you (or for --agent <id>)
+  agentbrain context [task-id]            Exactly what every agent is given for the task (same for every tool)
   agentbrain recall "<query>"             Search the project's shared memory (the Obsidian vault in .agentbrain/vault)
   agentbrain review [task-id]             Show results waiting for review: claims, diff, checks, flags, votes
   agentbrain review <task-id> --approve | --changes "<notes>"
@@ -228,6 +231,7 @@ function parseCli() {
         changes: { type: "string" },
         verify: { type: "boolean" },
         plan: { type: "boolean" },
+        review: { type: "boolean" },
         quorum: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
@@ -393,7 +397,7 @@ async function runHeadlessCli(agentName: string | undefined, taskArg: string | u
         "For any other ACP agent: agentbrain run [task] --headless --agent <id> -- <command> [args...]",
     );
   }
-  if (!findOnPath(def.command)) throw new Error(`"${def.command}" was not found on PATH. Install ${def.name} first.`);
+  if (!findTool(def.command)) throw new Error(`"${def.command}" was not found on PATH. Install ${def.name} first.`);
 
   const allowed = flags.allow
     ? flags.allow.split(",").map((k) => k.trim()).filter(Boolean)
@@ -484,6 +488,7 @@ async function run(agentName: string | undefined, taskArg: string | undefined): 
     const result = await runPrint(cwd, taskId, { id, command }, {
       cli: selfCommand(),
       plan: flags.plan,
+      review: flags.review,
       timeoutMinutes: flags.timeout === undefined ? runTimeoutMinutes(cwd, id) : positiveNumber("timeout", flags.timeout),
     });
     console.error(`✓ ${id} run ended: ${result.stopReason}; task is ${result.status}.`);
@@ -530,6 +535,7 @@ async function run(agentName: string | undefined, taskArg: string | undefined): 
   const session = await adapter.resume({
     cwd: workdir,
     here: flags.here,
+    allowAll: permissionMode(cwd) === "all",
     taskId,
     objective: getTask(cwd, taskId).objective,
     handoff: prompt,
@@ -873,7 +879,7 @@ function configCommand(): { command: string; args: string[] } {
 
 function gitTop(dir: string): string | null {
   try {
-    return execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+    return execFileSync(gitBinary(), ["rev-parse", "--show-toplevel"], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
   } catch {
     return null;
   }
@@ -946,6 +952,26 @@ function lead(agent?: string): void {
     const current = getLead(cwd);
     console.log(current ? `Lead agent: ${current}` : "No lead agent. Set one with: agentbrain lead <agent-id>");
   }
+}
+
+function permissions(mode?: string): void {
+  const cwd = root();
+  if (mode !== "all" && mode !== "ask") {
+    const current = permissionMode(cwd);
+    console.log(current === "all"
+      ? "Permissions: all. Agents AgentBrain starts run without asking (agentbrain permissions ask to undo)."
+      : "Permissions: ask. Each agent uses its own approval prompts (agentbrain permissions all to stop asking).");
+    return;
+  }
+  const result = setPermissionMode(cwd, mode);
+  if (mode === "all") {
+    console.log("✓ Permissions: all. Claude Code, Codex, Gemini, Cursor and Copilot CLI start in their own allow-everything mode;");
+    console.log("  headless runs allow every tool; background runs skip approvals and Codex's sandbox.");
+  } else {
+    console.log("✓ Permissions: ask. Agents use their own approval prompts again.");
+  }
+  if (result.vscode) console.log(`  Copilot in VS Code: ${mode === "all" ? "auto-approve on" : "auto-approve off"} in ${result.vscode}${result.worktrees ? ` and ${result.worktrees} task worktree(s)` : ""}`);
+  if (result.warning) console.log(`  ${result.warning}`);
 }
 
 function council(members: string[]): void {
@@ -1218,6 +1244,8 @@ async function main(): Promise<void> {
     await on();
   } else if (command === "off") {
     await off();
+  } else if (command === "permissions") {
+    permissions(subcommand);
   } else if (command === "lead") {
     lead(subcommand);
   } else if (command === "review") {
@@ -1233,6 +1261,11 @@ async function main(): Promise<void> {
     const message = sendMessage(cwd, { from: callerId() ?? "developer", to: subcommand, text, ...(flags.task ? { task: flags.task } : {}) });
     deliverToChat(cwd, message);
     console.log(`✓ Sent to ${message.to === "all" ? "everyone" : message.to}.`);
+  } else if (command === "context") {
+    // Exactly what every agent is given for a task, whichever tool it is.
+    const cwd = root();
+    const id = resolveTaskId(cwd, subcommand, undefined, process.cwd());
+    console.log(buildPrompt(cwd, id, cliCommand()));
   } else if (command === "recall") {
     const query = [subcommand, ...rest].filter(Boolean).join(" ");
     if (!query) throw new Error('Usage: agentbrain recall "<what you are looking for>"');
@@ -1255,4 +1288,5 @@ async function main(): Promise<void> {
   }
 }
 
+clearParentSession();
 main().catch(fail);

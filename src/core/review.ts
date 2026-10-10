@@ -2,13 +2,14 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { commitsSince } from "./git.js";
 import { brainDir } from "./paths.js";
 import { compilePatterns, redact } from "./redact.js";
 import type { ReviewCheck, ReviewFlag, ReviewVote, TaskState } from "./state.js";
 import { getProject, getTask, listTasks, readJson, saveProject, saveTask, writeJson } from "./store.js";
 import { mergeWorktree, taskWorkdir } from "./worktree.js";
+import { gitBinary } from "./platform.js";
 
 /**
  * Who decides whether finished work counts.
@@ -41,6 +42,9 @@ export interface ReviewPolicy {
   quorum: number;
   checks: string[];
 }
+
+/** The to-do a task gets when its approved branch conflicts with main. */
+export const CONFLICT_PREFIX = "Merge main into this branch and resolve the conflicts in";
 
 export function reviewPriority(task: Pick<TaskState, "review">): number {
   const priorities: Record<ReviewFlag["kind"], number> = {
@@ -171,7 +175,7 @@ export function gateFinish(root: string, task: TaskState, previous: TaskState["s
 
 function git(cwd: string, args: string[]): string {
   try {
-    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return execFileSync(gitBinary(), args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
   } catch {
     return "";
   }
@@ -187,10 +191,15 @@ function mentionedFiles(text: string): string[] {
  * Mentioned paths that aren't there. Only paths with a folder count: a bare
  * name ("Brain.md") is as likely a note, a generated file or a plan as a claim.
  */
-function missingFiles(workdir: string, text: string): string[] {
-  return mentionedFiles(text).filter(
-    (file) => file.includes("/") && !file.startsWith(".agentbrain/") && !fs.existsSync(path.join(workdir, file)),
-  );
+function missingFiles(workdir: string, text: string, root?: string): string[] {
+  // "src/a.ts/b.ts" is shorthand for two files in one folder, not one path.
+  const mentioned = mentionedFiles(text).flatMap((file) => {
+    const m = /^(.*\/)?([^/]+\.[a-z]+)\/([^/]+\.[a-z]+)$/.exec(file);
+    return m ? [`${m[1] ?? ""}${m[2]}`, `${m[1] ?? ""}${m[3]}`] : [file];
+  });
+  return mentioned.filter((file) => file.includes("/") && !file.startsWith(".agentbrain/") &&
+    // Files Git ignores (local config, state) exist in the main checkout but not in a task's worktree.
+    !fs.existsSync(path.join(workdir, file)) && !(root && fs.existsSync(path.join(root, file))));
 }
 
 function changedSinceBase(root: string, task: TaskState): boolean {
@@ -206,7 +215,9 @@ const CLAIMS_TESTS = /\b(tests?|specs?|ci|build|type-?check)\b[^.]*\b(pass|passe
 export function verifyClaims(root: string, task: TaskState, checks: ReviewCheck[]): ReviewFlag[] {
   const worker = task.review?.worker ?? task.agent?.id ?? "unknown";
   const workdir = taskWorkdir(root, task);
-  const claims = [...task.completed, ...task.decisions].join("\n");
+  // Only what the worker itself said counts against it: a planner's or reviewer's notes don't.
+  const own = new Set(readActivity(root, 2000).filter((e) => e.task === task.id && e.agent === worker && (e.kind === "decision" || e.kind === "progress")).map((e) => e.text.replace(/^Done: /, "")));
+  const claims = [...task.completed, ...task.decisions].filter((c) => own.size === 0 || own.has(c)).join("\n");
   const flags: ReviewFlag[] = [];
   const at = new Date().toISOString();
   if (!changedSinceBase(root, task)) {
@@ -216,7 +227,7 @@ export function verifyClaims(root: string, task: TaskState, checks: ReviewCheck[
   if (failed.length && CLAIMS_TESTS.test(claims)) {
     flags.push({ agent: worker, kind: "false-claim", text: `Claims checks pass, but AgentBrain's own run failed: ${failed.map((c) => c.command).join(", ")}.`, at });
   }
-  const missing = missingFiles(workdir, claims);
+  const missing = missingFiles(workdir, claims, root);
   if (missing.length) {
     flags.push({ agent: worker, kind: "hallucination", text: `Mentions files that do not exist: ${missing.join(", ")}.`, at });
   }
@@ -289,7 +300,10 @@ export function computeTally(root: string, task: TaskState): Tally {
   const policy = reviewPolicy(root);
   const worker = task.review?.worker;
   // Nobody reviews their own work.
-  const eligible = policy.reviewers.filter((r) => r !== worker);
+  let eligible = policy.reviewers.filter((r) => r !== worker);
+  // A stand-in decides in the lead's place, unless the lead votes after all.
+  const standIn = task.review?.standIn?.agent;
+  if (policy.mode === "lead" && standIn && standIn !== worker && !(task.review?.votes ?? []).some((v) => eligible.includes(v.agent))) eligible = [standIn];
   const weight = (id: string) => (policy.mode === "council" ? weightOf(root, id) : 1);
   const total = eligible.reduce((sum, id) => sum + weight(id), 0);
   const votes = (task.review?.votes ?? []).filter((v) => eligible.includes(v.agent));
@@ -317,8 +331,9 @@ export function pendingReviews(root: string): TaskState[] {
 
 /** Results this agent still has to vote on. */
 export function awaitingVote(root: string, agentId: string): TaskState[] {
-  if (!isReviewer(root, agentId)) return [];
+  const reviewer = isReviewer(root, agentId);
   return pendingReviews(root).filter((t) =>
+    (reviewer || t.review?.standIn?.agent === agentId) &&
     t.review?.worker !== agentId && !(t.review?.votes ?? []).some((v) => v.agent === agentId));
 }
 
@@ -345,7 +360,7 @@ export function reviewTask(
   task.review ??= { worker: task.agent?.id ?? "unknown", requestedAt: new Date().toISOString(), votes: [], checks: [], flags: [] };
   const notes = options.notes?.trim() ? redact(options.notes.trim(), compilePatterns(getProject(root).redactPatterns)) : undefined;
   if (options.verdict === "changes" && !notes) throw new Error("Say what needs to change (notes).");
-  const developer = !isReviewer(root, options.reviewer);
+  const developer = !isReviewer(root, options.reviewer) && task.review.standIn?.agent !== options.reviewer;
   if (!developer && options.reviewer === task.review.worker) throw new Error("You can't review your own work.");
 
   if (developer) return decide(root, task, options.verdict, `${options.reviewer} (override)`, notes);
@@ -363,7 +378,9 @@ export function reviewTask(
     agent: options.reviewer,
     task: task.id,
     kind: "review",
-    text: `Voted ${options.verdict === "approved" ? "approve" : "changes"} on ${task.review.worker}'s work (sealed until the others vote)`,
+    text: reviewPolicy(root).mode === "council"
+      ? `Voted ${options.verdict === "approved" ? "approve" : "changes"} on ${task.review.worker}'s work (sealed until the others vote)`
+      : `Reviewed ${task.review.worker}'s work: ${options.verdict === "approved" ? "approve" : "changes"}`,
   });
   return tally(root, task.id);
 }
@@ -400,8 +417,17 @@ function decide(
       const result = mergeWorktree(root, current.id);
       if (result.conflicts.length) {
         git(root, ["merge", "--abort"]);
+        // Approved but out of date: it goes back to be brought up to date (autopilot hands it on),
+        // instead of sitting in review where nobody would notice.
         const again = getTask(root, current.id);
-        recordActivity(root, { agent: "agentbrain", task: current.id, kind: "review", text: `Approved, but the branch conflicts with the main checkout (${result.conflicts.join(", ")}); merge aborted, still in review` });
+        const todo = `${CONFLICT_PREFIX} ${result.conflicts.join(", ")}`;
+        again.status = "handoff";
+        again.remaining = [todo, ...again.remaining.filter((r) => !r.startsWith(CONFLICT_PREFIX))];
+        again.nextAction = `${todo}, then set the task to review again (it was approved)`;
+        again.events = [...(again.events ?? []), { status: "handoff" as const, at: new Date().toISOString(), agent: "agentbrain" }].slice(-50);
+        delete again.review;
+        saveTask(root, again);
+        recordActivity(root, { agent: "agentbrain", task: current.id, kind: "review", text: `Approved, but the branch conflicts with main (${result.conflicts.join(", ")}); sent back to merge main and resolve them` });
         return { task: again, conflicts: result.conflicts, tally: t };
       }
       merged = result.merged;
@@ -442,15 +468,38 @@ function decide(
   }];
   delete current.review;
   saveTask(root, current);
+  if (outcome === "approved" && current.parent) closeFinishedPlan(root, current.parent);
+  // With a lead (or its stand-in) one reviewer decides: name it rather than a "council".
+  const mode = reviewPolicy(root).mode;
+  const decider = decidedBy !== "consensus" ? decidedBy.replace(/ \(override\)$/, "")
+    : mode === "council" ? "council" : (review.votes ?? []).at(-1)?.agent ?? "lead";
+  const how = decidedBy !== "consensus" ? `by ${decidedBy}` : mode === "council" ? "by consensus"
+    : review.standIn?.agent === decider ? `as stand-in for the lead (${review.standIn.why})` : "as the lead";
   recordActivity(root, {
-    agent: decidedBy === "consensus" ? "council" : decidedBy.replace(/ \(override\)$/, ""),
+    agent: decider,
     task: current.id,
     kind: "review",
     text: outcome === "approved"
-      ? `Approved ${review.worker}'s work by ${decidedBy}${merged ? `, merged ${merged} commit(s)` : ""}`
-      : `Sent ${review.worker}'s work back by ${decidedBy}: ${(notes ?? "").split("\n")[0]}`,
+      ? `Approved ${review.worker}'s work ${how}${merged ? `, merged ${merged} commit(s)` : ""}`
+      : `Sent ${review.worker}'s work back ${how}: ${(notes ?? "").split("\n")[0]}`,
   });
   return { task: current, outcome, merged, tally: t };
+}
+
+export function closeFinishedPlan(root: string, parentId: string): void {
+  const parent = getTask(root, parentId);
+  if (parent.status === "done" || parent.status === "failed") return;
+  const children = listTasks(root).filter((task) => task.parent === parentId);
+  if (!children.length || children.some((task) => task.status !== "done")) return;
+  parent.status = "done";
+  parent.decisions = [...parent.decisions, `All pieces done: ${children.map((task) => task.id).join(", ")}`];
+  saveTask(root, parent);
+  recordActivity(root, {
+    agent: "agentbrain",
+    task: parent.id,
+    kind: "status",
+    text: `Plan complete: all ${children.length} pieces done`,
+  });
 }
 
 /* ---------- what reviewers see ---------- */
@@ -495,7 +544,14 @@ export function reviewSummary(root: string, task: TaskState, viewer?: string): s
 /** Text for a reviewer's system prompt, or null when this agent doesn't review. */
 export function reviewerNotice(root: string, agentId: string): string | null {
   const policy = reviewPolicy(root);
-  if (!policy.reviewers.includes(agentId)) return null;
+  if (!policy.reviewers.includes(agentId)) {
+    const standing = awaitingVote(root, agentId);
+    if (!standing.length) return null;
+    return `You are standing in for the lead (${policy.reviewers[0] ?? "none"}) on ${standing.length} result(s):\n` +
+      standing.map((t) => `- ${t.id} by ${t.review?.worker ?? "unknown"} (${t.review?.standIn?.why}): ${t.objective}`).join("\n") +
+      "\nFor each: read the packet (agentbrain_brief with its task_id), check the diff and the claims yourself, then call " +
+      "agentbrain_review with verdict approve, or changes plus concrete notes.";
+  }
   const head = policy.mode === "lead"
     ? "You are the lead agent on this project: work by other agents waits for your review before it counts as done."
     : `You are on this project's review council (${policy.reviewers.join(", ")}). Work counts as done only when a quorum ` +
