@@ -14,7 +14,8 @@ import { runTui } from "../ui/tui.js";
 import { runConsole } from "../ui/console.js";
 import { claudeBinary, codexBinary, delegate, planGoal } from "../core/delegate.js";
 import { getLimits, runTimeoutMinutes, setLimits, effectiveLimits } from "../core/limits.js";
-import { runPrint } from "../core/printrun.js";
+import { printAgent, runPrint } from "../core/printrun.js";
+import { localModel, ollamaModels, setLocalModel, setupLocalModel } from "../core/ollama.js";
 import { connectConnector, detectConnectors, disconnectConnector } from "../core/connectors.js";
 import { clearParentSession, findTool, selfCommand as platformSelf, gitBinary } from "../core/platform.js";
 import { permissionMode, setPermissionMode } from "../core/permissions.js";
@@ -53,7 +54,7 @@ import { defaultNotificationSender, watchNotifications } from "../core/notify.js
 import { snapshot as liveSnapshot } from "../ui/model.js";
 
 const USAGE = `
-AgentBrain 0.13 — one console for every coding agent: delegate, review, remember
+AgentBrain 0.14 — one console for every coding agent: delegate, review, remember
 
 Control plane
   agentbrain on [--no-open]               Switch AgentBrain on for this repo, from any terminal or agent:
@@ -123,7 +124,8 @@ Switching agents
                                           Export a portable Markdown brief and history
   agentbrain run <agent> [task-id]        Launch a terminal agent on the task; auto-handoff on exit
   agentbrain run vscode [task-id] --here  Send the task to the VS Code chat you already have open (no new window)
-  agentbrain run claude-code|codex [task-id] --print
+  agentbrain run claude-code|codex|ollama [task-id] --print
+  agentbrain local [setup|<model>]        Local model through Ollama: show, set up, or choose
                                           Run Claude Code (claude -p) or Codex (codex exec) on the task, no window
   agentbrain run [task-id] --agent <id> -- <command> [args...]
                                           Launch any other agent ({prompt}, {prompt_file} expand)
@@ -480,12 +482,10 @@ async function run(agentName: string | undefined, taskArg: string | undefined): 
   if (flags.print) {
     // `run claude-code|codex [task] --print`: the agent CLI with no window (used by delegation).
     const cwd = root();
-    const id = agentName === "claude" ? "claude-code" : agentName;
-    const command = id === "claude-code" ? claudeBinary() : id === "codex" ? codexBinary() : null;
-    if (id !== "claude-code" && id !== "codex") throw new Error("--print works with claude-code or codex.");
-    if (!command) throw new Error(`${id} is not installed.`);
+    const agent = printAgent(agentName ?? "");
+    const id = agent.id;
     const taskId = resolveTaskId(cwd, taskArg, undefined, process.cwd());
-    const result = await runPrint(cwd, taskId, { id, command }, {
+    const result = await runPrint(cwd, taskId, agent, {
       cli: selfCommand(),
       plan: flags.plan,
       review: flags.review,
@@ -954,6 +954,26 @@ function lead(agent?: string): void {
   }
 }
 
+/** `agentbrain local [setup | <model>]`: the Ollama worker. */
+function local(arg?: string): void {
+  if (arg === "setup") {
+    const model = setupLocalModel(undefined, undefined, (line) => console.log(line));
+    console.log(`✓ Local model ready: ${model}. Delegation can now fall back to it when hosted agents are busy or out of quota.`);
+    return;
+  }
+  if (arg) {
+    const models = ollamaModels();
+    if (models && !models.some((m) => m === arg || m.replace(/:latest$/, "") === arg)) throw new Error(`Ollama has no model "${arg}". Pulled: ${models.join(", ") || "none"}`);
+    setLocalModel(arg);
+    console.log(`✓ Local model: ${arg}`);
+    return;
+  }
+  const models = ollamaModels();
+  if (models === null) return console.log("Ollama isn't running (or installed). Open the Ollama app, then: agentbrain local setup");
+  console.log(`Local model: ${localModel() ?? "none (agentbrain local setup)"}`);
+  console.log(`Pulled: ${models.join(", ") || "none"}`);
+}
+
 function permissions(mode?: string): void {
   const cwd = root();
   if (mode !== "all" && mode !== "ask") {
@@ -1246,6 +1266,8 @@ async function main(): Promise<void> {
     await off();
   } else if (command === "permissions") {
     permissions(subcommand);
+  } else if (command === "local") {
+    local(subcommand);
   } else if (command === "lead") {
     lead(subcommand);
   } else if (command === "review") {

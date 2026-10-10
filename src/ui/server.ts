@@ -1,3 +1,4 @@
+import { readActivity } from "../core/activity.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { requestStop, sendToSession } from "../core/headless.js";
@@ -14,7 +15,7 @@ import { standInSweep } from "../core/standin.js";
 import { rescueStalledChats } from "../core/rescue.js";
 import { sharedContext } from "../core/context.js";
 import { claudeBinary, codexBinary, delegate, setDefaultWorker } from "../core/delegate.js";
-import { runChat } from "../core/printrun.js";
+import { printAgent, runChat } from "../core/printrun.js";
 import { openUrl } from "../core/platform.js";
 import { connectConnector, detectConnectors, disconnectConnector } from "../core/connectors.js";
 
@@ -175,6 +176,11 @@ export async function startUiServer(
       }
       if (url.pathname === "/api/vault" && request.method === "GET") return json(response, vaultGraph(root));
       if (url.pathname === "/api/note" && request.method === "GET") return json(response, { id: url.searchParams.get("id"), markdown: readNote(root, url.searchParams.get("id") ?? "") });
+      if (url.pathname === "/api/activity" && request.method === "GET") {
+        // A task's whole feed history: the snapshot carries only the latest events.
+        const id = findTask(root, url.searchParams.get("task") ?? "").id;
+        return json(response, readActivity(root, 20_000).filter((e) => e.task === id).slice(-300));
+      }
       if (url.pathname === "/api/log" && request.method === "GET") return json(response, taskTimeline(root, url.searchParams.get("task") ?? ""));
       if (url.pathname === "/api/transcript" && request.method === "GET") {
         const session = findSession(root, url.searchParams.get("session") ?? "");
@@ -197,11 +203,9 @@ export async function startUiServer(
       if (request.method === "POST" && url.pathname === "/api/chat") {
         const body = JSON.parse(await readBody(request)) as { prompt?: string; worker?: string };
         if (!body.prompt?.trim()) throw new Error("Say something to chat about.");
-        if (body.worker !== "claude-code" && body.worker !== "codex") throw new Error("Chat mode supports Claude Code or Codex. Choose one in the model picker.");
-        const command = body.worker === "claude-code" ? claudeBinary() : codexBinary();
-        if (!command) throw new Error(`${body.worker} is not installed or signed in.`);
+        const agent = printAgent(body.worker ?? "");
         const output: string[] = [];
-        await runChat(root, { id: body.worker, command }, body.prompt.trim(), (text) => output.push(text));
+        await runChat(root, agent, body.prompt.trim(), (text) => output.push(text));
         return json(response, { ok: true, worker: body.worker, text: output.join("\n") });
       }
       if (request.method === "POST" && url.pathname === "/api/verify") {

@@ -225,6 +225,23 @@ Limits, stated plainly: reviewers built on the same model can share the same
 blind spot, so mix vendors in a council. Flags catch claims that can be checked
 mechanically, not every wrong answer.
 
+### A local model that never runs out
+
+Hosted agents hit usage limits. With [Ollama](https://ollama.com) installed and
+running, AgentBrain can hand work to a model on your own machine:
+
+```sh
+agentbrain local setup       # pulls qwen3:8b and makes agentbrain-qwen3 (32k context)
+agentbrain local             # shows the chosen model; `agentbrain local <model>` picks another
+```
+
+It runs through Claude Code's own CLI pointed at Ollama, so it gets exactly what
+Claude gets: the same task packet, the same AgentBrain MCP tools, the same vault,
+lessons and decisions, the same review. Only the model differs. It ranks below the
+hosted agents (a small model is slower and makes more mistakes, and the reviewer
+still has to approve its work), so it picks up when they're busy or out of quota
+and the work keeps moving. `@local …` sends a prompt to it directly.
+
 ### When a chat agent stalls
 
 Background runs that stop early are handed to the next agent by AgentBrain

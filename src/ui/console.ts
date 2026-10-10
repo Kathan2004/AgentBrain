@@ -29,7 +29,7 @@ import {
 } from "../core/review.js";
 import type { TaskState } from "../core/state.js";
 import { getProject, getTask, listSessions, listTasks, sessionAlive } from "../core/store.js";
-import { runChat } from "../core/printrun.js";
+import { printAgent, runChat } from "../core/printrun.js";
 import { openBrowser, startUiDaemon } from "./daemon.js";
 import { fit, visibleLength } from "./tui.js";
 
@@ -649,12 +649,11 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
       } else {
         const selected = choice === "auto" ? ready()[0]?.worker : ready().find((c) => c.worker.id === choice)?.worker;
         if (!selected) throw new Error("No selected model is ready. Use Shift+Tab or /worker to choose one.");
-        if (selected.id !== "claude-code" && selected.id !== "codex") throw new Error(`${selected.name} is a chat connector. Select Claude Code or Codex for root Chat mode.`);
-        const command = selected.id === "claude-code" ? claudeBinary() : codexBinary();
-        if (!command) throw new Error(`${selected.name} is not installed or signed in.`);
+        if (selected.how !== "print") throw new Error(`${selected.name} is a chat connector. Select Claude Code, Codex or the local model for root Chat mode.`);
+        const agent = printAgent(selected.id);
         const prompt = [...chatHistory, `Developer: ${line}`].join("\n");
         print([style.dim(`  ${selected.name} is thinking in Chat mode (project root)…`)]);
-        await runChat(root, { id: selected.id, command }, prompt, (text) => print(text.split("\n").map((part) => `  ${part}`)));
+        await runChat(root, agent, prompt, (text) => print(text.split("\n").map((part) => `  ${part}`)));
         chatHistory.push(`Developer: ${line}`);
       }
     } catch (error) {

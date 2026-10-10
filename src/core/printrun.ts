@@ -6,7 +6,8 @@ import { reviewSummary } from "./review.js";
 import { releaseStandIn } from "./standin.js";
 import { execFileSync } from "node:child_process";
 import { spawnPortable, gitBinary } from "./platform.js";
-import { autoContinue } from "./delegate.js";
+import { autoContinue, claudeBinary, codexBinary } from "./delegate.js";
+import { localModel, ollamaEnv } from "./ollama.js";
 import { recordActivity, type ActivityKind } from "./activity.js";
 import { describeTool } from "./claudehooks.js";
 import { sessionControl } from "./headless.js";
@@ -22,8 +23,33 @@ import { permissionMode } from "./permissions.js";
  * feed. However the run ends, the task is left handed off, in review, or done.
  */
 export interface PrintAgent {
-  id: "claude-code" | "codex";
+  /** "ollama" is Claude Code's CLI pointed at a local model. */
+  id: "claude-code" | "codex" | "ollama";
   command: string;
+  model?: string;
+  env?: Record<string, string>;
+}
+
+/** Claude Code's CLI drives both Claude and the local model. */
+const claudeCli = (id: string) => id === "claude-code" || id === "ollama";
+
+/**
+ * A local model reads Claude Code's whole prompt on every turn, and its full
+ * tool list and extras make that minutes per step. The core tools plus
+ * AgentBrain's MCP server (the packet, memory and progress) are all a task needs.
+ */
+const LOCAL_FLAGS = ["--bare", "--tools", "Bash", "Read", "Edit", "Write", "Glob", "Grep", "--strict-mcp-config", "--disable-slash-commands"];
+
+/** How to run a background-capable agent by id (claude or local accepted), or why it can't run. */
+export function printAgent(name: string): PrintAgent {
+  const id = name === "claude" ? "claude-code" : name === "local" ? "ollama" : name;
+  if (id !== "claude-code" && id !== "codex" && id !== "ollama") throw new Error(`${name} can't run in the background: use claude-code, codex or ollama.`);
+  const command = id === "codex" ? codexBinary() : claudeBinary();
+  if (!command) throw new Error(`${id === "ollama" ? "Claude Code (which drives the local model)" : id} is not installed.`);
+  if (id !== "ollama") return { id, command };
+  const model = localModel();
+  if (!model) throw new Error("No local model yet: run agentbrain local setup");
+  return { id, command, model, env: ollamaEnv(model) };
 }
 
 export async function runChat(
@@ -32,13 +58,13 @@ export async function runChat(
   prompt: string,
   onText: (text: string) => void,
 ): Promise<void> {
-  const args = agent.id === "claude-code"
-    ? ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits"]
+  const args = claudeCli(agent.id)
+    ? ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits", ...(agent.model ? ["--model", agent.model] : []), ...(agent.id === "ollama" ? LOCAL_FLAGS : [])]
     : ["exec", "--json", "-s", "workspace-write", "-C", root, "--skip-git-repo-check", "-"];
   const child = spawnPortable(agent.command, args, {
     cwd: root,
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, AGENTBRAIN_ROOT: root },
+    env: { ...process.env, ...agent.env, AGENTBRAIN_ROOT: root },
   });
   child.stdin!.on("error", () => {});
   child.stdin!.end(`You are in AgentBrain Chat mode. Work from the project root. You may inspect the repository, .agentbrain task state, and .agentbrain/vault memory directly. Do not create a task or worktree unless explicitly asked.\n\n${prompt}\n`);
@@ -127,34 +153,36 @@ You were started by AgentBrain with no developer at the keyboard; nobody will an
 - When the objective is complete and verified, set the task's status to review.`;
 
 function args(agent: PrintAgent, mcpFile: string, workdir: string, plan = false, allowAll = false, review = false): string[] {
-  if (agent.id === "claude-code" && review) {
+  if (claudeCli(agent.id)) return [...claudeArgs(mcpFile, plan, allowAll, review), ...(agent.model ? ["--model", agent.model] : []), ...(agent.id === "ollama" ? LOCAL_FLAGS : [])];
+  const model = codexModel();
+  const sandbox = plan || review ? ["-s", "read-only"] : allowAll ? ["--dangerously-bypass-approvals-and-sandbox"] : ["-s", "workspace-write"];
+  return ["exec", "--json", ...sandbox, "-C", workdir, "--skip-git-repo-check", ...(model ? ["-m", model] : []), "-"];
+}
+
+function claudeArgs(mcpFile: string, plan: boolean, allowAll: boolean, review: boolean): string[] {
+  if (review) {
     // Read and run the tests, nothing else: a reviewer that edits the work is no longer reviewing it.
     return ["-p", "--output-format", "stream-json", "--verbose", "--mcp-config", mcpFile,
       "--allowedTools", "mcp__agentbrain", "Read", "Grep", "Glob", "LS",
       "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git status:*)",
       "Bash(npm test:*)", "Bash(npm run:*)", "Bash(npx vitest:*)", "Bash(npx tsc:*)", "Bash(npx jest:*)", "Bash(pytest:*)", "Bash(go test:*)", "Bash(cargo test:*)", "Bash(make test:*)"];
   }
-  if (agent.id === "claude-code" && plan) {
+  if (plan) {
     // Read-only: AgentBrain's tools plus reading the code; anything else is refused in -p mode.
     return ["-p", "--output-format", "stream-json", "--verbose", "--mcp-config", mcpFile,
       "--allowedTools", "mcp__agentbrain", "Read", "Grep", "Glob", "LS"];
   }
-  if (agent.id === "claude-code") {
-    return [
-      // The prompt goes in on stdin: no command-line length limit, no shell quoting (Windows).
-      "-p",
-      "--output-format", "stream-json", "--verbose",
-      "--permission-mode", allowAll ? "bypassPermissions" : "acceptEdits",
-      "--mcp-config", mcpFile,
-      // Progress through AgentBrain; Git to commit; edits are already allowed by acceptEdits.
-      // Build and test runners too: an agent that can't run the tests can't verify its work.
-      "--allowedTools", "mcp__agentbrain", "Bash(agentbrain:*)", "Bash(git add:*)", "Bash(git commit:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
-      "Bash(npm:*)", "Bash(npx:*)", "Bash(node:*)", "Bash(pnpm:*)", "Bash(yarn:*)", "Bash(bun:*)", "Bash(pytest:*)", "Bash(python -m pytest:*)", "Bash(go test:*)", "Bash(go build:*)", "Bash(cargo test:*)", "Bash(cargo build:*)", "Bash(make:*)",
-    ];
-  }
-  const model = codexModel();
-  const sandbox = plan || review ? ["-s", "read-only"] : allowAll ? ["--dangerously-bypass-approvals-and-sandbox"] : ["-s", "workspace-write"];
-  return ["exec", "--json", ...sandbox, "-C", workdir, "--skip-git-repo-check", ...(model ? ["-m", model] : []), "-"];
+  return [
+    // The prompt goes in on stdin: no command-line length limit, no shell quoting (Windows).
+    "-p",
+    "--output-format", "stream-json", "--verbose",
+    "--permission-mode", allowAll ? "bypassPermissions" : "acceptEdits",
+    "--mcp-config", mcpFile,
+    // Progress through AgentBrain; Git to commit; edits are already allowed by acceptEdits.
+    // Build and test runners too: an agent that can't run the tests can't verify its work.
+    "--allowedTools", "mcp__agentbrain", "Bash(agentbrain:*)", "Bash(git add:*)", "Bash(git commit:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
+    "Bash(npm:*)", "Bash(npx:*)", "Bash(node:*)", "Bash(pnpm:*)", "Bash(yarn:*)", "Bash(bun:*)", "Bash(pytest:*)", "Bash(python -m pytest:*)", "Bash(go test:*)", "Bash(go build:*)", "Bash(cargo test:*)", "Bash(cargo build:*)", "Bash(make:*)",
+  ];
 }
 
 /** One feed line for a line of the agent's JSON output, or null. */
@@ -165,7 +193,7 @@ export function describeOutput(agentId: string, line: string, root: string): { k
   } catch {
     return null;
   }
-  if (agentId === "claude-code") {
+  if (claudeCli(agentId)) {
     const content = event?.type === "assistant" ? event.message?.content ?? [] : [];
     for (const part of content) {
       if (part?.type === "tool_use") return describeTool(String(part.name), part.input ?? {}, root);
@@ -198,7 +226,7 @@ async function drive(
   const child = spawnPortable(agent.command, argv, {
     cwd: workdir,
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, AGENTBRAIN_AGENT: me.id, AGENTBRAIN_SESSION: me.sessionId, AGENTBRAIN_TASK: taskId, AGENTBRAIN_ROOT: root },
+    env: { ...process.env, ...agent.env, AGENTBRAIN_AGENT: me.id, AGENTBRAIN_SESSION: me.sessionId, AGENTBRAIN_TASK: taskId, AGENTBRAIN_ROOT: root },
   });
   child.stdin!.on("error", () => {});
   child.stdin!.end(prompt);

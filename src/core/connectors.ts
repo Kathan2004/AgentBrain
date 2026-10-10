@@ -186,7 +186,7 @@ export const DEFS: Def[] = [
   { id: "warp", name: "Warp", kind: "app", capability: "pickup", find: app("Warp", "Warp", "warp-terminal"),
     manual: "In Warp: Settings → AI → MCP Servers → Add, command: agentbrain mcp" },
   { id: "ollama", name: "Ollama", kind: "app", capability: "none", find: app("Ollama", "Ollama", "ollama"),
-    note: "Runs local models but isn't a coding agent by itself; agents like Aider, OpenCode or Goose can use it." },
+    note: "A local model as a worker, through Claude Code's CLI and the same AgentBrain memory: agentbrain local setup." },
 
   // ---- IDE extensions
   { id: "copilot", name: "GitHub Copilot", kind: "extension", capability: "start", find: extension("github.copilot-chat", "github.copilot"),

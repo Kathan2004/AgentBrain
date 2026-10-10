@@ -14,6 +14,7 @@ import { limitReason } from "./limits.js";
 import type { TaskState } from "./state.js";
 import { getProject, getTask, listTasks, saveProject, saveTask } from "./store.js";
 import { addWorktree } from "./worktree.js";
+import { localModel, ollamaBinary, ollamaModels } from "./ollama.js";
 
 /**
  * Hands a prompt to an agent without opening anything new: the developer types
@@ -117,6 +118,23 @@ export function listWorkers(): Worker[] {
     ...(!codex ? { note: "not installed" } : codexOk ? {} : { note: `not signed in: run ${quote(codex)} login` }),
   });
 
+  // A local model through Ollama, driven by the same Claude Code harness: no quota, always there.
+  const ollama = ollamaBinary();
+  if (ollama) {
+    const models = ollamaModels();
+    const model = models ? localModel() : null;
+    const ready = Boolean(claude && model && models?.some((m) => m.replace(/:latest$/, "") === model));
+    workers.push({
+      id: "ollama",
+      name: model ? `Local model (${model})` : "Local model (Ollama)",
+      how: "print",
+      ...(claude ? { command: claude } : {}),
+      installed: true,
+      available: ready,
+      ...(ready ? {} : { note: !claude ? "needs Claude Code's CLI to drive it" : models === null ? "Ollama isn't running: open the Ollama app" : "no model yet: run agentbrain local setup" }),
+    });
+  }
+
   for (const def of ACP_AGENTS) {
     if (workers.some((w) => w.id === def.id && w.installed)) continue;
     const found = findTool(def.command);
@@ -150,7 +168,7 @@ export function workerName(id: string): string {
 
 /** Explicit "@agent" at the start of a prompt picks the worker. */
 const MENTIONS: Record<string, string> = {
-  claude: "claude-code", "claude-code": "claude-code", codex: "codex", copilot: "vscode", vscode: "vscode", gemini: "gemini",
+  claude: "claude-code", "claude-code": "claude-code", ollama: "ollama", local: "ollama", codex: "codex", copilot: "vscode", vscode: "vscode", gemini: "gemini",
   any: "any", cursor: "any", app: "any",
 };
 
@@ -239,6 +257,8 @@ export function rankWorkers(root: string, now = new Date()): WorkerChoice[] {
     // Background runs don't need anyone at the keyboard; a chat needs VS Code open;
     // waiting for an agent to be opened is the fallback when nothing can start now.
     if (worker.how === "print" || worker.how === "headless") score += 2;
+    // Free and unlimited, but a smaller model: the hosted agents go first while they have quota.
+    if (worker.id === "ollama") { score -= 8; reasons.push("local model: no quota, slower and less capable"); }
     if (worker.how === "pull") { score -= 20; reasons.push("waits until you open an agent on this repo: Claude app, Cursor, VS Code extensions"); }
     return { worker, score, reasons };
   }).sort((a, b) => b.score - a.score || a.worker.id.localeCompare(b.worker.id));
