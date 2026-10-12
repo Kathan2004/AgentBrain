@@ -360,6 +360,15 @@ Follow these steps from the root of the project you want agents to work on.
   agentbrain limits claude-code --none
   ```
 
+  AgentBrain notices usage limits in the agents it runs. For ones it can't see,
+  like Copilot inside VS Code, tell it, and no work goes to that agent:
+
+  ```bash
+  agentbrain limit copilot                      # out of quota until you clear it
+  agentbrain limit copilot --until "Nov 1 09:00"
+  agentbrain limit copilot --clear
+  ```
+
 8. **Watch the task live.**
 
    ```bash

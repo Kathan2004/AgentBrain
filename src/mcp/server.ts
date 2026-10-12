@@ -561,8 +561,20 @@ export class AgentBrainMcpServer {
   }
 
   private runTool(name: string, args: Record<string, any>): string {
+    // Smaller models send items as objects ({decision, reason}); keep their words, not "[object Object]".
+    const text = (item: unknown): string => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") {
+        const o = item as Record<string, unknown>;
+        const main = [o.text, o.decision, o.item, o.step, o.title, o.description, o.summary].find((v) => typeof v === "string") as string | undefined;
+        const why = [o.reason, o.why, o.because].find((v) => typeof v === "string") as string | undefined;
+        if (main) return why ? `${main} (${why})` : main;
+        return Object.values(o).filter((v) => typeof v === "string").join(": ") || JSON.stringify(item);
+      }
+      return String(item);
+    };
     const strings = (value: unknown): string[] | undefined =>
-      Array.isArray(value) ? value.map(String) : typeof value === "string" ? [value] : undefined;
+      Array.isArray(value) ? value.map(text).filter(Boolean) : typeof value === "string" ? [value] : value && typeof value === "object" ? [text(value)] : undefined;
 
     switch (name) {
       case "agentbrain_brief": {

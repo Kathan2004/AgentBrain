@@ -106,8 +106,9 @@ export function chatBrief(root: string, question: string, commitsToday = ""): st
     .filter((t) => t.status === "done" && (t.updatedAt ?? "") >= new Date(Date.now() - 24 * 3_600_000).toISOString())
     .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
     .slice(0, 12);
+  // Open tasks are what people ask about, so they keep more of their objective.
   const line = (t: (typeof tasks)[number]) =>
-    `- ${t.id} [${t.status}${t.agent ? `, ${t.agent}` : ""}] ${short(t.objective.split("\n")[0], 140)}${t.nextAction ? ` (next: ${short(t.nextAction, 80)})` : ""}`;
+    `- ${t.id} [${t.status}${t.agent ? `, ${t.agent}` : ""}] ${short(t.objective.split("\n")[0], t.status === "done" ? 140 : 400)}${t.nextAction ? ` (next: ${short(t.nextAction, 80)})` : ""}`;
   const events = readActivity(root, 1500)
     .filter((e) => e.at >= today && ["decision", "status", "commit", "review", "handoff"].includes(e.kind) && !/^[✓✗]/.test(e.text))
     .slice(-30);

@@ -27,13 +27,156 @@ export const initialState = (): TuiState => ({ selected: 0, view: "overview", sc
 // ---------------------------------------------------------------- text helpers
 
 const ESC = "\x1b[";
-const c = (code: string, text: string) => `${ESC}${code}m${text}${ESC}0m`;
+const c = (code: string, text: string) => (noColor() && code !== "1" && code !== "7" ? text : `${ESC}${code}m${text}${ESC}0m`);
 const dim = (t: string) => c("2", t);
 const bold = (t: string) => c("1", t);
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
 
 export function visibleLength(text: string): number {
   return [...text.replace(ANSI, "")].length;
+}
+
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI, "");
+}
+
+// ---------------------------------------------------------------- palette (same as the web control room)
+
+/** NO_COLOR (any value) turns colour off entirely; https://no-color.org */
+export function noColor(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.NO_COLOR !== undefined && env.NO_COLOR !== "";
+}
+
+export function colorMode(env: NodeJS.ProcessEnv = process.env): "none" | "truecolor" | "256" {
+  if (noColor(env)) return "none";
+  return /^(truecolor|24bit)$/i.test(env.COLORTERM ?? "") ? "truecolor" : "256";
+}
+
+function rgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.replace("#", ""), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** The nearest xterm-256 colour: the 6x6x6 cube or the grey ramp, whichever is closer. */
+export function to256(hex: string): number {
+  const [r, g, b] = rgb(hex);
+  const steps = [0, 95, 135, 175, 215, 255];
+  const near = (v: number) => steps.reduce((best, s, i) => (Math.abs(s - v) < Math.abs(steps[best] - v) ? i : best), 0);
+  const [ri, gi, bi] = [near(r), near(g), near(b)];
+  const cube = 16 + 36 * ri + 6 * gi + bi;
+  const cubeDist = (steps[ri] - r) ** 2 + (steps[gi] - g) ** 2 + (steps[bi] - b) ** 2;
+  const grey = Math.max(0, Math.min(23, Math.round(((r + g + b) / 3 - 8) / 10)));
+  const level = 8 + grey * 10;
+  const greyDist = (level - r) ** 2 + (level - g) ** 2 + (level - b) ** 2;
+  return greyDist < cubeDist ? 232 + grey : cube;
+}
+
+/** Paints text in a hex colour: truecolor when the terminal says so, else 256 colours, else nothing. */
+export function hexPaint(hex: string): (text: string) => string {
+  return (text) => {
+    const mode = colorMode();
+    if (mode === "none" || !text) return text;
+    const code = mode === "truecolor" ? `38;2;${rgb(hex).join(";")}` : `38;5;${to256(hex)}`;
+    return `${ESC}${code}m${text}${ESC}0m`;
+  };
+}
+
+export const HEX = {
+  text: "#ededed",
+  muted: "#a1a1a1",
+  faint: "#6b6b6b",
+  line: "#2a2a2a",
+  review: "#e8b84a",
+  running: "#3cc7bd",
+  waiting: "#f0883e",
+  failed: "#f2564c",
+  ok: "#3fb968",
+  done: "#b48cf2",
+} as const;
+
+export const ui = {
+  text: hexPaint(HEX.text),
+  muted: hexPaint(HEX.muted),
+  faint: hexPaint(HEX.faint),
+  line: hexPaint(HEX.line),
+  review: hexPaint(HEX.review),
+  running: hexPaint(HEX.running),
+  waiting: hexPaint(HEX.waiting),
+  failed: hexPaint(HEX.failed),
+  ok: hexPaint(HEX.ok),
+  done: hexPaint(HEX.done),
+  bold,
+};
+
+/** Agent colours from the web PALETTE, with the same hash, so an agent has one colour everywhere. */
+export const PALETTE = ["#a1a1aa", "#3fb968", "#b48cf2", "#e8b84a", "#f2564c", "#3cc7bd", "#f07ab4"];
+
+export function agentHex(id: string): string {
+  if (id === "developer" || id === "agentbrain" || id === "council") return HEX.text;
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+}
+
+export const agentPaint = (id: string) => hexPaint(agentHex(id));
+
+export interface StateTone {
+  /** What to call the state on a card. */
+  label: string;
+  hex: string;
+}
+
+/** One colour per state, as the web's status dots: review amber, running teal, waiting orange… */
+export function stateTone(task: { status: string; nextAction?: string; merged?: unknown }): StateTone {
+  switch (task.status) {
+    case "review":
+      return { label: "review", hex: HEX.review };
+    case "running":
+    case "checkpoint":
+      return { label: task.status, hex: HEX.running };
+    case "handoff":
+      return { label: "handoff", hex: HEX.waiting };
+    case "idle":
+      return { label: "waiting", hex: HEX.waiting };
+    case "blocked":
+    case "failed":
+      return { label: task.status, hex: HEX.failed };
+    case "done":
+      if (/^Closed/.test(task.nextAction ?? "")) return { label: "closed", hex: HEX.faint };
+      return task.merged ? { label: "merged", hex: HEX.ok } : { label: "done", hex: HEX.done };
+    default:
+      return { label: task.status, hex: HEX.muted };
+  }
+}
+
+/** A coloured ● for a task's state. */
+export function stateDot(task: { status: string; nextAction?: string; merged?: unknown }): string {
+  return hexPaint(stateTone(task).hex)("●");
+}
+
+/** The first sentence or clause of an objective, as the web's task titles. */
+export function shortTitle(objective: string): string {
+  let first = String(objective).split(/(?<=[.!?])\s|:\s|\n/)[0];
+  if (first.length > 90) first = `${first.slice(0, 87).replace(/\s+\S*$/, "")}…`;
+  return first;
+}
+
+/** Cuts styled text to `width` visible characters, ending in … when anything was cut. */
+export function ellipsize(text: string, width: number): string {
+  if (width <= 0) return "";
+  if (visibleLength(text) <= width) return text;
+  return `${fit(text, width - 1).replace(/ +$/, "")}…`;
+}
+
+/** Compact age: now, 5m, 3h, 2d. */
+export function age(iso: string | undefined, now = new Date()): string {
+  return ago(iso, now);
+}
+
+/** Local HH:MM of a timestamp. */
+export function hhmm(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 /** Truncates to `width` visible characters (keeping escape codes) and pads. */
@@ -53,7 +196,7 @@ export function fit(text: string, width: number): string {
     i += ch.length;
     visible++;
   }
-  return `${out}${ESC}0m${" ".repeat(Math.max(0, width - visible))}`;
+  return `${out}${out.includes("\x1b") ? `${ESC}0m` : ""}${" ".repeat(Math.max(0, width - visible))}`;
 }
 
 function wrap(text: string, width: number): string[] {
@@ -77,16 +220,6 @@ function wrap(text: string, width: number): string[] {
   return lines;
 }
 
-const STATUS_COLOR: Record<string, string> = {
-  running: "32",
-  handoff: "34",
-  review: "35",
-  done: "90",
-  blocked: "31",
-  failed: "31",
-  idle: "37",
-  checkpoint: "36",
-};
 
 const ACTIVITY_GLYPH: Record<string, string> = {
   session: "◉",
@@ -104,8 +237,8 @@ const ACTIVITY_GLYPH: Record<string, string> = {
 };
 
 function dot(task: LiveTask): string {
-  if (task.warning) return c("33", "●");
-  return c(STATUS_COLOR[task.status] ?? "37", "●");
+  if (task.warning) return ui.waiting("●");
+  return stateDot(task);
 }
 
 function ago(iso: string | undefined, now: Date): string {
@@ -138,7 +271,7 @@ export function detailLines(root: string, task: LiveTask, view: View, width: num
     case "overview": {
       const lines = [
         ...wrap(bold(task.objective), width),
-        `${c(STATUS_COLOR[task.status] ?? "37", task.status)}  ${dim("agent")} ${task.agent ?? "none"}  ${dim("id")} ${task.id}`,
+        `${hexPaint(stateTone(task).hex)(task.status)}  ${dim("agent")} ${task.agent ?? "none"}  ${dim("id")} ${task.id}`,
         task.worktree ? `${dim("worktree")} ${task.worktree.branch}` : `${dim("dir")} ${task.workdir}`,
         "",
       ];
@@ -246,6 +379,189 @@ function bodyLines(root: string, snap: Snapshot, selected: LiveTask | undefined,
   if (view === "review") return reviewLines(snap, width);
   if (view === "activity") return activityLines(snap, width);
   return selected ? detailLines(root, selected, view, width) : [dim("Nothing selected.")];
+}
+
+// ---------------------------------------------------------------- sidebar (the web control room's left column)
+
+/** What the main pane of the full-screen console shows, as the web's nav. */
+export type Pane = "tasks" | "activity" | "team";
+export const PANES: Pane[] = ["tasks", "activity", "team"];
+export const PANE_LABELS: Record<Pane, string> = { tasks: "Tasks", activity: "Activity", team: "Team" };
+
+export interface SidebarTask {
+  id: string;
+  objective: string;
+  status: string;
+  updatedAt?: string;
+  nextAction?: string;
+  merged?: unknown;
+  warning?: string | null;
+}
+
+export interface TeamMember {
+  id: string;
+  name: string;
+  /** Installed and ready. */
+  up: boolean;
+  lead?: boolean;
+}
+
+export interface TaskGroups<T> {
+  /** Waiting on the developer: review, handoff, blocked, failed (review first). */
+  needs: T[];
+  /** An agent is on it: running, checkpoint, idle. */
+  progress: T[];
+  /** Finished, newest first. */
+  recent: T[];
+}
+
+const NEEDS_YOU = ["review", "handoff", "blocked", "failed"];
+const WORKING = ["running", "checkpoint", "idle"];
+
+/** Splits tasks into the web sidebar's groups, keeping the given order inside a group. */
+export function groupTasks<T extends SidebarTask>(tasks: T[], recent = 8): TaskGroups<T> {
+  return {
+    needs: tasks.filter((t) => NEEDS_YOU.includes(t.status)).sort((a, b) => Number(b.status === "review") - Number(a.status === "review")),
+    progress: tasks.filter((t) => WORKING.includes(t.status)),
+    recent: tasks
+      .filter((t) => t.status === "done")
+      .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
+      .slice(0, recent),
+  };
+}
+
+/** The tasks in the order the sidebar shows them; the selection moves through this list. */
+export function sidebarOrder<T extends SidebarTask>(tasks: T[], recent = 8): T[] {
+  const g = groupTasks(tasks, recent);
+  return [...g.needs, ...g.progress, ...g.recent];
+}
+
+/**
+ * One sidebar row, exactly `width` wide: a marker, the state dot, the short title
+ * (faint once done) and the age right-aligned. A focused selection is inverted.
+ */
+export function sidebarRow(task: SidebarTask, width: number, now = new Date(), selected = false, focused = false): string {
+  const when = age(task.updatedAt, now);
+  const title = ellipsize(shortTitle(task.objective), Math.max(1, width - 5 - when.length));
+  const gap = Math.max(1, width - 4 - visibleLength(title) - when.length);
+  const paint = task.status === "done" ? ui.faint : ui.text;
+  const mark = selected ? ui.text("›") : " ";
+  const row = fit(`${mark}${task.warning ? ui.waiting("●") : stateDot(task)} ${selected ? bold(paint(title)) : paint(title)}${" ".repeat(gap)}${ui.faint(when)} `, width);
+  return selected && focused ? c("7", fit(stripAnsi(row), width)) : row;
+}
+
+export interface TaskList {
+  lines: string[];
+  /** Line index -> task id, for the rows that are tasks. */
+  rows: Map<number, string>;
+  /** Line of the selected task, or -1. */
+  selectedLine: number;
+}
+
+/** The grouped task list: "Needs you", "In progress", "Recent", each with its rows. */
+export function taskListLines(
+  tasks: SidebarTask[],
+  width: number,
+  options: { selectedId?: string; focused?: boolean; recent?: number; now?: Date } = {},
+): TaskList {
+  const g = groupTasks(tasks, options.recent);
+  const lines: string[] = [];
+  const rows = new Map<number, string>();
+  let selectedLine = -1;
+  const group = (title: string, list: SidebarTask[], always = false) => {
+    if (!list.length && !always) return;
+    if (lines.length) lines.push(fit("", width));
+    lines.push(fit(` ${bold(ui.muted(title))}${list.length ? ` ${ui.faint(String(list.length))}` : ""}`, width));
+    if (!list.length) lines.push(fit(`   ${ui.faint("Nothing finished yet.")}`, width));
+    for (const task of list) {
+      const selected = task.id === options.selectedId;
+      if (selected) selectedLine = lines.length;
+      rows.set(lines.length, task.id);
+      lines.push(sidebarRow(task, width, options.now, selected, options.focused));
+    }
+  };
+  if (!tasks.length) lines.push(fit(` ${ui.faint("No tasks yet.")}`, width));
+  else {
+    group("Needs you", g.needs);
+    group("In progress", g.progress);
+    group("Recent", g.recent, true);
+  }
+  return { lines, rows, selectedLine };
+}
+
+/** The window of `size` lines out of `total` that keeps `line` in view. */
+export function windowAround(total: number, size: number, line: number): number {
+  if (total <= size || line < 0) return 0;
+  return Math.max(0, Math.min(line - Math.floor(size / 3), total - size));
+}
+
+/** The team pinned under the sidebar: each worker's dot and name, LEAD on the lead, dim when unavailable. */
+export function teamBlock(team: TeamMember[], width: number): string[] {
+  if (!team.length) return [];
+  const lines = [fit(` ${bold(ui.muted("Team"))}`, width)];
+  for (const m of team) {
+    const badge = m.lead ? "LEAD" : "";
+    const name = ellipsize(m.name, Math.max(1, width - 5 - (badge ? badge.length + 1 : 0)));
+    const dotted = m.up ? agentPaint(m.id)("●") : ui.faint("○");
+    lines.push(fit(`  ${dotted} ${m.up ? ui.text(name) : ui.faint(name)}${badge ? ` ${ui.review(badge)}` : ""}`, width));
+  }
+  return lines;
+}
+
+export interface SidebarInput {
+  tasks: SidebarTask[];
+  team: TeamMember[];
+  pane: Pane;
+  selectedId?: string;
+  /** The sidebar has the keyboard: the selection is inverted. */
+  focused?: boolean;
+  /** How many done tasks Recent shows. */
+  recent?: number;
+  now?: Date;
+}
+
+export interface Sidebar {
+  /** Exactly `height` lines, each exactly `width` wide. */
+  lines: string[];
+  /** Sidebar line -> task id. */
+  rows: Map<number, string>;
+  /** Sidebar line -> nav item. */
+  nav: Map<number, Pane>;
+}
+
+/** The left column: nav, the grouped task list (scrolled to keep the selection in view), the team pinned at the bottom. */
+export function sidebarLines(input: SidebarInput, width: number, height: number): Sidebar {
+  const needs = groupTasks(input.tasks).needs.length;
+  const nav = new Map<number, Pane>();
+  const top: string[] = [];
+  for (const pane of PANES) {
+    nav.set(top.length, pane);
+    const on = pane === input.pane;
+    const count = pane === "tasks" && needs ? ui.review(String(needs)) : "";
+    const label = on ? `${ui.text("›")} ${bold(ui.text(PANE_LABELS[pane]))}` : `  ${ui.muted(PANE_LABELS[pane])}`;
+    const gap = Math.max(1, width - 2 - visibleLength(label) - visibleLength(count));
+    top.push(fit(` ${label}${" ".repeat(gap)}${count} `, width));
+  }
+  top.push(fit("", width));
+
+  let team = teamBlock(input.team, width);
+  if (height - top.length - team.length - 1 < 3) team = [];
+  const room = Math.max(0, height - top.length - (team.length ? team.length + 1 : 0));
+  const list = taskListLines(input.tasks, width, { selectedId: input.selectedId, focused: input.focused, recent: input.recent, now: input.now });
+  const from = windowAround(list.lines.length, room, list.selectedLine);
+  const body = list.lines.slice(from, from + room);
+  if (from > 0 && body.length) body[0] = fit(` ${ui.faint("↑ more")}`, width);
+  if (from + room < list.lines.length && body.length) body[body.length - 1] = fit(` ${ui.faint("↓ more")}`, width);
+
+  const rows = new Map<number, string>();
+  for (const [line, id] of list.rows) {
+    const at = line - from;
+    if (at >= 0 && at < body.length && !(at === 0 && from > 0) && !(at === body.length - 1 && from + room < list.lines.length)) rows.set(top.length + at, id);
+  }
+  const lines = [...top, ...body];
+  while (lines.length < height - (team.length ? team.length + 1 : 0)) lines.push(fit("", width));
+  if (team.length) lines.push(fit("", width), ...team);
+  return { lines: lines.slice(0, height), rows, nav };
 }
 
 // ---------------------------------------------------------------- frame

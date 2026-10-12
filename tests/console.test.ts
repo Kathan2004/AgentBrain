@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { delegate, listWorkers } from "../src/core/delegate.js";
 import { getTask, initStore } from "../src/core/store.js";
-import { FeedFormatter, connectorLines, inputBox, suggestions, welcomeBox } from "../src/ui/console.js";
+import { FeedFormatter, MarkdownStream, connectorLines, inputBox, markdownLines, railLine, suggestions, taskCard, userBubble, welcomeBox } from "../src/ui/console.js";
 import { visibleLength } from "../src/ui/tui.js";
 import { CLI, stubAgent, tempRepo } from "./helpers.js";
 
@@ -11,17 +11,35 @@ const FAKE = path.resolve("tests/fixtures/fake-acp-agent.mjs");
 const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
 describe("console rendering", () => {
-  it("draws the prompt box at exactly the terminal width, wrapping long input", () => {
+  it("draws a rounded prompt box at exactly the terminal width, wrapping long input inside it", () => {
     const empty = inputBox(60, "", 0);
-    expect(empty.lines.map(visibleLength)).toEqual([60]);
-    expect(plain(empty.lines[0])).toContain("Describe a task");
-    expect([empty.cursorRow, empty.cursorCol]).toEqual([0, 2]);
+    expect(empty.lines.map(visibleLength)).toEqual([60, 60, 60]);
+    expect(plain(empty.lines[0])).toBe(`╭${"─".repeat(58)}╮`);
+    expect(plain(empty.lines[1])).toMatch(/^│ Describe a task.* │$/);
+    expect(plain(empty.lines[2])).toBe(`╰${"─".repeat(58)}╯`);
+    expect([empty.cursorRow, empty.cursorCol]).toEqual([1, 2]);
 
     const long = "x".repeat(70);
     const box = inputBox(60, long, 70);
-    expect(box.lines).toHaveLength(2);
+    expect(box.lines).toHaveLength(4);
     expect(box.lines.every((l) => visibleLength(l) === 60)).toBe(true);
-    expect([box.cursorRow, box.cursorCol]).toEqual([1, 2 + (70 - 58)]);
+    expect(plain(box.lines[1])).toBe(`│ ${"x".repeat(56)} │`);
+    expect(plain(box.lines[2])).toBe(`│ ${"x".repeat(14).padEnd(56)} │`);
+    expect([box.cursorRow, box.cursorCol]).toEqual([2, 2 + (70 - 56)]);
+  });
+
+  it("puts the agent and mode pills under the box, with the hint right-aligned when it fits", () => {
+    const wide = inputBox(100, "", 0, { agent: "Codex", agentId: "codex", mode: "task" }).lines.map(plain);
+    expect(wide).toHaveLength(4);
+    expect(wide[3]).toMatch(/^ \[ Codex \] \[ Task · own worktree \] +shift\+tab agent · \/mode · \/ for commands $/);
+    expect(wide[3]).toHaveLength(100);
+    const chat = inputBox(80, "", 0, { agent: "Auto → Claude Code", agentId: "claude-code", mode: "chat" }).lines.map(plain);
+    expect(chat[1]).toContain("Ask anything");
+    expect(chat[3]).toContain("[ Auto → Claude Code ] [ Chat · project root ]");
+    expect([...chat[3]].length).toBeLessThanOrEqual(80);
+    const narrow = inputBox(30, "", 0, { agent: "Copilot (VS Code)", mode: "chat" }).lines;
+    expect(narrow.every((l) => visibleLength(l) <= 30)).toBe(true);
+    expect(plain(narrow[3]).endsWith("…")).toBe(true);
   });
 
   it("suggests slash commands while the command name is being typed", () => {
@@ -52,16 +70,120 @@ describe("console rendering", () => {
     expect(text).not.toContain("ChatGPT app");
   });
 
-  it("shows the welcome box with the worker and who decides", () => {
-    const text = welcomeBox(80, { root: "/tmp/x", worker: "Copilot (VS Code)", decides: "lead Claude Code", running: 1, review: 2 }).map(plain).join("\n");
-    expect(text).toContain("AgentBrain");
-    expect(text).not.toContain("╭");
-    expect(text).toContain("Copilot (VS Code)");
-    expect(text).toContain("2 to review");
+  it("lays out the welcome screen like the web's Tasks home, never wider than the terminal", () => {
+    const now = new Date("2026-10-11T12:00:00Z");
+    const ago = (m: number) => new Date(now.getTime() - m * 60_000).toISOString();
+    const info = {
+      root: "/tmp/shop",
+      now,
+      agentsActive: 2,
+      decides: "Lead: Claude Code",
+      checks: ["npm test"],
+      tasks: [
+        { id: "t1", status: "review", objective: "Add a login page. With tests.", updatedAt: ago(5) },
+        { id: "t2", status: "running", objective: "Fix the flaky rescue test", updatedAt: ago(30) },
+        { id: "t3", status: "handoff", objective: `Migrate ${"every table ".repeat(20)}`, updatedAt: ago(180) },
+        { id: "t4", status: "done", objective: "Document limits", updatedAt: ago(3000), merged: {} },
+      ],
+      team: [
+        { id: "claude-code", name: "Claude Code", up: true, lead: true },
+        { id: "vscode", name: "Copilot (VS Code)", up: false },
+      ],
+    };
+    for (const width of [80, 50]) {
+      const lines = welcomeBox(width, info);
+      expect(lines.every((l) => visibleLength(l) <= width)).toBe(true);
+    }
+    const lines = welcomeBox(80, info).map(plain);
+    expect(lines[0]).toBe(" AgentBrain  shop");
+    expect(lines[1]).toBe(" 1 to review · 1 running · 2 agents active · Lead: Claude Code · Checks: npm te…");
+    expect(plain(welcomeBox(100, info)[1])).toBe(" 1 to review · 1 running · 2 agents active · Lead: Claude Code · Checks: npm test");
+    const at = (title: string) => lines.findIndex((l) => l.startsWith(` ${title}`));
+    expect(at("Needs you")).toBeLessThan(at("In progress"));
+    expect(at("In progress")).toBeLessThan(at("Recent"));
+    expect(lines[at("Needs you") + 1]).toMatch(/^  ● Add a login page\. +5m$/);
+    expect(lines[at("Needs you") + 1]).toHaveLength(80);
+    const long = lines.find((l) => l.includes("Migrate"))!;
+    expect(long).toMatch(/… 3h$/);
+    expect(long).toHaveLength(80);
+    expect(lines[at("Recent") + 1]).toMatch(/^  ● Document limits +2d$/);
+    expect(lines.find((l) => l.startsWith(" Team"))).toBe(" Team  ● Claude Code LEAD  ○ Copilot (VS Code)");
+
+    const empty = welcomeBox(80, { ...info, tasks: [], checks: [], team: [] }).map(plain).join("\n");
+    expect(empty).toContain("Nothing to review.");
+    expect(empty).not.toContain("Checks:");
+    expect(empty).not.toContain("Team");
   });
 
-  it("groups an agent's events under one header and announces results ready for review", () => {
-    const feed = new FeedFormatter(() => "Add a login page");
+  it("right-aligns the developer's message in a rounded bubble", () => {
+    const bubble = userBubble("fix the login bug", 60).map(plain);
+    expect(bubble).toEqual([
+      `${" ".repeat(39)}╭───────────────────╮`,
+      `${" ".repeat(39)}│ fix the login bug │`,
+      `${" ".repeat(39)}╰───────────────────╯`,
+    ]);
+    const long = userBubble("word ".repeat(40), 60);
+    expect(long.length).toBeGreaterThan(3);
+    expect(long.every((l) => visibleLength(l) === 60)).toBe(true);
+  });
+
+  it("renders light markdown in replies: bold, code spans, fenced blocks in a box, bullets", () => {
+    const lines = markdownLines("Use **care** with `fit`:\n- one\n  - nested\n```ts\nconst x = 1;\n```\n# Done", 40);
+    const text = lines.map(plain);
+    expect(text[0]).toBe("  Use care with fit:");
+    expect(lines[0]).toContain("\x1b[1m");
+    expect(text[1]).toBe("  • one");
+    expect(text[2]).toBe("    • nested");
+    expect(text[3]).toBe(`  ╭─ ts ${"─".repeat(31)}╮`);
+    expect(text[4]).toBe(`  │ const x = 1;${" ".repeat(23)}│`);
+    expect(text[5]).toBe(`  ╰${"─".repeat(36)}╯`);
+    expect(text[6]).toBe("  Done");
+    expect(lines.slice(3, 6).every((l) => visibleLength(l) === 40)).toBe(true);
+
+    const wrapped = markdownLines(`- ${"word ".repeat(20)}`, 40).map(plain);
+    expect(wrapped.length).toBeGreaterThan(1);
+    expect(wrapped.every((l) => l.length <= 40)).toBe(true);
+    expect(wrapped[1].startsWith("    word")).toBe(true);
+
+    // Streamed replies: an unclosed fence is closed at the end.
+    const md = new MarkdownStream(40);
+    expect(md.push("```").map(plain)[0].startsWith("  ╭")).toBe(true);
+    expect(md.inFence).toBe(true);
+    expect(md.end().map(plain)[0].startsWith("  ╰")).toBe(true);
+  });
+
+  it("renders a task card with its state label coloured by state", () => {
+    const now = new Date("2026-10-11T12:00:00Z");
+    const task = { id: "task-1", status: "review", objective: "Add a login page. With tests.", updatedAt: new Date(now.getTime() - 300_000).toISOString() };
+    const card = taskCard(task, 80, { agent: "Codex", action: "Decide: /approve task-1", now });
+    expect(card.every((l) => visibleLength(l) <= 80)).toBe(true);
+    expect(plain(card[0])).toMatch(/^ ● Add a login page\. +review$/);
+    expect(visibleLength(card[0])).toBe(80);
+    expect(plain(card[1])).toBe("   task-1 · Codex · 5m ago");
+    expect(plain(card[2])).toBe("   Decide: /approve task-1");
+    const done = taskCard({ ...task, status: "done", merged: {} }, 80, { now });
+    expect(plain(done[0])).toMatch(/merged$/);
+  });
+
+  it("honours NO_COLOR and uses truecolor only when the terminal says so", () => {
+    const saved = { NO_COLOR: process.env.NO_COLOR, COLORTERM: process.env.COLORTERM };
+    const task = { id: "t", status: "review", objective: "x" };
+    try {
+      process.env.COLORTERM = "truecolor";
+      delete process.env.NO_COLOR;
+      expect(taskCard(task, 80)[0]).toContain("\x1b[38;2;232;184;74m●");
+      process.env.COLORTERM = "";
+      expect(taskCard(task, 80)[0]).toMatch(/\x1b\[38;5;\d+m●/);
+      process.env.NO_COLOR = "1";
+      const lines = [...taskCard(task, 80), ...inputBox(60, "", 0, { agent: "Codex", agentId: "codex", mode: "chat" }).lines, ...userBubble("hi", 40)];
+      expect(lines.join("\n")).not.toMatch(/\x1b\[(3|2m)/);
+    } finally {
+      for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+
+  it("shows feed events as rail lines with the task title when it fits, and announces results ready for review", () => {
+    const feed = new FeedFormatter(() => "Add a login page. With tests.", () => 80);
     const at = "2026-10-09T07:00:00Z";
     const lines = [
       ...feed.format({ at, agent: "vscode", task: "t1", kind: "edit", text: "Edited src/login.tsx" }),
@@ -69,11 +191,18 @@ describe("console rendering", () => {
       ...feed.format({ at, agent: "vscode", task: "t1", kind: "tool", text: "Read src/a.ts" }),
       ...feed.format({ at, agent: "vscode", task: "t1", kind: "status", text: "running → review: Add a login page" }),
     ].map(plain);
-    expect(lines.filter((l) => l.startsWith("Copilot (VS Code)"))).toHaveLength(1);
-    expect(lines).toContain("    + Edited src/login.tsx");
-    expect(lines).toContain("    $ npm test");
+    expect(lines[0]).toBe("");
+    expect(lines[1]).toMatch(/^● Copilot \(VS Code\) \d\d:\d\d  \+ Edited src\/login\.tsx · Add a login page\.$/);
+    expect(lines[2]).toMatch(/^● Copilot \(VS Code\) \d\d:\d\d  \$ npm test · Add a login page\.$/);
     expect(lines.join("\n")).not.toContain("Read src/a.ts");
-    expect(lines.join("\n")).toContain("Ready for review · Add a login page");
+    expect(lines.join("\n")).toContain("Ready for review · Add a login page.");
+    expect(lines.every((l) => l.length <= 80)).toBe(true);
+
+    // The title is dropped, not wrapped, when the event fills the line.
+    const tight = plain(railLine("codex", at, "x".repeat(60), "A title", 70));
+    expect(tight).not.toContain("A title");
+    expect(tight).toHaveLength(70);
+    expect(tight.endsWith("…")).toBe(true);
   });
 });
 

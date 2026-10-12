@@ -332,7 +332,7 @@ export function pendingReviews(root: string): TaskState[] {
 /** Results this agent still has to vote on. */
 export function awaitingVote(root: string, agentId: string): TaskState[] {
   const reviewer = isReviewer(root, agentId);
-  return pendingReviews(root).filter((t) =>
+  return pendingReviews(root).filter((t) => !t.review?.pendingMerge &&
     (reviewer || t.review?.standIn?.agent === agentId) &&
     t.review?.worker !== agentId && !(t.review?.votes ?? []).some((v) => v.agent === agentId));
 }
@@ -341,6 +341,8 @@ export interface ReviewResult {
   task: TaskState;
   /** Set once the votes decide (or the developer overrides). */
   outcome?: "approved" | "changes";
+  /** Approved, but waiting for the main checkout to be clean before merging. */
+  pendingMerge?: string;
   merged?: number;
   conflicts?: string[];
   tally?: Tally;
@@ -414,7 +416,22 @@ function decide(
   if (outcome === "approved") {
     if (current.worktree) {
       saveTask(root, current);
-      const result = mergeWorktree(root, current.id);
+      let result: ReturnType<typeof mergeWorktree>;
+      try {
+        result = mergeWorktree(root, current.id);
+      } catch (error) {
+        const why = error instanceof Error ? error.message : String(error);
+        if (!why.startsWith("Can't merge yet")) throw error;
+        // The approval stands: someone's uncommitted work in the main checkout is in the way,
+        // not the result. AgentBrain merges by itself once it's committed (retryPendingMerges).
+        const waiting = getTask(root, current.id);
+        const first = !waiting.review?.pendingMerge;
+        waiting.review = { ...review, pendingMerge: { by: decidedBy, ...(notes ? { notes } : {}), at: new Date().toISOString(), why } };
+        waiting.nextAction = `Approved; merges by itself once the main checkout's uncommitted changes are committed (${why.replace(/^Can't merge yet: /, "").split(" uncommitted")[0]})`;
+        saveTask(root, waiting, "agentbrain");
+        if (first) recordActivity(root, { agent: "agentbrain", task: current.id, kind: "review", text: `Approved by ${decidedBy.replace(/ \(override\)$/, "")}; waiting to merge: ${why.replace(/^Can't merge yet: /, "")}` });
+        return { task: waiting, tally: t, pendingMerge: why };
+      }
       if (result.conflicts.length) {
         git(root, ["merge", "--abort"]);
         // Approved but out of date: it goes back to be brought up to date (autopilot hands it on),
@@ -562,4 +579,19 @@ export function reviewerNotice(root: string, agentId: string): string | null {
     waiting.map((t) => `- ${t.id} by ${t.review?.worker ?? t.agent?.id ?? "unknown"}: ${t.objective}`).join("\n") +
     "\nFor each: read the packet (agentbrain_brief with its task_id), check the diff and the claims yourself, then call " +
     "agentbrain_review with verdict approve, or changes plus concrete notes.";
+}
+
+/**
+ * Merges approved results that were waiting for the main checkout to be clean.
+ * Runs with the control room's sweeps; returns the ids it merged.
+ */
+export function retryPendingMerges(root: string): string[] {
+  const merged: string[] = [];
+  for (const task of listTasks(root)) {
+    const pending = task.status === "review" ? task.review?.pendingMerge : undefined;
+    if (!pending) continue;
+    const result = decide(root, task, "approved", pending.by, pending.notes);
+    if (!result.pendingMerge && result.task.status === "done") merged.push(task.id);
+  }
+  return merged;
 }

@@ -6,7 +6,7 @@ import { recordActivity } from "../src/core/activity.js";
 import { setLead } from "../src/core/review.js";
 import { getTask, saveTask } from "../src/core/store.js";
 import { snapshot } from "../src/ui/model.js";
-import { fit, handleKey, initialState, parseInput, renderFrame, visibleLength } from "../src/ui/tui.js";
+import { PALETTE, agentHex, colorMode, ellipsize, fit, handleKey, initialState, parseInput, renderFrame, shortTitle, stateTone, stripAnsi, to256, visibleLength } from "../src/ui/tui.js";
 import { ab, readJson, tempRepo } from "./helpers.js";
 
 const plain = (lines: string[]) => lines.map((l) => l.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")).join("\n");
@@ -166,6 +166,38 @@ describe("terminal live view", () => {
   it("fits styled text to a width", () => {
     expect(visibleLength(fit("\x1b[1mhello world\x1b[0m", 5))).toBe(5);
     expect(visibleLength(fit("hi", 5))).toBe(5);
+  });
+
+  it("cuts styled text with an ellipsis only when it is too long", () => {
+    expect(ellipsize("short", 10)).toBe("short");
+    expect(stripAnsi(ellipsize("\x1b[1mhello world\x1b[0m", 8))).toBe("hello w…");
+    expect(visibleLength(ellipsize("\x1b[1mhello world\x1b[0m", 8))).toBe(8);
+  });
+
+  it("shares the web's palette: one colour per state, stable agent colours, short titles", () => {
+    expect(colorMode({ COLORTERM: "truecolor" })).toBe("truecolor");
+    expect(colorMode({ COLORTERM: "24bit" })).toBe("truecolor");
+    expect(colorMode({})).toBe("256");
+    expect(colorMode({ NO_COLOR: "1", COLORTERM: "truecolor" })).toBe("none");
+    expect(to256("#ededed")).toBe(255);
+    expect(to256("#000000")).toBe(16);
+    expect(to256("#3fb968")).toBeGreaterThanOrEqual(16);
+
+    expect(stateTone({ status: "review" }).hex).toBe("#e8b84a");
+    expect(stateTone({ status: "running" }).hex).toBe("#3cc7bd");
+    expect(stateTone({ status: "handoff" }).hex).toBe("#f0883e");
+    expect(stateTone({ status: "failed" }).hex).toBe("#f2564c");
+    expect(stateTone({ status: "done", merged: {} })).toEqual({ label: "merged", hex: "#3fb968" });
+    expect(stateTone({ status: "done" })).toEqual({ label: "done", hex: "#b48cf2" });
+    expect(stateTone({ status: "done", nextAction: "Closed by the developer" }).label).toBe("closed");
+
+    expect(PALETTE).toContain(agentHex("codex"));
+    expect(agentHex("codex")).toBe(agentHex("codex"));
+    expect(agentHex("developer")).toBe("#ededed");
+
+    expect(shortTitle("Add a login page. With tests.")).toBe("Add a login page.");
+    expect(shortTitle("Console: redesign it")).toBe("Console");
+    expect(shortTitle("word ".repeat(40)).endsWith("…")).toBe(true);
   });
 
   it("stacks the list above the details in narrow terminals", () => {

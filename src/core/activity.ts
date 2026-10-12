@@ -19,7 +19,9 @@ export type ActivityKind =
   | "progress"
   | "handoff"
   | "review"
-  | "message";
+  | "message"
+  /** What the agent says it is doing and why, in its own words. */
+  | "thought";
 
 export interface ActivityEvent {
   at: string;

@@ -258,6 +258,9 @@ describe("approving while someone else works in the main checkout", () => {
     commitIn(second.wt, "README.md", "from the task\n");
     updateTask(second.repo, second.task.id, { status: "done", agent: worker("vscode") });
     fs.writeFileSync(path.join(second.repo, "README.md"), "local edit\n");
-    expect(() => reviewTask(second.repo, second.task.id, { verdict: "approved", reviewer: "claude-code" })).toThrow(/README\.md has uncommitted changes/);
+    // The approval stands and names the files; it merges once they're committed.
+    const waiting = reviewTask(second.repo, second.task.id, { verdict: "approved", reviewer: "claude-code" });
+    expect(waiting.pendingMerge).toMatch(/README\.md has uncommitted changes/);
+    expect(waiting.task.status).toBe("review");
   });
 });

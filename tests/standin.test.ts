@@ -133,3 +133,27 @@ describe("results that changed nothing", () => {
     expect(standInReason(repo, getTask(repo, id), new Date(Date.now() + 60 * 60_000))).toBeNull();
   });
 });
+
+describe("approved while the main checkout is busy", () => {
+  it("keeps the approval and merges once the overlapping change is committed", async () => {
+    const { retryPendingMerges } = await import("../src/core/review.js");
+    const { repo, id } = submitted("codex", "vscode");
+    // The developer is editing the same file in the main checkout, uncommitted.
+    // (Main gets the same file the branch adds, so the merge itself is clean.)
+    fs.writeFileSync(path.join(repo, "greet.ts"), "export const hi = 1;\n");
+    execFileSync("git", ["add", "greet.ts"], { cwd: repo });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base greet"], { cwd: repo });
+    fs.writeFileSync(path.join(repo, "greet.ts"), "export const hi = 9;\n");
+    const result = reviewTask(repo, id, { verdict: "approved", reviewer: "codex" });
+    expect(result.pendingMerge).toMatch(/greet\.ts/);
+    expect(getTask(repo, id).status).toBe("review");
+    expect(getTask(repo, id).review?.pendingMerge?.by).toBeTruthy();
+    expect(awaitingVote(repo, "codex")).toEqual([]);
+    // Still busy: nothing happens.
+    expect(retryPendingMerges(repo)).toEqual([]);
+    // The developer throws the edit away; the approved result merges by itself.
+    execFileSync("git", ["checkout", "--", "greet.ts"], { cwd: repo });
+    expect(retryPendingMerges(repo)).toEqual([id]);
+    expect(getTask(repo, id).status).toBe("done");
+  });
+});

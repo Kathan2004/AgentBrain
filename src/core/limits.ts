@@ -49,3 +49,29 @@ export function limitReason(root: string, agentId: string, now = new Date()): st
 export function runTimeoutMinutes(root: string, agentId: string): number | undefined {
   return effectiveLimits(getProject(root), agentId).maxRunMinutes;
 }
+/**
+ * Marks an agent as out of quota until a date (or until cleared). For limits
+ * AgentBrain can't read from the agent's own output, like Copilot in VS Code.
+ */
+export function markOutOfQuota(root: string, agentId: string, until?: Date): void {
+  if (until && Number.isNaN(until.getTime())) throw new Error("That date isn't valid.");
+  const project = getProject(root);
+  project.outOfQuota = { ...(project.outOfQuota ?? {}), [agentId]: { at: new Date().toISOString(), ...(until ? { until: until.toISOString() } : {}) } };
+  saveProject(root, project);
+}
+
+export function clearOutOfQuota(root: string, agentId: string): void {
+  const project = getProject(root);
+  if (!project.outOfQuota?.[agentId]) return;
+  delete project.outOfQuota[agentId];
+  if (!Object.keys(project.outOfQuota).length) delete project.outOfQuota;
+  saveProject(root, project);
+}
+
+/** Why the agent counts as out of quota right now, if the developer said so. */
+export function quotaReason(root: string, agentId: string, now = new Date()): string | undefined {
+  const mark = getProject(root).outOfQuota?.[agentId];
+  if (!mark) return undefined;
+  if (mark.until && new Date(mark.until) <= now) return undefined;
+  return mark.until ? `out of quota until ${new Date(mark.until).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} (you said so)` : "out of quota (you said so; agentbrain limit <agent> --clear when it's back)";
+}

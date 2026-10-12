@@ -6,11 +6,11 @@ import path from "node:path";
 import { findOnPath } from "../adapters/process.js";
 import { ACP_AGENTS, builtinAdapter } from "../adapters/registry.js";
 import { createTask } from "./actions.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { brainDir } from "./paths.js";
 import { readReputation } from "./review.js";
 import { agentRecords, LIMIT_WINDOW_HOURS } from "./routing.js";
-import { limitReason } from "./limits.js";
+import { limitReason, quotaReason } from "./limits.js";
 import type { TaskState } from "./state.js";
 import { getProject, getTask, listTasks, saveProject, saveTask } from "./store.js";
 import { addWorktree } from "./worktree.js";
@@ -167,7 +167,7 @@ export function workerName(id: string): string {
 }
 
 /** Explicit "@agent" at the start of a prompt picks the worker. */
-const MENTIONS: Record<string, string> = {
+export const MENTIONS: Record<string, string> = {
   claude: "claude-code", "claude-code": "claude-code", ollama: "ollama", local: "ollama", codex: "codex", copilot: "vscode", vscode: "vscode", gemini: "gemini",
   any: "any", cursor: "any", app: "any",
 };
@@ -216,7 +216,7 @@ export function rankWorkers(root: string, now = new Date()): WorkerChoice[] {
     if (!worker.available) {
       return { worker, score: -1e9, reasons: [worker.note ?? "not available"] };
     }
-    const limited = limitReason(root, worker.id, now);
+    const limited = limitReason(root, worker.id, now) ?? quotaReason(root, worker.id, now);
     if (limited) {
       worker.available = false;
       worker.note = limited;
@@ -298,6 +298,13 @@ export interface DelegateResult {
  * separate AgentBrain process so the caller never blocks on the agent; its
  * outcome shows up in the activity feed and task state.
  */
+/** What the developer last asked an agent (in the past two hours), when that agent delegates: the words behind its brief. */
+export function developerRequest(root: string, agentId: string, now = Date.now()): string | undefined {
+  if (agentId === "developer" || agentId === "agentbrain") return undefined;
+  const asked = readActivity(root, 400).filter((e) => e.kind === "prompt" && e.agent === agentId && now - Date.parse(e.at) < 2 * 3_600_000);
+  return asked.at(-1)?.text;
+}
+
 export function delegate(
   root: string,
   input: { prompt?: string; taskId?: string; worker?: string; parent?: string; requestedBy?: string; why?: string },
@@ -324,7 +331,8 @@ export function delegate(
 
   let task = input.taskId ? getTask(root, input.taskId) : createTask(root, mention.prompt ?? "", { activate: !input.parent });
   if (!input.taskId && (input.parent || input.requestedBy)) {
-    task = { ...task, ...(input.parent ? { parent: input.parent } : {}), ...(input.requestedBy ? { requestedBy: input.requestedBy } : {}) };
+    const request = input.requestedBy ? developerRequest(root, input.requestedBy) : undefined;
+    task = { ...task, ...(input.parent ? { parent: input.parent } : {}), ...(input.requestedBy ? { requestedBy: input.requestedBy } : {}), ...(request ? { request } : {}) };
     saveTask(root, task);
   }
   task.delegatedTo = { worker: worker.id, at: new Date().toISOString() };

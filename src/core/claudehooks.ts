@@ -1,13 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { recordActivity, type ActivityKind } from "./activity.js";
+import { latestThought } from "./thoughts.js";
 import { findRoot } from "./paths.js";
 import { compilePatterns, redact } from "./redact.js";
 import { takeUnread } from "./messages.js";
 import { changesSince, sharedContext } from "./context.js";
 import { awaitingVote, isReviewer } from "./review.js";
 import { SCHEMA_VERSION, type AgentSessionState } from "./state.js";
-import { getProject, getSession, getTask, listTasks, saveSession, saveTask } from "./store.js";
+import { getProject, getSession, getTask, listTasks, openActiveTaskId, saveSession, saveTask } from "./store.js";
 import { taskForDir } from "./worktree.js";
 
 /**
@@ -88,6 +89,7 @@ export interface ClaudeHookPayload {
   source?: string;
   reason?: string;
   stop_hook_active?: boolean;
+  transcript_path?: string;
 }
 
 /** The real path, resolving the nearest folder that exists (the file may not exist yet). */
@@ -150,10 +152,11 @@ export function describeTool(name: string, input: Record<string, any> = {}, root
 function sessionTask(root: string, cwd: string, session: AgentSessionState | null): string | undefined {
   const here = taskForDir(root, cwd);
   if (here) return here.id;
-  if (session?.taskId) return session.taskId;
+  // A finished task isn't what the session is doing now: its later work stays untagged.
+  if (session?.taskId && listTasks(root).some((t) => t.id === session.taskId && t.status !== "done")) return session.taskId;
   const owned = listTasks(root).filter((t) => t.status === "running" && t.agent?.id === AGENT);
   if (owned.length === 1) return owned[0].id;
-  return getProject(root).activeTaskId;
+  return openActiveTaskId(root);
 }
 
 function reviewList(root: string): string {
@@ -179,10 +182,20 @@ export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = proce
       recordActivity(root, { agent: AGENT, session: sessionId, ...(taskId ? { task: taskId } : {}), kind, text: redact(text, patterns), ...(files ? { files } : {}) });
 
     let lastAction = existing?.lastAction;
+    let lastThought = existing?.lastThought;
     let activity: AgentSessionState["activity"] = existing?.activity ?? "idle";
     let endedAt: string | undefined;
     let output = "";
     const isLead = isReviewer(root, AGENT);
+
+    if (event === "PostToolUse" || event === "Stop") {
+      // The reason behind what Claude does next, in its own words, once per new explanation.
+      const said = latestThought(payload.transcript_path);
+      if (said && said !== existing?.lastThought) {
+        note("thought", said);
+        lastThought = said;
+      }
+    }
 
     if (event === "SessionStart") {
       note("session", `Claude Code session ${payload.source === "resume" ? "resumed" : "started"}`);
@@ -193,7 +206,11 @@ export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = proce
       }
     } else if (event === "UserPromptSubmit") {
       const text = String(payload.prompt ?? "").replace(/\s+/g, " ").trim();
-      note("prompt", text.length > 200 ? `${text.slice(0, 200)}…` : text);
+      // A run AgentBrain started gets AgentBrain's brief as its prompt: that's a hand-off, not the developer asking.
+      if (process.env.AGENTBRAIN_SESSION || /^You are (starting|continuing) AgentBrain task/.test(text)) {
+        const verb = /^You are continuing/.test(text) ? "Handed back to" : "Started";
+        recordActivity(root, { agent: "agentbrain", ...(taskId ? { task: taskId } : {}), kind: "handoff", text: `${verb} Claude Code with the task's brief` });
+      } else note("prompt", text.length > 200 ? `${text.slice(0, 200)}…` : text);
       activity = "working";
       lastAction = "Thinking about a new prompt";
       if (isLead && awaitingVote(root, AGENT).length) {
@@ -267,6 +284,7 @@ export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = proce
       lastSeenAt: now,
       activity,
       ...(lastAction ? { lastAction } : {}),
+      ...(lastThought ? { lastThought } : {}),
     });
     return output;
   } catch {

@@ -1,19 +1,17 @@
 /**
- * `agentbrain` with no arguments: the AgentBrain console. It looks and works
- * like an agent CLI — a welcome box, a transcript, and a prompt box at the
- * bottom — but what you type is delegated: each prompt becomes a task that an
- * agent picks up, and the console streams what the agents do, brings finished
- * work back for review, and takes slash commands for everything else.
+ * `agentbrain` with no arguments: the AgentBrain console. In a TTY it is a
+ * full-screen split-pane room (sidebar + main pane + compose box) matching the
+ * web control room; without a TTY the CLI usage text is printed instead.
  *
  * Rendering helpers are pure (exported for tests); runConsole does the I/O.
  */
 import fs from "node:fs";
-import os from "node:os";
+import path from "node:path";
 import readline from "node:readline";
-import { activityFile, type ActivityEvent } from "../core/activity.js";
+import { activityFile, readActivity, type ActivityEvent } from "../core/activity.js";
 import { connectConnector, detectConnectors, disconnectConnector, type Capability, type Connector, type ConnectorKind } from "../core/connectors.js";
 import { claudeBinary, codexBinary, delegate, deliverToChat, planGoal, rankWorkers, setDefaultWorker } from "../core/delegate.js";
-import { sessionControl } from "../core/headless.js";
+import { requestStop, sendToSession, sessionControl } from "../core/headless.js";
 import { sendMessage } from "../core/messages.js";
 import {
   computeTally,
@@ -29,26 +27,49 @@ import {
 } from "../core/review.js";
 import type { TaskState } from "../core/state.js";
 import { getProject, getTask, listSessions, listTasks, sessionAlive } from "../core/store.js";
+import { snapshot, sessionPresent } from "./model.js";
+import { openInEditor } from "./open.js";
+import { taskWorkdir } from "../core/worktree.js";
 import { printAgent, runChat } from "../core/printrun.js";
 import { chatBrief } from "../core/context.js";
 import { openBrowser, startUiDaemon } from "./daemon.js";
-import { fit, visibleLength } from "./tui.js";
+import {
+  age,
+  agentPaint,
+  colorMode,
+  ellipsize,
+  fit,
+  hexPaint,
+  hhmm,
+  NARROW,
+  PANES,
+  shortTitle,
+  sidebarLines,
+  sidebarOrder,
+  stateDot,
+  stateTone,
+  ui,
+  visibleLength,
+  type Pane,
+} from "./tui.js";
 
 // ---------------------------------------------------------------- styling
 
 const ESC = "\x1b[";
-const paint = (code: string) => (text: string) => `${ESC}${code}m${text}${ESC}0m`;
+/** The control room's graphite palette; colour follows COLORTERM and NO_COLOR when painted. */
 export const style = {
-  dim: paint("2"),
-  bold: paint("1"),
-  accent: paint("38;5;75"), // calm blue accent
-  green: paint("32"),
-  red: paint("31"),
-  yellow: paint("33"),
-  blue: paint("34"),
-  purple: paint("35"),
-  cyan: paint("36"),
-  invert: paint("7"),
+  text: ui.text,
+  muted: ui.muted,
+  dim: ui.faint,
+  line: ui.line,
+  bold: ui.bold,
+  accent: (t: string) => ui.bold(ui.text(t)),
+  green: ui.ok,
+  red: ui.failed,
+  yellow: ui.review,
+  orange: ui.waiting,
+  teal: ui.running,
+  purple: ui.done,
 };
 export function agentLabel(id: string): string {
   const names: Record<string, string> = {
@@ -58,6 +79,8 @@ export function agentLabel(id: string): string {
     gemini: "Gemini",
     cursor: "Cursor",
     copilot: "Copilot CLI",
+    aider: "Aider",
+    ollama: "Local model",
     developer: "You",
     agentbrain: "AgentBrain",
     council: "Council",
@@ -65,34 +88,120 @@ export function agentLabel(id: string): string {
   return names[id] ?? id;
 }
 
-function agentColor(id: string): (t: string) => string {
-  if (id === "developer") return style.bold;
-  return style.accent;
+/** An agent's coloured dot and name, as the web's live rail and chat replies show them. */
+export function agentTag(id: string, label = agentLabel(id)): string {
+  return `${agentPaint(id)("●")} ${style.accent(label)}`;
 }
 
 function short(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+/** Word-wraps plain text; words longer than the width are split. */
+export function wrapText(text: string, width: number): string[] {
+  const w = Math.max(1, width);
+  const lines: string[] = [];
+  for (const paragraph of text.split("\n")) {
+    let line = "";
+    for (const word of paragraph.split(/ +/)) {
+      let rest = [...word];
+      if (line && [...line].length + 1 + rest.length > w) {
+        lines.push(line);
+        line = "";
+      }
+      if (line) line += " ";
+      while ([...line].length + rest.length > w) {
+        const take = w - [...line].length;
+        lines.push(line + rest.slice(0, take).join(""));
+        line = "";
+        rest = rest.slice(take);
+      }
+      line += rest.join("");
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+
 // ---------------------------------------------------------------- pure rendering
+
+export interface WelcomeTask {
+  id: string;
+  objective: string;
+  status: string;
+  updatedAt?: string;
+  nextAction?: string;
+  merged?: unknown;
+}
+
+export interface TeamMember {
+  id: string;
+  name: string;
+  /** Installed and ready. */
+  up: boolean;
+  lead?: boolean;
+}
 
 export interface WelcomeInfo {
   root: string;
-  worker: string | null;
+  tasks: WelcomeTask[];
+  /** Agent sessions that haven't ended. */
+  agentsActive: number;
+  /** Who decides, as the web says it: "Lead: Claude Code", "Council of 3 …", "You decide". */
   decides: string;
-  running: number;
-  review: number;
+  checks: string[];
+  team: TeamMember[];
+  now?: Date;
 }
 
+const IN_PROGRESS = ["running", "checkpoint", "handoff", "idle", "blocked", "failed"];
+
+/** One task row: status dot, short title, age right-aligned; exactly `width` wide. */
+export function taskRow(task: WelcomeTask, width: number, now = new Date()): string {
+  const when = age(task.updatedAt, now);
+  const title = ellipsize(shortTitle(task.objective), Math.max(1, width - 4 - when.length - 1));
+  const gap = Math.max(1, width - 4 - visibleLength(title) - when.length);
+  return `  ${stateDot(task)} ${style.text(title)}${" ".repeat(gap)}${style.dim(when)}`;
+}
+
+/** The welcome screen, laid out like the web's Tasks home; never wider than `width`. */
 export function welcomeBox(width: number, info: WelcomeInfo): string[] {
   const w = Math.max(40, Math.min(width, 100));
-  const home = os.homedir();
-  const cwd = info.root.startsWith(home) ? `~${info.root.slice(home.length)}` : info.root;
-  return [
-    fit(` ${style.bold("AgentBrain")} ${style.dim("·")} ${style.dim(cwd)} ${style.dim("· worker")} ${info.worker ?? style.yellow("none available")}`, w),
-    fit(` ${style.dim("decides")} ${info.decides} ${style.dim("·")} ${info.running} running ${style.dim("·")} ${info.review ? style.accent(`${info.review} to review`) : "nothing to review"}`, w),
-    "",
+  const now = info.now ?? new Date();
+  const row = (text: string) => ellipsize(text, w);
+  const project = path.basename(info.root) || info.root;
+  const review = info.tasks.filter((t) => t.status === "review");
+  const active = info.tasks.filter((t) => IN_PROGRESS.includes(t.status));
+  const recent = info.tasks
+    .filter((t) => t.status === "done")
+    .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))
+    .slice(0, 3);
+  const running = info.tasks.filter((t) => t.status === "running").length;
+  const n = (count: number, text: string) => `${style.accent(String(count))} ${style.muted(text)}`;
+  const facts = [
+    n(review.length, "to review"),
+    n(running, "running"),
+    n(info.agentsActive, `agent${info.agentsActive === 1 ? "" : "s"} active`),
+    style.muted(info.decides),
+    ...(info.checks.length ? [`${style.muted("Checks:")} ${style.text(info.checks.join(" · "))}`] : []),
   ];
+
+  const lines = [row(` ${style.accent("AgentBrain")}  ${style.muted(project)}`), row(` ${facts.join(style.dim(" · "))}`), ""];
+  const section = (title: string, tasks: WelcomeTask[], empty: string, max: number, count = true) => {
+    lines.push(row(` ${style.accent(title)}${count && tasks.length ? ` ${style.dim(String(tasks.length))}` : ""}`));
+    if (!tasks.length) lines.push(row(`  ${style.dim(empty)}`));
+    for (const task of tasks.slice(0, max)) lines.push(taskRow(task, w, now));
+    if (tasks.length > max) lines.push(row(`    ${style.dim(`+${tasks.length - max} more · /status`)}`));
+  };
+  section("Needs you", review, "Nothing to review.", 5);
+  section("In progress", active, "Nothing running.", 5);
+  section("Recent", recent, "No finished tasks yet.", 3, false);
+  if (info.team.length) {
+    const members = info.team.map((m) => `${m.up ? style.green("●") : style.dim("○")} ${m.up ? style.text(m.name) : style.dim(m.name)}${m.lead ? ` ${style.yellow("LEAD")}` : ""}`);
+    lines.push("", row(` ${style.accent("Team")}  ${members.join("  ")}`));
+  }
+  lines.push("");
+  return lines;
 }
 
 export interface InputRender {
@@ -101,22 +210,44 @@ export interface InputRender {
   cursorCol: number;
 }
 
-const PLACEHOLDER = "Describe a task for your agents, or type / for commands";
+export interface InputPills {
+  /** What the agent pill says, e.g. "Auto → Claude Code". */
+  agent: string;
+  /** Colours the agent pill. */
+  agentId?: string;
+  mode: "chat" | "task";
+}
 
-/** A quiet prompt line; long input wraps to the terminal width. */
-export function inputBox(width: number, buffer: string, cursor: number): InputRender {
+const PLACEHOLDER = "Describe a task for your agents, or type / for commands";
+const CHAT_PLACEHOLDER = "Ask anything about this project, or type / for commands";
+const INPUT_HINT = "shift+tab agent · /mode · / for commands";
+
+/** The row under the prompt box: agent and mode pills, and a hint on the right when it fits. */
+export function pillRow(width: number, pills: InputPills): string {
+  const pill = (inner: string) => `${style.dim("[")} ${inner} ${style.dim("]")}`;
+  const agent = pills.agentId ? agentPaint(pills.agentId)(pills.agent) : style.text(pills.agent);
+  const where = pills.mode === "chat" ? "Chat · project root" : "Task · own worktree";
+  const left = ` ${pill(agent)} ${pill(style.muted(where))}`;
+  const gap = width - visibleLength(left) - INPUT_HINT.length - 1;
+  return gap >= 2 ? `${left}${" ".repeat(gap)}${style.dim(INPUT_HINT)} ` : ellipsize(left, width);
+}
+
+/** A rounded prompt box at exactly `width` columns; long input wraps inside it. */
+export function inputBox(width: number, buffer: string, cursor: number, pills?: InputPills): InputRender {
   const w = Math.max(20, width);
-  const tw = w - 2;
+  const tw = w - 4;
   const chars = [...buffer];
   const rows = Math.max(1, Math.floor(chars.length / tw) + 1);
-  const lines: string[] = [];
+  const placeholder = pills?.mode === "chat" ? CHAT_PLACEHOLDER : PLACEHOLDER;
+  const lines: string[] = [style.line(`╭${"─".repeat(w - 2)}╮`)];
   for (let r = 0; r < rows; r++) {
     const text = chars.slice(r * tw, (r + 1) * tw).join("");
-    const prefix = r === 0 ? `${style.accent(">")} ` : "  ";
-    const body = !buffer && r === 0 ? style.dim(PLACEHOLDER.slice(0, tw)) : text;
-    lines.push(fit(`${prefix}${body}`, w));
+    const body = !buffer && r === 0 ? style.dim(ellipsize(placeholder, tw)) : text;
+    lines.push(`${style.line("│")} ${fit(body, tw)} ${style.line("│")}`);
   }
-  return { lines, cursorRow: Math.floor(cursor / tw), cursorCol: 2 + (cursor % tw) };
+  lines.push(style.line(`╰${"─".repeat(w - 2)}╯`));
+  if (pills) lines.push(pillRow(w, pills));
+  return { lines, cursorRow: 1 + Math.floor(cursor / tw), cursorCol: 2 + (cursor % tw) };
 }
 
 export interface Command {
@@ -157,10 +288,161 @@ export function suggestions(buffer: string): Command[] {
   return COMMANDS.filter((c) => c.name.startsWith(typed));
 }
 
+/** The developer's message, right-aligned in a dim rounded bubble; every line is `width` wide. */
+export function userBubble(text: string, width: number): string[] {
+  const w = Math.max(20, width);
+  const body = wrapText(text.trim(), Math.max(8, Math.floor(w * 0.75) - 4));
+  const inner = Math.max(...body.map((l) => [...l].length));
+  const pad = " ".repeat(w - inner - 4);
+  return [
+    `${pad}${style.dim(`╭${"─".repeat(inner + 2)}╮`)}`,
+    ...body.map((l) => `${pad}${style.dim("│")} ${style.text(l)}${" ".repeat(inner - [...l].length)} ${style.dim("│")}`),
+    `${pad}${style.dim(`╰${"─".repeat(inner + 2)}╯`)}`,
+  ];
+}
+
+type Paint = (t: string) => string;
+
+/** **bold** and `code` spans of one line, as runs of characters with their style. */
+function inlineChars(text: string): { ch: string; paint: Paint }[] {
+  const plain = colorMode() === "none";
+  const out: { ch: string; paint: Paint }[] = [];
+  const add = (s: string, paint: Paint) => { for (const ch of s) out.push({ ch, paint }); };
+  for (const part of text.split(/(`[^`]+`)/)) {
+    if (/^`[^`]+`$/.test(part)) add(plain ? part : part.slice(1, -1), style.muted);
+    else for (const p of part.split(/(\*\*[^*]+\*\*)/)) add(/^\*\*[^*]+\*\*$/.test(p) ? p.slice(2, -2) : p, /^\*\*[^*]+\*\*$/.test(p) ? style.accent : style.text);
+  }
+  return out;
+}
+
+function paintRuns(chars: { ch: string; paint: Paint }[]): string {
+  let out = "";
+  for (let i = 0; i < chars.length; ) {
+    let j = i;
+    while (j < chars.length && chars[j].paint === chars[i].paint) j++;
+    out += chars[i].paint(chars.slice(i, j).map((c) => c.ch).join(""));
+    i = j;
+  }
+  return out;
+}
+
+/** Word-wraps styled inline markdown; continuation lines get `hang`. */
+function wrapInline(text: string, width: number, first: string, hang: string): string[] {
+  const words: { ch: string; paint: Paint }[][] = [[]];
+  for (const c of inlineChars(text)) {
+    if (c.ch === " ") words.push([]);
+    else words[words.length - 1].push(c);
+  }
+  const lines: string[] = [];
+  let line: { ch: string; paint: Paint }[] = [];
+  const room = () => Math.max(1, width - visibleLength(lines.length ? hang : first));
+  const flush = () => { lines.push(`${lines.length ? hang : first}${paintRuns(line)}`); line = []; };
+  for (let word of words.filter((x) => x.length)) {
+    if (line.length && line.length + 1 + word.length > room()) flush();
+    if (line.length) line.push({ ch: " ", paint: style.text });
+    while (line.length + word.length > room()) {
+      const take = room() - line.length;
+      line.push(...word.slice(0, take));
+      word = word.slice(take);
+      flush();
+    }
+    line.push(...word);
+  }
+  if (line.length || !lines.length) flush();
+  return lines;
+}
+
+/**
+ * Light markdown for agent replies, fed one line at a time (replies stream in):
+ * **bold**, `code` spans dim, fenced code blocks inside a faint box, "- " bullets as "•".
+ */
+export class MarkdownStream {
+  private fence: string | null = null;
+
+  constructor(private readonly width: number, private readonly indent = "  ") {}
+
+  get inFence(): boolean {
+    return this.fence !== null;
+  }
+
+  push(line: string): string[] {
+    const w = Math.max(20, this.width) - this.indent.length;
+    const fence = /^\s*```\s*([^\s`]*)/.exec(line);
+    if (fence) {
+      if (this.fence === null) {
+        this.fence = fence[1];
+        const label = this.fence ? `─ ${this.fence} ` : "";
+        return [`${this.indent}${style.dim(`╭${ellipsize(label, w - 2)}${"─".repeat(Math.max(0, w - 2 - label.length))}╮`)}`];
+      }
+      return this.end();
+    }
+    if (this.fence !== null) {
+      return wrapText(line.replace(/\t/g, "  ").replace(/\s+$/, ""), w - 4).map((part) => `${this.indent}${style.dim("│")} ${style.text(part)}${" ".repeat(Math.max(0, w - 4 - [...part].length))} ${style.dim("│")}`);
+    }
+    if (!line.trim()) return [""];
+    const heading = /^#{1,6}\s+(.*)$/.exec(line);
+    if (heading) return wrapInline(`**${heading[1].replace(/\*\*/g, "")}**`, w, this.indent, this.indent);
+    const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(line);
+    if (bullet) {
+      const lead = `${this.indent}${bullet[1]}`;
+      return wrapInline(bullet[2], w + this.indent.length, `${lead}${style.dim("•")} `, `${lead}  `);
+    }
+    const numbered = /^(\s*)(\d+[.)])\s+(.*)$/.exec(line);
+    if (numbered) {
+      const lead = `${this.indent}${numbered[1]}`;
+      return wrapInline(numbered[3], w + this.indent.length, `${lead}${style.dim(numbered[2])} `, `${lead}${" ".repeat(numbered[2].length + 1)}`);
+    }
+    return wrapInline(line.trim(), w + this.indent.length, this.indent, this.indent);
+  }
+
+  /** Closes a code block the reply left open. */
+  end(): string[] {
+    if (this.fence === null) return [];
+    this.fence = null;
+    const w = Math.max(20, this.width) - this.indent.length;
+    return [`${this.indent}${style.dim(`╰${"─".repeat(w - 2)}╯`)}`];
+  }
+}
+
+/** Renders a whole markdown reply. */
+export function markdownLines(text: string, width: number, indent = "  "): string[] {
+  const md = new MarkdownStream(width, indent);
+  return [...text.split("\n").flatMap((line) => md.push(line)), ...md.end()];
+}
+
+export interface CardInfo {
+  /** Who is on it, shown on the meta line. */
+  agent?: string;
+  /** What to do next, shown in bold. */
+  action?: string;
+  now?: Date;
+}
+
+/** A compact task card: status dot, short title, state label coloured by state, meta, next action. */
+export function taskCard(task: WelcomeTask, width: number, info: CardInfo = {}): string[] {
+  const w = Math.max(40, Math.min(width, 100));
+  const tone = stateTone(task);
+  const title = ellipsize(shortTitle(task.objective), w - 4 - tone.label.length - 1);
+  const gap = Math.max(1, w - 3 - visibleLength(title) - tone.label.length);
+  const when = age(task.updatedAt, info.now);
+  const meta = [task.id, info.agent, when && `${when}${when === "now" ? "" : " ago"}`].filter(Boolean).join(" · ");
+  const lines = [` ${stateDot(task)} ${style.accent(title)}${" ".repeat(gap)}${hexPaint(tone.hex)(tone.label)}`, ellipsize(`   ${style.dim(meta)}`, w)];
+  if (info.action) lines.push(ellipsize(`   ${style.text(info.action)}`, w));
+  return lines;
+}
+
+/** One line of the live feed, like the web's rail: dot, agent, HH:MM, event, and the task when it fits. */
+export function railLine(agent: string, at: string, text: string, title: string | undefined, width: number): string {
+  const base = `${agentPaint(agent)("●")} ${style.accent(agentLabel(agent))} ${style.dim(hhmm(at))}  ${text}`;
+  const tail = title ? style.dim(` · ${title}`) : "";
+  if (tail && visibleLength(base) + visibleLength(tail) <= width) return `${base}${tail}`;
+  return ellipsize(base, width);
+}
+
 const GLYPH: Partial<Record<ActivityEvent["kind"], string>> = {
   edit: "+",
   command: "$",
-  commit: "·",
+  commit: "◆",
   progress: "✓",
   decision: "·",
   prompt: ">",
@@ -169,54 +451,215 @@ const GLYPH: Partial<Record<ActivityEvent["kind"], string>> = {
 };
 
 /**
- * Turns feed events into transcript lines, grouping consecutive events by the
- * same agent on the same task under one header, like an agent CLI shows tool calls.
+ * Turns feed events into transcript lines like the web's live rail: one line per
+ * event, a blank line whenever the agent or task changes.
  */
 export class FeedFormatter {
   private last = "";
 
-  constructor(private readonly objective: (taskId: string | undefined) => string | undefined) {}
+  constructor(
+    private readonly objective: (taskId: string | undefined) => string | undefined,
+    private readonly width: () => number = () => 100,
+  ) {}
 
   format(event: ActivityEvent): string[] {
     // Reads and searches are noise in a transcript; the control room keeps them.
     if (event.kind === "tool" && /^(Read|Grep|Glob) /.test(event.text)) return [];
-    const who = agentColor(event.agent)(agentLabel(event.agent));
+    const w = Math.max(40, this.width());
     const goal = this.objective(event.task);
-    const sub = (text: string) => `    ${text}`;
+    const title = goal ? shortTitle(goal) : undefined;
+    const rail = (text: string, withTitle = true) => railLine(event.agent, event.at, text, withTitle ? title : undefined, w);
+    const sub = (text: string) => ellipsize(`    ${style.dim(text)}`, w);
+    const key = `${event.agent}|${event.task ?? ""}`;
+    const gap = key !== this.last ? [""] : [];
+    this.last = key;
 
     if (event.kind === "handoff" && event.agent === "developer") {
       this.last = "";
-      return ["", `${style.accent("→")} ${event.text}`, sub(style.dim(`${event.task ?? ""} · its own worktree · progress streams here`))];
+      return ["", rail(`${style.muted("→")} ${style.text(event.text)}`, false), sub(`${event.task ?? ""} · its own worktree · progress streams here`)];
     }
     if (event.kind === "review" || event.kind === "status" || event.kind === "handoff") {
-      this.last = "";
       if (event.agent === "agentbrain") {
-        const text = event.text.startsWith("✓") ? style.green(event.text) : event.text.startsWith("✗") || event.text.startsWith("⚠") ? style.red(event.text) : event.text;
-        return [sub(`${style.accent("AgentBrain")} ${text}`)];
+        const text = event.text.startsWith("✓") ? style.green(event.text) : event.text.startsWith("✗") || event.text.startsWith("⚠") ? style.red(event.text) : style.text(event.text);
+        return [...gap, rail(text)];
       }
       if (event.kind === "status" && /→ review/.test(event.text)) {
-        return ["", `${style.accent("Ready")} ${style.bold("for review")} · ${short(goal ?? event.text, 70)}`, sub(`finished by ${who} · /review to inspect · /approve · /changes <what to fix>`)];
+        this.last = "";
+        return ["", rail(style.yellow("Ready for review")), sub(`finished by ${agentLabel(event.agent)} · /review to inspect · /approve · /changes <what to fix>`)];
       }
-      if (event.kind === "handoff") return ["", `${style.accent("⇄")} ${who} handed off · ${short(goal ?? "", 60)}`, sub(style.dim(`${event.text.replace(/^.*?: /, "")} · /continue ${event.task ?? ""}`))];
-      if (event.kind === "review") return ["", `${style.accent("✓")} ${who} ${event.text}`];
-      return [sub(`${who} ${style.dim(event.text.replace(/: .*$/, ""))}`)];
+      if (event.kind === "handoff") {
+        this.last = "";
+        return ["", rail(style.orange("handed off")), sub(`${event.text.replace(/^.*?: /, "")} · /continue ${event.task ?? ""}`)];
+      }
+      if (event.kind === "review") return [...gap, rail(`${style.green("✓")} ${style.text(event.text)}`)];
+      return [...gap, rail(style.dim(event.text.replace(/: .*$/, "")))];
     }
-
     if (event.kind === "message") {
       this.last = "";
-      return ["", `${style.accent("✉")} ${who} ${event.text}`];
-    }
-    const key = `${event.agent}|${event.task ?? ""}`;
-    const lines: string[] = [];
-    if (key !== this.last) {
-      this.last = key;
-      lines.push("", `${who}${goal ? style.dim(` · ${short(goal, 60)}`) : ""}`);
+      return ["", rail(`${style.muted("✉")} ${style.text(event.text)}`, false)];
     }
     const glyph = GLYPH[event.kind] ?? "·";
-    const text = event.kind === "edit" ? style.green(event.text) : event.kind === "command" ? style.yellow(event.text.replace(/^\$ /, "")) : event.text;
-    lines.push(sub(`${style.dim(glyph)} ${text}`));
-    return lines;
+    const mark = event.kind === "edit" ? style.green(glyph) : event.kind === "command" ? style.yellow(glyph) : style.dim(glyph);
+    const text = event.kind === "command" ? event.text.replace(/^\$ /, "") : event.text;
+    return [...gap, rail(`${mark} ${style.text(text)}`)];
   }
+}
+
+/** A compact task pane: the card, a short files list, and remaining steps. */
+export function taskDetailLines(
+  task: WelcomeTask & { files?: string[]; remaining?: string[] },
+  width: number,
+  info: CardInfo = {},
+): string[] {
+  const w = Math.max(20, width);
+  const lines = [...taskCard(task, w, info).map((l) => fit(l, w))];
+  if (task.files?.length) {
+    lines.push(fit("", w), fit(ellipsize(` ${style.muted("Files changed")} ${style.dim(String(task.files.length))}`, w), w));
+    for (const file of task.files.slice(0, 8)) lines.push(fit(ellipsize(`  ${style.text(file)}`, w), w));
+  }
+  if (task.remaining?.length) {
+    lines.push(fit("", w), fit(` ${style.muted("Next")}`, w));
+    task.remaining.slice(0, 6).forEach((step, i) => lines.push(fit(ellipsize(`  ${style.dim(`${i + 1}.`)} ${style.text(step)}`, w), w)));
+  }
+  return lines;
+}
+
+/**
+ * Activity as a transcript: each thought/prompt heads the commands and edits
+ * it led to, folded as "Ran N commands" like the web story.
+ */
+export function storyLines(events: ActivityEvent[], width: number, titleOf?: (taskId: string | undefined) => string | undefined): string[] {
+  const w = Math.max(20, width);
+  const lines: string[] = [];
+  for (let i = 0; i < events.length; ) {
+    const event = events[i];
+    if (event.kind === "session") {
+      i++;
+      continue;
+    }
+    if (event.kind === "thought" || event.kind === "prompt") {
+      const head = event.kind === "prompt" ? style.text(event.text) : style.muted(event.text);
+      lines.push(fit(railLine(event.agent, event.at, head, titleOf?.(event.task), w), w));
+      i++;
+      let commands = 0;
+      let edits = 0;
+      while (i < events.length && events[i].agent === event.agent && (events[i].kind === "command" || events[i].kind === "edit" || events[i].kind === "tool")) {
+        if (events[i].kind === "command") commands++;
+        else if (events[i].kind === "edit") edits++;
+        i++;
+      }
+      const parts = [
+        commands ? `Ran ${commands} command${commands === 1 ? "" : "s"}` : "",
+        edits ? `edited ${edits} file${edits === 1 ? "" : "s"}` : "",
+      ].filter(Boolean);
+      if (parts.length) lines.push(fit(ellipsize(`    ${style.dim(parts.join(", "))}`, w), w));
+      continue;
+    }
+    const feed = new FeedFormatter(titleOf ?? (() => undefined), () => w);
+    lines.push(...feed.format(event).map((l) => fit(l, w)));
+    i++;
+  }
+  return lines;
+}
+
+export interface RoomModel {
+  project: string;
+  tasks: WelcomeTask[];
+  team: TeamMember[];
+  agentsActive: number;
+  decides: string;
+  checks?: string[];
+  pane: Pane;
+  selectedId?: string;
+  /** Main-pane lines for the current view (already fitted or wrapped). */
+  body: string[];
+  scroll?: number;
+  buffer: string;
+  cursor: number;
+  pills: InputPills;
+  commands?: Command[];
+  selectedCommand?: number;
+  status?: string;
+  now?: Date;
+}
+
+export interface RoomFrame {
+  lines: string[];
+  sidebar: ReturnType<typeof sidebarLines>;
+  listWidth: number;
+  composeTop: number;
+  cursorRow: number;
+  cursorCol: number;
+}
+
+/** The full-screen control room: header, facts, sidebar, main pane, compose box. */
+export function renderRoom(model: RoomModel, width: number, height: number): RoomFrame {
+  const w = Math.max(20, width);
+  const h = Math.max(10, height);
+  const now = model.now ?? new Date();
+  const review = model.tasks.filter((t) => t.status === "review").length;
+  const running = model.tasks.filter((t) => t.status === "running").length;
+  const n = (count: number, text: string) => `${style.accent(String(count))} ${style.muted(text)}`;
+  const facts = [
+    n(review, "to review"),
+    n(running, "running"),
+    n(model.agentsActive, `agent${model.agentsActive === 1 ? "" : "s"} active`),
+    style.muted(model.decides),
+    ...(model.checks?.length ? [`${style.muted("Checks:")} ${style.text(model.checks.join(" · "))}`] : []),
+  ];
+  const header = [
+    fit(` ${style.accent("AgentBrain")}  ${style.muted(model.project)}`, w),
+    fit(` ${facts.join(style.dim(" · "))}`, w),
+  ];
+
+  const box = inputBox(w, model.buffer, model.cursor, model.pills);
+  const sugg = (model.commands ?? []).slice(0, 8);
+  const suggLines = sugg.map((c, i) => {
+    const label = `/${c.name}${c.args ? ` ${c.args}` : ""}`;
+    const line = `  ${label.padEnd(28)} ${c.help}`;
+    return fit(i === (model.selectedCommand ?? 0) ? style.accent(line) : style.dim(line), w);
+  });
+  const status = model.status ? [fit(ellipsize(`  ${model.status}`, w), w)] : [];
+  const compose = [...box.lines, ...status, ...suggLines];
+  const bodyH = Math.max(1, h - header.length - compose.length);
+  const wide = w >= NARROW;
+  const listWidth = wide ? Math.min(40, Math.max(22, Math.floor(w * 0.34))) : 0;
+  const emptySidebar = { lines: [] as string[], rows: new Map<number, string>(), nav: new Map<number, Pane>() };
+  let sidebar = emptySidebar;
+  const body = model.body;
+  const maxScroll = Math.max(0, body.length - bodyH);
+  const scroll = Math.max(0, Math.min(model.scroll ?? maxScroll, maxScroll));
+  const vis = body.slice(scroll, scroll + bodyH);
+
+  const lines: string[] = [...header];
+  if (wide) {
+    sidebar = sidebarLines(
+      { tasks: model.tasks, team: model.team, pane: model.pane, selectedId: model.selectedId, focused: !model.buffer, now },
+      listWidth,
+      bodyH,
+    );
+    const paneW = Math.max(1, w - listWidth - 1);
+    const rule = style.line("│");
+    for (let r = 0; r < bodyH; r++) {
+      lines.push(`${sidebar.lines[r] ?? fit("", listWidth)}${rule}${fit(vis[r] ?? "", paneW)}`);
+    }
+  } else {
+    const nav = PANES.map((p) => (p === model.pane ? style.accent(p[0]!.toUpperCase() + p.slice(1)) : style.dim(p[0]!.toUpperCase() + p.slice(1)))).join(style.dim("  "));
+    lines.push(fit(` ${nav}`, w));
+    const room = Math.max(1, h - lines.length - compose.length);
+    for (let r = 0; r < room; r++) lines.push(fit(vis[r] ?? "", w));
+  }
+  const composeTop = lines.length;
+  lines.push(...compose);
+  while (lines.length < h) lines.push(fit("", w));
+  return {
+    lines: lines.slice(0, h),
+    sidebar,
+    listWidth,
+    composeTop,
+    cursorRow: composeTop + box.cursorRow,
+    cursorCol: box.cursorCol,
+  };
 }
 
 // ---------------------------------------------------------------- the console
@@ -279,17 +722,23 @@ export function connectorLines(connectors: Connector[], width = 100): string[] {
 
 export async function runConsole(root: string, options: ConsoleOptions): Promise<void> {
   const out = process.stdout;
+  const input = process.stdin;
   const write = (s: string) => out.write(s);
   const width = () => Math.max(40, out.columns || 80);
+  const height = () => Math.max(12, out.rows || 24);
 
   let buffer = "";
   let cursor = 0;
   let selected = 0;
+  let pane: Pane = "tasks";
+  let selectedId: string | undefined;
+  let scroll: number | undefined;
+  let log: string[] = [];
   let status = "";
   let exitArmed = 0;
   const history: string[] = [];
   let historyIndex = -1;
-  let rowInBottom = 0; // which row of the bottom area the terminal cursor is on
+  let frame: RoomFrame | null = null;
 
   const objectives = new Map<string, string>();
   const objective = (taskId?: string) => {
@@ -299,7 +748,7 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     }
     return objectives.get(taskId);
   };
-  const feed = new FeedFormatter(objective);
+  const feed = new FeedFormatter(objective, () => width() - 1);
 
   const decidesText = () => {
     const p = reviewPolicy(root);
@@ -320,80 +769,121 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     return ranked.filter((c) => c.worker.available);
   };
   const choices = () => ["auto", ...ready().map((c) => c.worker.id)];
-  const footer = () => {
+  /** The agent and mode pills under the prompt box. */
+  const pills = (): InputPills => {
     const options = ready();
     const pick = choice === "auto" ? options[0] : options.find((c) => c.worker.id === choice);
-    const label = choice === "auto"
-      ? `Auto ${style.dim("→")} ${pick ? pick.worker.name : "no agent ready"}${pick ? style.dim(`  (${pick.reasons.slice(0, 2).join(", ")})`) : ""}`
-      : `${pick?.worker.name ?? choice}`;
-    return `  ${style.accent("⏵")} ${label}  ${style.dim(`· ${mode} mode · shift+tab to switch agent · /mode to change`)}`;
+    const agent = choice === "auto" ? `Auto → ${pick ? pick.worker.name : "no agent ready"}` : pick?.worker.name ?? choice;
+    return { agent, ...(pick ? { agentId: pick.worker.id } : {}), mode };
   };
 
-  const header = () => {
-    const tasks = listTasks(root);
-    return welcomeBox(width() - 1, {
-      root,
-      worker: workerText(),
-      decides: decidesText(),
-      running: tasks.filter((t) => t.status === "running").length,
-      review: tasks.filter((t) => t.status === "review").length,
-    });
-  };
-
-  /** "auto" (picks per task) or the pinned agent. */
-  const workerText = () => {
-    const pinned = getProject(root).worker;
-    if (pinned) return `worker ${rankWorkers(root).find((c) => c.worker.id === pinned)?.worker.name ?? pinned}`;
-    const ready = rankWorkers(root).filter((c) => c.worker.available && c.worker.how !== "pull").length;
-    return `auto-picks among ${ready} ready agent${ready === 1 ? "" : "s"}`;
-  };
-
-  const statusLine = () => {
-    if (status) return `  ${status}`;
-    const tasks = listTasks(root);
-    const running = tasks.filter((t) => t.status === "running").length;
-    const review = tasks.filter((t) => t.status === "review").length;
-    return style.dim(`  decides: ${decidesText()} · ${running} running`) +
-      (review ? ` ${style.accent(`· ${review} to review`)}` : "") + style.dim(" · ctrl-c twice to exit");
-  };
-
-  const bottom = () => {
-    // One column short of the edge: a line that fills the terminal exactly leaves the
-    // cursor in a pending-wrap state that throws off the next redraw.
-    const w = width() - 1;
-    const box = inputBox(w, buffer, cursor);
-    // A blank line separates the transcript from the prompt.
-    const lines = ["", ...box.lines, fit(footer(), w), fit(statusLine(), w)];
-    const options = suggestions(buffer);
-    if (selected >= options.length) selected = 0;
-    for (const [i, c] of options.slice(0, 10).entries()) {
-      const label = `/${c.name}${c.args ? ` ${c.args}` : ""}`;
-      const line = `  ${label.padEnd(30)} ${c.help}`;
-      lines.push(fit(i === selected ? style.accent(line) : style.dim(line), w));
+  /** Who decides, worded as the web's facts row. */
+  const decidesFact = () => {
+    const p = reviewPolicy(root);
+    if (p.mode === "lead") return `Lead: ${agentLabel(p.reviewers[0])}`;
+    if (p.mode === "council") {
+      const k = faultTolerance(p.reviewers.length, p.quorum);
+      return `Council of ${p.reviewers.length} · survives ${k} bad reviewer${k === 1 ? "" : "s"}`;
     }
-    return { lines, box };
+    return "You decide";
   };
 
-  const erase = () => {
-    if (rowInBottom > 0) write(`${ESC}${rowInBottom}A`);
-    write(`\r${ESC}J`);
-    rowInBottom = 0;
+  const team = (): TeamMember[] => {
+    const policy = reviewPolicy(root);
+    const lead = policy.mode === "lead" ? policy.reviewers[0] : null;
+    return rankWorkers(root)
+      .filter((c) => c.worker.installed && c.worker.how !== "pull")
+      .map((c) => ({ id: c.worker.id, name: c.worker.name, up: c.worker.available, lead: c.worker.id === lead }));
+  };
+
+  const orderedTasks = () => sidebarOrder(listTasks(root));
+
+  const selectedTask = (): TaskState | undefined => {
+    const tasks = listTasks(root);
+    const order = sidebarOrder(tasks);
+    if (selectedId && order.some((t) => t.id === selectedId)) return tasks.find((t) => t.id === selectedId);
+    selectedId = order[0]?.id;
+    return selectedId ? tasks.find((t) => t.id === selectedId) : undefined;
+  };
+
+  const taskBody = (w: number): string[] => {
+    const task = selectedTask();
+    if (!task) return log.length ? log : [style.dim("  No tasks yet. Type a request below.")];
+    const snap = snapshot(root, { includeDone: true });
+    const live = snap.tasks.find((t) => t.id === task.id);
+    const files = live?.git.changedFiles ?? [];
+    const remaining = live?.remaining ?? task.remaining;
+    const detail = taskDetailLines(
+      { ...task, files, remaining: remaining ?? [] },
+      w,
+      { ...(task.agent ? { agent: agentLabel(task.agent.id) } : {}), action: task.nextAction, now: new Date() },
+    );
+    return log.length ? [...detail, "", ...log] : detail;
+  };
+
+  const activityBody = (w: number): string[] => {
+    const events = readActivity(root, 120);
+    const story = storyLines(events, w, objective);
+    return story.length ? story : [style.dim("  No activity yet.")];
+  };
+
+  const teamBody = (w: number): string[] => {
+    const sessions = listSessions(root).filter((s) => !s.endedAt);
+    const lines: string[] = [` ${style.accent("Team")}`, ""];
+    for (const m of team()) {
+      const live = sessions.filter((s) => s.agentId === m.id).at(-1);
+      const dotted = m.up ? agentPaint(m.id)("●") : style.dim("○");
+      lines.push(fit(`  ${dotted} ${m.up ? style.text(m.name) : style.dim(m.name)}${m.lead ? ` ${style.yellow("LEAD")}` : ""}`, w));
+      const doing = live?.lastAction;
+      if (doing) lines.push(fit(ellipsize(`     ${style.dim(doing)}`, w), w));
+      else if (!m.up) lines.push(fit(`     ${style.dim("unavailable")}`, w));
+    }
+    return lines;
+  };
+
+  const paneWidth = () => {
+    const cols = width();
+    return cols >= NARROW ? Math.max(20, cols - Math.min(40, Math.max(22, Math.floor(cols * 0.34))) - 1) : cols;
+  };
+
+  const model = (): RoomModel => {
+    const cmds = suggestions(buffer);
+    if (selected >= cmds.length) selected = 0;
+    const pick = choice === "auto" ? ready()[0] : undefined;
+    const why = pick ? `${pick.reasons.slice(0, 2).join(", ")} · ` : "";
+    const bodyW = paneWidth();
+    const body = pane === "activity" ? activityBody(bodyW) : pane === "team" ? teamBody(bodyW) : taskBody(bodyW);
+    return {
+      project: path.basename(root) || root,
+      tasks: listTasks(root),
+      team: team(),
+      agentsActive: listSessions(root).filter(sessionPresent).length,
+      decides: decidesFact(),
+      checks: getProject(root).checks ?? [],
+      pane,
+      selectedId,
+      body,
+      scroll,
+      buffer,
+      cursor,
+      pills: pills(),
+      commands: cmds,
+      selectedCommand: selected,
+      status: status || `${why}decides: ${decidesText()} · ctrl-c twice to exit`,
+    };
   };
 
   const draw = () => {
-    const { lines, box } = bottom();
-    write(lines.join("\n"));
-    const up = lines.length - 1 - (box.cursorRow + 1);
-    if (up > 0) write(`${ESC}${up}A`);
-    write(`\r${box.cursorCol > 0 ? `${ESC}${box.cursorCol}C` : ""}`);
-    rowInBottom = box.cursorRow + 1;
+    frame = renderRoom(model(), width(), height());
+    write(`${ESC}H${frame.lines.join("\r\n")}${ESC}${frame.cursorRow + 1};${frame.cursorCol + 1}H${ESC}?25h`);
   };
 
-  const redraw = () => { erase(); draw(); };
+  const redraw = () => draw();
   const print = (lines: string[]) => {
     if (!lines.length) return;
-    erase();
-    write(`${lines.join("\n")}\n`);
+    log.push(...lines);
+    if (log.length > 400) log = log.slice(-300);
+    scroll = undefined;
     draw();
   };
 
@@ -426,12 +916,12 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
   const statusReport = (): string[] => {
     const tasks = listTasks(root).filter((t) => t.status !== "done");
     const sessions = listSessions(root).filter((s) => !s.endedAt);
-    const lines = ["", style.bold(" Tasks")];
+    const w = width() - 1;
+    const lines = ["", ` ${style.accent("Tasks")}`];
     const reviewCount = tasks.filter((t) => t.status === "review").length;
     const activeCount = tasks.filter((t) => t.status !== "review").length;
     lines.push(style.dim(`  ${activeCount} active · ${reviewCount} waiting for your decision`));
     if (!tasks.length) lines.push(style.dim("  Nothing in progress."));
-    const color: Record<string, (t: string) => string> = { running: style.green, review: style.purple, handoff: style.blue, blocked: style.red, failed: style.red };
     for (const t of tasks) {
       const live = sessions.find((s) => s.taskId === t.id && s.mode === "headless" && sessionAlive(s));
       const action = t.status === "review"
@@ -443,14 +933,12 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
             : t.status === "blocked" || t.status === "failed"
               ? `Needs attention: inspect /status, then /continue ${t.id}`
               : "AgentBrain is tracking this task";
-      lines.push(`  ${(color[t.status] ?? style.yellow)(t.status.padEnd(10))} ${short(t.objective, 70)}`);
-      lines.push(style.dim(`             ${t.id}${t.agent ? ` · ${agentLabel(t.agent.id)}` : ""}`));
-      lines.push(`             ${style.bold(action)}`);
+      lines.push("", ...taskCard(t, w, { ...(t.agent ? { agent: agentLabel(t.agent.id) } : {}), action }));
     }
-    lines.push("", style.bold(" Agents"));
+    lines.push("", ` ${style.accent("Agents")}`);
     const recent = sessions.filter((s) => s.lastSeenAt || s.mode === "headless").slice(-6);
     if (!recent.length) lines.push(style.dim("  No agent sessions reporting right now."));
-    for (const s of recent) lines.push(`  ${agentColor(s.agentId)(agentLabel(s.agentId).padEnd(18))} ${s.activity ?? (s.mode ?? "")} ${style.dim(s.lastAction ? short(s.lastAction, 60) : "")}`);
+    for (const s of recent) lines.push(ellipsize(`  ${agentPaint(s.agentId)("●")} ${style.text(agentLabel(s.agentId).padEnd(18))} ${style.muted(s.activity ?? (s.mode ?? ""))} ${style.dim(s.lastAction ? short(s.lastAction, 60) : "")}`, w));
     lines.push("", ` ${style.dim("Decides")} ${decidesText()}`, "");
     return lines;
   };
@@ -476,12 +964,22 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
   const reviewReport = (arg?: string): string[] => {
     const tasks = arg ? [pickTask(arg, () => true)].filter(Boolean) as TaskState[] : pendingReviews(root);
     if (!tasks.length) return ["", style.dim("  Nothing is waiting for review."), ""];
+    const w = width() - 1;
     const lines: string[] = [];
     for (const task of tasks) {
-      lines.push("");
+      const by = task.review?.worker ?? task.agent?.id;
+      lines.push("", ...taskCard(task, w, by ? { agent: `finished by ${agentLabel(by)}` } : {}));
+      const md = new MarkdownStream(w, "   ");
       for (const line of reviewSummary(root, task).split("\n")) {
-        lines.push(line.startsWith("###") ? style.bold(` ${line.replace(/^### /, "")}`) : line.startsWith("- FAIL") || /flag/i.test(line) ? style.red(`  ${line}`) : line.startsWith("- PASS") ? style.green(`  ${line}`) : `  ${line}`);
+        if (line.startsWith("###")) continue; // the card says it
+        if (md.inFence) lines.push(...md.push(line));
+        else if (line.startsWith("- PASS")) lines.push(ellipsize(`   ${style.green("✓")} ${style.text(line.slice(7))}`, w));
+        else if (line.startsWith("- FAIL")) lines.push(ellipsize(`   ${style.red("✗")} ${style.red(line.slice(7))}`, w));
+        else if (/flag/i.test(line)) lines.push(...wrapText(line, w - 3).map((l) => `   ${style.red(l)}`));
+        else if (/^[A-Z][^:]*:$/.test(line)) lines.push(`   ${style.muted(line)}`);
+        else lines.push(...md.push(line));
       }
+      lines.push(...md.end());
       const t = computeTally(root, task);
       if (t.total > 0) lines.push(style.dim(`  Votes: ${t.approve.toFixed(1)} approve / ${t.changes.toFixed(1)} changes of ${t.total.toFixed(1)}${t.blocked ? ` · ${t.blocked}` : ""}`));
     }
@@ -510,7 +1008,7 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
       case "task": {
         const prompt = words.join(" ");
         if (!prompt) return [style.yellow("  /task <request>   creates an isolated worktree task")];
-        const result = delegate(root, { prompt, ...(choice === "auto" ? {} : { worker: choice }) }, options.self);
+        const result = delegate(root, { prompt, requestedBy: "developer", ...(choice === "auto" ? {} : { worker: choice }) }, options.self);
         objectives.set(result.task.id, result.task.objective);
         return [style.green(`  ✓ Delegated ${result.task.id} to ${result.worker.name}.`), style.dim("    /now shows what happens next.")];
       }
@@ -608,8 +1106,8 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
         return [style.green(`  ✓ Control room: ${ui.url}`)];
       }
       case "clear":
-        write(`${ESC}2J${ESC}H`);
-        rowInBottom = 0;
+        log = [];
+        scroll = undefined;
         return [];
       case "exit":
       case "quit":
@@ -629,7 +1127,7 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     if (!line) return redraw();
     history.unshift(line);
     historyIndex = -1;
-    print(["", `${style.dim(">")} ${line}`]);
+    print(["", ...userBubble(line, width() - 1)]);
     try {
       const word = line.toLowerCase();
       if (line.startsWith("/")) print(await run(line));
@@ -644,7 +1142,7 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
         return redraw();
       } else if (mode === "task") {
         confirmShort = "";
-        const result = delegate(root, { prompt: line, ...(choice === "auto" ? {} : { worker: choice }) }, options.self);
+        const result = delegate(root, { prompt: line, requestedBy: "developer", ...(choice === "auto" ? {} : { worker: choice }) }, options.self);
         objectives.set(result.task.id, result.task.objective);
         if (result.worker.how === "pull") print([`    ${style.dim("Open any agent on this repo (Claude app, Cursor, VS Code) and say \"continue\"; it picks this up.")}`]);
       } else {
@@ -653,16 +1151,17 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
         if (selected.how !== "print") throw new Error(`${selected.name} is a chat connector. Select Claude Code, Codex or the local model for root Chat mode.`);
         const agent = printAgent(selected.id);
         const prompt = [...chatHistory, `Developer: ${line}`].join("\n");
-        print([style.dim(`  ${selected.name} is thinking in Chat mode (project root)…`)]);
+        print(["", `${agentTag(selected.id, selected.name)}  ${style.dim("Chat · project root")}`]);
         // Pieces arrive token by token from a local model: print whole lines as they complete.
+        const md = new MarkdownStream(width() - 1);
         let pending = "";
         await runChat(root, agent, `${chatBrief(root, line)}\n\n${prompt}`, (text) => {
           pending += text;
           const lines = pending.split("\n");
           pending = lines.pop() ?? "";
-          if (lines.length) print(lines.map((part) => `  ${part}`));
+          if (lines.length) print(lines.flatMap((part) => md.push(part)));
         });
-        if (pending) print([`  ${pending}`]);
+        print([...(pending ? md.push(pending) : []), ...md.end()]);
         chatHistory.push(`Developer: ${line}`);
       }
     } catch (error) {
@@ -704,9 +1203,9 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
 
   function quit(): void {
     clearInterval(feedTimer);
-    erase();
-    write(style.dim("Agents keep working in the background. `agentbrain` brings you back.\n"));
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    write(`${ESC}?25h${ESC}?1049l`);
+    write(style.dim("Agents keep working in the background. `agentbrain` brings you back.\n"));
     process.exit(0);
   }
 
@@ -751,15 +1250,76 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
       cursor = [...buffer].length;
       return redraw();
     }
+    if (key?.name === "tab" && !options.length && !buffer) {
+      pane = PANES[(PANES.indexOf(pane) + 1) % PANES.length];
+      scroll = undefined;
+      return redraw();
+    }
+    if (key?.name === "pageup") {
+      scroll = Math.max(0, (scroll ?? 0) - 10);
+      return redraw();
+    }
+    if (key?.name === "pagedown") {
+      scroll = (scroll ?? 0) + 10;
+      return redraw();
+    }
+    if (!buffer && !options.length && key?.name === "o") {
+      const task = selectedTask();
+      if (task) {
+        try {
+          openInEditor(taskWorkdir(root, task));
+          status = `Opened ${taskWorkdir(root, task)} in VS Code`;
+        } catch (error) {
+          status = (error as Error).message;
+        }
+      }
+      return redraw();
+    }
+    if (!buffer && !options.length && key?.name === "s") {
+      const task = selectedTask();
+      const live = task ? listSessions(root).find((s) => s.taskId === task.id && s.mode === "headless" && sessionAlive(s)) : undefined;
+      if (!live) status = "No headless agent is running on this task.";
+      else {
+        requestStop(root, live.agentId, live.sessionId);
+        status = `Asked ${live.agentId} to stop; the task will be handed off.`;
+      }
+      return redraw();
+    }
+    if (!buffer && !options.length && key?.name === "q") return quit();
+    if (!buffer && !options.length && key?.name === "m") {
+      const task = selectedTask();
+      const live = task ? listSessions(root).find((s) => s.taskId === task.id && s.mode === "headless" && sessionAlive(s)) : undefined;
+      if (!live) {
+        status = "No headless agent is running on this task to message. Type /message <agent> <text>.";
+        return redraw();
+      }
+      buffer = `/message ${live.agentId} `;
+      cursor = [...buffer].length;
+      return redraw();
+    }
     if (key?.name === "up") {
       if (options.length) selected = (selected - 1 + options.length) % options.length;
-      else if (history.length) { historyIndex = Math.min(historyIndex + 1, history.length - 1); buffer = history[historyIndex]; cursor = [...buffer].length; }
+      else if (buffer || historyIndex >= 0) {
+        if (history.length) { historyIndex = Math.min(historyIndex + 1, history.length - 1); buffer = history[historyIndex]; cursor = [...buffer].length; }
+      } else {
+        const order = orderedTasks();
+        const i = Math.max(0, order.findIndex((t) => t.id === selectedId));
+        selectedId = order[Math.max(0, i - 1)]?.id ?? selectedId;
+        scroll = undefined;
+      }
       return redraw();
     }
     if (key?.name === "down") {
       if (options.length) selected = (selected + 1) % options.length;
-      else if (historyIndex > 0) { historyIndex--; buffer = history[historyIndex]; cursor = [...buffer].length; }
-      else { historyIndex = -1; buffer = ""; cursor = 0; }
+      else if (buffer || historyIndex >= 0) {
+        if (historyIndex > 0) { historyIndex--; buffer = history[historyIndex]; cursor = [...buffer].length; }
+        else { historyIndex = -1; buffer = ""; cursor = 0; }
+      } else {
+        const order = orderedTasks();
+        const i = Math.max(0, order.findIndex((t) => t.id === selectedId));
+        selectedId = order[Math.min(order.length - 1, i + 1)]?.id ?? selectedId;
+        scroll = undefined;
+      }
       return redraw();
     }
     if (key?.name === "left") { cursor = Math.max(0, cursor - 1); return redraw(); }
@@ -782,28 +1342,17 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
       return redraw();
     }
   });
-  // Lines already on screen re-wrap when the terminal is resized, so the bottom area can't
-  // be erased line by line any more: redraw the screen (the transcript stays in scrollback).
   let resizeTimer: NodeJS.Timeout | null = null;
   out.on("resize", () => {
     if (resizeTimer) clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      write(`${ESC}H${ESC}2J`);
-      rowInBottom = 0;
-      write(`${header().join("\n")}\n`);
-      draw();
-    }, 80);
+    resizeTimer = setTimeout(draw, 80);
   });
 
   // ------------------------------------------------------------ start
 
-  const tasks = listTasks(root);
-  write(`${header().join("\n")}\n`);
-  const waiting = pendingReviews(root);
-  if (waiting.length) {
-    write(`${style.accent("Review")} ${style.bold(`${waiting.length} result(s) waiting for your review`)}\n`);
-    for (const t of waiting.slice(0, 5)) write(`  ${style.dim("·")}  ${short(t.objective, 70)} ${style.dim(`· by ${agentLabel(t.review?.worker ?? t.agent?.id ?? "?")} · ${t.id}`)}\n`);
-    write(`  ${style.dim("/review to inspect · /approve · /changes <what to fix>")}\n\n`);
+  write(`${ESC}?1049h${ESC}?25h`);
+  if (pendingReviews(root).length) {
+    log.push(style.dim("  /review to inspect · /approve · /changes <what to fix>"));
   }
   draw();
 }

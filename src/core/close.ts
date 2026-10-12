@@ -4,11 +4,14 @@ import { updateTask } from "./actions.js";
 import { sessionControl } from "./headless.js";
 import type { TaskState } from "./state.js";
 import { getTask, listSessions, saveTask, sessionAlive } from "./store.js";
+import { removeWorktree } from "./worktree.js";
 
 /**
  * Closing a task without merging it. Any agent still working on it (a
  * background run, a review run) is stopped first, and the task's review record
  * goes, so a late update can't reopen it or start a review of work nobody wants.
+ * Its worktree folder is removed too (the branch is kept, so nothing is lost),
+ * unless it has uncommitted changes: then it stays and the note says why.
  */
 
 export const CLOSE_REASONS = ["Accidental task", "Duplicate task", "No longer needed", "Already handled"];
@@ -30,6 +33,14 @@ export function closeTask(root: string, taskId: string, note: string, next = "Cl
   if (task.review) {
     delete task.review;
     saveTask(root, task);
+  }
+  if (task.worktree) {
+    try {
+      removeWorktree(root, taskId);
+    } catch (error) {
+      const why = /uncommitted changes/.test((error as Error).message) ? "it has uncommitted changes" : (error as Error).message.split("\n")[0];
+      note = `${note} (worktree kept at ${task.worktree.path}: ${why})`;
+    }
   }
   return updateTask(root, taskId, { status: "done", todo: [note], done: [note], next });
 }

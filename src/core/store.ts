@@ -37,6 +37,11 @@ export interface ProjectState {
   permissions?: "all";
   /** Per-agent concurrency, timeout, and daily delegation limits. */
   limits?: Record<string, AgentLimits>;
+  /**
+   * Agents the developer marked as out of quota (`agentbrain limit`), for limits
+   * AgentBrain can't see itself, like Copilot's inside VS Code. No `until`: until cleared.
+   */
+  outOfQuota?: Record<string, { at: string; until?: string }>;
 }
 
 export function writeJson(file: string, value: unknown): void {
@@ -126,6 +131,13 @@ export function getTask(cwd: string, taskId: string): TaskState {
     throw new Error(`Task "${taskId}" not found.`);
   }
   return readJson<TaskState>(path.join(taskDir(cwd, taskId), "task.json"));
+}
+
+/** The active task's id, unless that task is done (closed or merged) or gone. */
+export function openActiveTaskId(cwd: string): string | undefined {
+  const id = getProject(cwd).activeTaskId;
+  if (!id || !fs.existsSync(path.join(taskDir(cwd, id), "task.json"))) return undefined;
+  return getTask(cwd, id).status === "done" ? undefined : id;
 }
 
 export function listTasks(cwd: string): TaskState[] {

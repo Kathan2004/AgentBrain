@@ -10,6 +10,7 @@ import { autoContinue, claudeBinary, codexBinary } from "./delegate.js";
 import { OLLAMA_URL, localModel, ollamaEnv } from "./ollama.js";
 import { recordActivity, type ActivityKind } from "./activity.js";
 import { describeTool } from "./claudehooks.js";
+import { thoughtFrom } from "./thoughts.js";
 import { sessionControl } from "./headless.js";
 import { getSession, getTask, saveSession } from "./store.js";
 import { addWorktree, taskWorkdir } from "./worktree.js";
@@ -260,6 +261,17 @@ export function describeOutput(agentId: string, line: string, root: string): { k
   return null;
 }
 
+/** The agent's stated reason in one line of its JSON output: Claude's narration, Codex's reasoning or message. */
+export function describeThought(agentId: string, line: string): string | null {
+  let event: any;
+  try { event = JSON.parse(line); } catch { return null; }
+  if (claudeCli(agentId)) return event?.type === "assistant" ? thoughtFrom(event.message?.content) : null;
+  const item = event?.item;
+  if (!item || !/completed/.test(String(event.type ?? ""))) return null;
+  if ((item.type === "reasoning" || item.type === "agent_message") && typeof item.text === "string") return thoughtFrom([{ type: "text", text: item.text }]);
+  return null;
+}
+
 /** Runs the agent CLI with the prompt on stdin, streaming its progress to the transcript and the feed. */
 async function drive(
   root: string, taskId: string, agent: PrintAgent, me: { id: string; sessionId: string }, workdir: string,
@@ -290,6 +302,8 @@ async function drive(
       buffer = buffer.slice(i + 1);
       if (!line) continue;
       log(line.slice(0, 4000));
+      const said = describeThought(agent.id, line);
+      if (said) recordActivity(root, { agent: me.id, session: me.sessionId, task: taskId, kind: "thought", text: said });
       const described = describeOutput(agent.id, line, workdir);
       if (described) recordActivity(root, { agent: me.id, session: me.sessionId, task: taskId, ...described });
       try {

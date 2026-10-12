@@ -1,3 +1,4 @@
+import { diskEditRecorder } from "../core/diskedits.js";
 import { CLOSE_REASONS, closeTask } from "../core/close.js";
 import { readActivity } from "../core/activity.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -11,7 +12,7 @@ import { snapshot, taskChanges, taskDiff, transcriptTail, watchProject, type Liv
 import { openInEditor } from "./open.js";
 import { PAGE } from "./page.js";
 import { gitFetch, gitGraph, gitToday } from "./gitgraph.js";
-import { reviewTask, setChecks, setCouncil, setLead, startVerification } from "../core/review.js";
+import { retryPendingMerges, reviewTask, setChecks, setCouncil, setLead, startVerification } from "../core/review.js";
 import { setPermissionMode } from "../core/permissions.js";
 import { standInSweep } from "../core/standin.js";
 import { rescueStalledChats, resumeSentBack } from "../core/rescue.js";
@@ -132,6 +133,7 @@ export async function startUiServer(
     try { standInSweep(root, options.self); } catch { /* never break the dashboard */ }
     try { rescueStalledChats(root, options.self); } catch { /* same */ }
     try { resumeSentBack(root, options.self); } catch { /* same */ }
+    try { retryPendingMerges(root); } catch { /* same */ }
   };
   let lastSent = "";
   let vaultTimer: NodeJS.Timeout | undefined;
@@ -151,7 +153,9 @@ export async function startUiServer(
     lastSent = data;
     for (const client of clients) client.write(`event: snapshot\ndata: ${data}\n\n`);
   };
-  const stopWatching = watchProject(root, sendEvent);
+  // Edits from editors without hooks (Cursor, Copilot, by hand) show up in Activity too.
+  const diskEdits = diskEditRecorder(root);
+  const stopWatching = watchProject(root, sendEvent, diskEdits.changed);
 
   const handler = async (request: IncomingMessage, response: ServerResponse) => {
     let url: URL;
@@ -209,7 +213,7 @@ export async function startUiServer(
         const body = JSON.parse(await readBody(request)) as { prompt?: string; taskId?: string; worker?: string };
         if (!options.self) throw new Error("This control room can't start agents; run it with `agentbrain on`.");
         if (!body.taskId && !body.prompt?.trim()) throw new Error("Say what you want done.");
-        const result = delegate(root, { prompt: body.prompt?.trim(), taskId: body.taskId, worker: body.worker }, options.self);
+        const result = delegate(root, { prompt: body.prompt?.trim(), taskId: body.taskId, worker: body.worker, ...(body.taskId ? {} : { requestedBy: "developer" }) }, options.self);
         return json(response, { ok: true, taskId: result.task.id, worker: result.worker.name });
       }
       if (request.method === "POST" && url.pathname === "/api/chat") {
@@ -313,6 +317,7 @@ export async function startUiServer(
     url: `${origin()}/#token=${token}`,
     close: async () => {
       stopWatching();
+      diskEdits.stop();
       for (const client of clients) client.end();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },

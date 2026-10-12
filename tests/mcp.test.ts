@@ -143,6 +143,10 @@ describe("MCP server", () => {
     expect(task.completed).toContain("Refresh-token rotation");
     expect(task.decisions).toContain("Rotate on every use");
 
+    // A smaller model sends items as objects: their words are kept, not "[object Object]".
+    await client.call("agentbrain_update", { decisions: [{ decision: "Keep tokens short-lived", reason: "limits replay" }] });
+    expect(activeTask(repo).decisions).toContain("Keep tokens short-lived (limits replay)");
+
     // The agent is cut off (window closed, crash, usage limit): AgentBrain hands off for it.
     await client.close();
     const after = activeTask(repo);

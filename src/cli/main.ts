@@ -12,8 +12,8 @@ import { routeTask } from "../core/routing.js";
 import { addToQueue, readQueue, removeFromQueue, shiftQueue, waitUntilSettled } from "../core/queue.js";
 import { runTui } from "../ui/tui.js";
 import { runConsole } from "../ui/console.js";
-import { claudeBinary, codexBinary, delegate, planGoal } from "../core/delegate.js";
-import { getLimits, runTimeoutMinutes, setLimits, effectiveLimits } from "../core/limits.js";
+import { MENTIONS, claudeBinary, codexBinary, delegate, listWorkers, planGoal } from "../core/delegate.js";
+import { clearOutOfQuota, getLimits, markOutOfQuota, quotaReason, runTimeoutMinutes, setLimits, effectiveLimits } from "../core/limits.js";
 import { printAgent, runPrint } from "../core/printrun.js";
 import { localModel, ollamaModels, setLocalModel, setupLocalModel } from "../core/ollama.js";
 import { connectConnector, detectConnectors, disconnectConnector } from "../core/connectors.js";
@@ -38,7 +38,7 @@ import { remainingFeedback, runMcpServer } from "../mcp/server.js";
 import { installPostCommitHook, postCommit, uninstallPostCommitHook } from "../core/githooks.js";
 import { brainDir, findRoot } from "../core/paths.js";
 import { RULES_TARGETS, writeRules } from "../core/rules.js";
-import { findSession, getProject, getTask, initStore, listSessions, listTasks, saveProject, sessionAlive } from "../core/store.js";
+import { findSession, getProject, getTask, initStore, listSessions, listTasks, openActiveTaskId, saveProject, sessionAlive } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 import { describeActivity, taskActivity } from "../core/stall.js";
 import { addWorktree, mergeWorktree, pruneWorktrees, removeWorktree, taskWorkdir } from "../core/worktree.js";
@@ -134,6 +134,8 @@ Switching agents
                                           (agents: ${ACP_AGENTS.map((a) => a.id).join(", ")}; default allow: read,edit,search,think)
   agentbrain route [task-id] [--run]      Suggest which agent should take the task, with reasons;
   agentbrain limits [agent] [--parallel N] [--minutes N] [--daily N] [--none]
+  agentbrain limit <agent> [--until "<date>"] | --clear
+                                          An agent is out of quota (e.g. Copilot inside VS Code): no work goes to it
                                          Configure per-agent budgets and limits
                                           --run launches the top suggestion
   agentbrain run <agent> [task-id] --headless --detach [--linger <min>]
@@ -235,6 +237,8 @@ function parseCli() {
         plan: { type: "boolean" },
         review: { type: "boolean" },
         quorum: { type: "string" },
+        until: { type: "string" },
+        clear: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -297,10 +301,11 @@ function status(): void {
 
   console.log("AgentBrain status\n");
   console.log(`Tasks: ${tasks.length}`);
-  console.log(`Active: ${project.activeTaskId ?? "none"}`);
-  if (!project.activeTaskId) return;
+  const activeId = openActiveTaskId(cwd);
+  console.log(`Active: ${activeId ?? "none"}`);
+  if (!activeId) return;
 
-  const task = getTask(cwd, project.activeTaskId);
+  const task = getTask(cwd, activeId);
   const last = latestCheckpoint(cwd, task.id);
   console.log(`\n${task.id} — ${task.objective}`);
   console.log(`Status: ${task.status}`);
@@ -371,6 +376,15 @@ function resume(id?: string): void {
   const agent = flags.agent ? agentFromFlags() : undefined;
   if (agent?.sessionId) takeOver(cwd, taskId, { id: agent.id, sessionId: agent.sessionId });
   console.log(buildPrompt(cwd, taskId, cliCommand()));
+  // Printing the brief in a shell doesn't hand it to anyone: say so, and how to.
+  if (!agent && process.stderr.isTTY) {
+    const inCursor = Boolean(process.env.CURSOR_TRACE_ID) || /cursor/i.test(`${process.env.VSCODE_GIT_ASKPASS_MAIN ?? ""}${process.env.TERM_PROGRAM_VERSION ?? ""}`);
+    const who = inCursor ? "Cursor" : "your agent";
+    console.error(`\nThis only printed the brief: no agent has taken ${taskId} yet.\n` +
+      `  • In ${who}'s chat (with AgentBrain connected), type: continue ${taskId}\n` +
+      `  • Or paste the brief above into ${who}'s chat.\n` +
+      `  • To claim it for an agent from here: agentbrain resume ${taskId} --agent ${inCursor ? "cursor" : "<agent>"}`);
+  }
 }
 
 function positiveInt(name: string, value: string | undefined, fallback: number): number {
@@ -1031,6 +1045,26 @@ function checks(commands: string[]): void {
   }
 }
 
+/** `agentbrain limit <agent> [--until <date>] | --clear`: an agent is out of quota (or back). */
+function quota(name?: string): void {
+  const cwd = root();
+  if (!name) {
+    const marks = getProject(cwd).outOfQuota ?? {};
+    if (!Object.keys(marks).length) console.log("No agent is marked out of quota. Mark one: agentbrain limit <agent> [--until \"Nov 1 9:00\"]");
+    for (const id of Object.keys(marks)) console.log(`${id}: ${quotaReason(cwd, id) ?? "back (the date passed)"}`);
+    return;
+  }
+  const id = MENTIONS[name.toLowerCase()] ?? name;
+  if (!listWorkers().some((w) => w.id === id)) throw new Error(`Unknown agent "${name}". Agents: ${listWorkers().map((w) => w.id).join(", ")}`);
+  if (flags.clear) {
+    clearOutOfQuota(cwd, id);
+    console.log(`✓ ${id} is available again.`);
+    return;
+  }
+  markOutOfQuota(cwd, id, flags.until ? new Date(flags.until) : undefined);
+  console.log(`✓ ${id} is ${quotaReason(cwd, id)}. AgentBrain won't hand it work until then.`);
+}
+
 function limits(agent?: string): void {
   const cwd = root();
   const configured = getLimits(cwd);
@@ -1187,6 +1221,8 @@ async function main(): Promise<void> {
     await route(subcommand);
   } else if (command === "limits") {
     limits(subcommand);
+  } else if (command === "limit") {
+    quota(subcommand);
   } else if (command === "agents") {
     agents();
   } else if (command === "rules") {
@@ -1232,7 +1268,9 @@ async function main(): Promise<void> {
     const cwd = root();
     const prompt = [subcommand, ...rest].filter(Boolean).join(" ");
     if (!prompt && !flags.task) throw new Error('Usage: agentbrain delegate "<what to do>" [--agent <id>] [--task <id>]');
-    const result = delegate(cwd, { ...(prompt ? { prompt } : {}), ...(flags.task ? { taskId: flags.task } : {}), ...(flags.agent ? { worker: flags.agent } : {}) }, selfCommand());
+    // Run from an agent's shell (Claude Code sets CLAUDECODE), the agent is delegating, usually on your behalf.
+    const by = process.env.AGENTBRAIN_AGENT ?? (process.env.CLAUDECODE ? "claude-code" : "developer");
+    const result = delegate(cwd, { ...(prompt ? { prompt } : {}), ...(flags.task ? { taskId: flags.task } : { requestedBy: by }), ...(flags.agent ? { worker: flags.agent } : {}) }, selfCommand());
     if (flags.json) console.log(JSON.stringify({ taskId: result.task.id, worker: result.worker.id, why: result.why }));
     else console.log(`✓ ${result.task.id} → ${result.worker.name} (${result.why})\n  ${result.task.objective.length > 100 ? `${result.task.objective.slice(0, 99)}…` : result.task.objective}`);
   } else if (command === "connectors") {

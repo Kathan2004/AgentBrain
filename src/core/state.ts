@@ -49,6 +49,8 @@ export interface TaskState {
   parent?: string;
   /** Who asked for this task: the developer, or the agent that delegated it. */
   requestedBy?: string;
+  /** The developer's own words behind a task an agent wrote the brief for. */
+  request?: string;
   /** Worker selected by delegation and when it was selected. */
   delegatedTo?: { worker: string; at: string };
   /** When autopilot handed on a sent-back task: the `at` of the send-back event, so it happens once per send-back. */
@@ -99,6 +101,11 @@ export interface ReviewState {
   standInWanted?: string;
   /** When AgentBrain started the lead's own review run for this submission. */
   leadAsked?: string;
+  /**
+   * Approved, but the main checkout has uncommitted changes in files this task
+   * also changes: the approval stands and AgentBrain merges as soon as they're gone.
+   */
+  pendingMerge?: { by: string; notes?: string; at: string; why: string };
 }
 
 export interface ReviewVerdict {
@@ -141,4 +148,6 @@ export interface AgentSessionState {
   activity?: "working" | "idle";
   /** Last thing the session did, for the control room. */
   lastAction?: string;
+  /** The agent's latest stated reason, so the same one isn't recorded twice. */
+  lastThought?: string;
 }

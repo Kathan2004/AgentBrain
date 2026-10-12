@@ -45,6 +45,14 @@ function redactor(root: string): RegExp[] {
   return compilePatterns(getProject(root).redactPatterns);
 }
 
+/** A long spec's first to-do is its first sentence, not the whole spec (which stays the objective). */
+export function firstStep(objective: string): string {
+  if (objective.length <= 200) return objective;
+  const line = objective.split("\n")[0];
+  const sentence = /^(.{20,}?[.!?])(\s|$)/.exec(line)?.[1] ?? line;
+  return sentence.length > 200 ? `${sentence.slice(0, 199).trimEnd()}…` : sentence;
+}
+
 export function createTask(root: string, objective: string, options: { activate?: boolean } = {}): TaskState {
   const text = redact(objective.trim(), redactor(root));
   if (!text) throw new Error("Task objective cannot be empty.");
@@ -61,7 +69,7 @@ export function createTask(root: string, objective: string, options: { activate?
     createdAt: now,
     updatedAt: now,
     completed: [],
-    remaining: [text],
+    remaining: [firstStep(text)],
     decisions: [],
     failures: [],
     blockers: [],

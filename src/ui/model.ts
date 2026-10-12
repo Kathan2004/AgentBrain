@@ -1,6 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
+import { firstStep } from "../core/actions.js";
 import path from "node:path";
 import { getGitState, type GitState } from "../core/git.js";
 import { readActivity, type ActivityEvent } from "../core/activity.js";
@@ -52,6 +53,9 @@ export interface LiveTask {
   failures: string[];
   blockers: string[];
   nextAction?: string;
+  /** Who handed the task out, and the developer's own words behind it. */
+  requestedBy?: string;
+  request?: string;
   git: GitState;
   warning: string | null;
   /** The headless session working on this task right now, if any. */
@@ -101,6 +105,11 @@ function sessionState(s: AgentSessionState, alive: boolean): LiveSession["state"
   const seen = Date.parse(s.lastSeenAt ?? s.startedAt);
   if (!s.lastSeenAt || Date.now() - seen > PRESENCE_MS) return "ended";
   return s.activity ?? "idle";
+}
+
+/** Whether a session counts as present: the web's "Working now" and the console's count agree. */
+export function sessionPresent(s: AgentSessionState): boolean {
+  return sessionState(s, s.mode === "headless" ? sessionAlive(s) : false) !== "ended";
 }
 
 function liveSession(s: AgentSessionState): LiveSession {
@@ -178,6 +187,8 @@ export function snapshot(root: string, options: { includeDone?: boolean } = {}):
         failures: task.failures,
         blockers: task.blockers ?? [],
         nextAction: task.nextAction,
+        ...(task.requestedBy ? { requestedBy: task.requestedBy } : {}),
+        ...(task.request ? { request: task.request } : {}),
         git,
         warning: describeActivity(taskActivity(root, task, stallMinutes, undefined, git)),
         ...(live ? { liveSession: live } : {}),
@@ -399,7 +410,11 @@ export async function taskChanges(root: string, task: TaskState, maxBytes = 400_
   const said = listSessions(root)
     .filter((x) => x.taskId === task.id && x.stopReason && !system.test(x.stopReason))
     .sort((a, b) => (b.endedAt ?? b.startedAt).localeCompare(a.endedAt ?? a.startedAt))[0]?.stopReason;
-  const summary = task.completed.length ? task.completed.slice(-4).join(" · ") : said ?? commits.map((c) => c.subject).reverse().join(" · ");
+  // A step that is just the objective (older tasks seeded it whole) says nothing new.
+  const steps = task.completed.filter((c) => c !== task.objective && c !== firstStep(task.objective)).map((c) => (c.length > 240 ? `${c.slice(0, 239).trimEnd()}…` : c));
+  // The task's own commits say best what it did; steps are often bookkeeping ("Update tests").
+  const subjects = approximate ? [] : commits.map((c) => c.subject).reverse().slice(-4);
+  const summary = subjects.length ? subjects.join(" · ") : steps.length ? steps.slice(-4).join(" · ") : said ?? "";
   const value: TaskChanges = {
     summary,
     commits,
@@ -414,7 +429,7 @@ export async function taskChanges(root: string, task: TaskState, maxBytes = 400_
 }
 
 /** Watches AgentBrain state and task worktrees; calls `onChange` (debounced). */
-export function watchProject(root: string, onChange: () => void): () => void {
+export function watchProject(root: string, onChange: () => void, onFile?: (absFile: string) => void): () => void {
   let timer: NodeJS.Timeout | null = null;
   const fire = () => {
     if (timer) clearTimeout(timer);
@@ -429,6 +444,7 @@ export function watchProject(root: string, onChange: () => void): () => void {
         if (file && /(^|[/\\])(\.git|node_modules)([/\\]|$)/.test(String(file))) return;
         // The vault is written from these events; reacting to it would loop.
         if (file && path.join(dir, String(file)).startsWith(vault)) return;
+        if (file && onFile) onFile(path.join(dir, String(file)));
         fire();
       }));
     } catch {
