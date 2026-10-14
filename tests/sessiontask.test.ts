@@ -103,4 +103,11 @@ describe("the words behind a delegated task", () => {
     expect(developerRequest(r, "developer")).toBeUndefined();
     expect(developerRequest(r, "claude-code", Date.now() + 3 * 3_600_000)).toBeUndefined();
   });
+  it("doesn't take a background task's notification for the developer's prompt", () => {
+    const r = tempRepo("agentbrain-notify-");
+    initStore(r);
+    handleClaudeHook({ session_id: "n1", cwd: r, hook_event_name: "UserPromptSubmit", prompt: "<task-notification> <task-id>b3</task-id> done" });
+    handleClaudeHook({ session_id: "n1", cwd: r, hook_event_name: "UserPromptSubmit", prompt: "push it" });
+    expect(readActivity(r).filter((e) => e.kind === "prompt").map((e) => e.text)).toEqual(["push it"]);
+  });
 });

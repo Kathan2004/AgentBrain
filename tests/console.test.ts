@@ -28,18 +28,21 @@ describe("console rendering", () => {
     expect([box.cursorRow, box.cursorCol]).toEqual([2, 2 + (70 - 56)]);
   });
 
-  it("puts the agent and mode pills under the box, with the hint right-aligned when it fits", () => {
+  it("sets the agent and mode pills into the box's bottom edge, and joins the sidebar divider on top", () => {
     const wide = inputBox(100, "", 0, { agent: "Codex", agentId: "codex", mode: "task" }).lines.map(plain);
-    expect(wide).toHaveLength(4);
-    expect(wide[3]).toMatch(/^ \[ Codex \] \[ Task · own worktree \] +shift\+tab agent · \/mode · \/ for commands $/);
-    expect(wide[3]).toHaveLength(100);
+    expect(wide).toHaveLength(3);
+    expect(wide[2]).toMatch(/^╰─ ● Codex ─ Task · own worktree ─+╯$/);
+    expect(wide[2]).toHaveLength(100);
     const chat = inputBox(80, "", 0, { agent: "Auto → Claude Code", agentId: "claude-code", mode: "chat" }).lines.map(plain);
     expect(chat[1]).toContain("Ask anything");
-    expect(chat[3]).toContain("[ Auto → Claude Code ] [ Chat · project root ]");
-    expect([...chat[3]].length).toBeLessThanOrEqual(80);
+    expect(chat[2]).toContain("● Auto → Claude Code ─ Chat · project root");
+    expect([...chat[2]].length).toBe(80);
     const narrow = inputBox(30, "", 0, { agent: "Copilot (VS Code)", mode: "chat" }).lines;
-    expect(narrow.every((l) => visibleLength(l) <= 30)).toBe(true);
-    expect(plain(narrow[3]).endsWith("…")).toBe(true);
+    expect(narrow.every((l) => visibleLength(l) === 30)).toBe(true);
+    expect(plain(narrow[2])).toContain("…");
+    const joined = inputBox(60, "", 0, undefined, 20).lines.map(plain);
+    expect(joined[0][20]).toBe("┴");
+    expect(joined[0]).toHaveLength(60);
   });
 
   it("suggests slash commands while the command name is being typed", () => {

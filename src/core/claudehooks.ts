@@ -243,7 +243,10 @@ export function handleAgentHook(payload: ClaudeHookPayload, fallbackCwd: string,
       if (process.env.AGENTBRAIN_SESSION || /^You are (starting|continuing) AgentBrain task/.test(text)) {
         const verb = /^You are continuing/.test(text) ? "Handed back to" : "Started";
         recordActivity(root, { agent: "agentbrain", ...(taskId ? { task: taskId } : {}), kind: "handoff", text: `${verb} ${LABEL} with the task's brief` });
-      } else note("prompt", text.length > 200 ? `${text.slice(0, 200)}…` : text);
+      } else if (!/^<(task-notification|system-reminder|command-)/.test(text)) {
+        // Claude Code delivers background-task results as tagged prompts; those aren't the developer asking.
+        note("prompt", text.length > 200 ? `${text.slice(0, 200)}…` : text);
+      }
       activity = "working";
       lastAction = "Thinking about a new prompt";
       if (isLead && awaitingVote(root, AGENT).length) {

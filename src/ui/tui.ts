@@ -92,6 +92,8 @@ export const HEX = {
   failed: "#f2564c",
   ok: "#3fb968",
   done: "#b48cf2",
+  /** The web's --raised: the background of the selected nav item and task row. */
+  raised: "#262626",
 } as const;
 
 export const ui = {
@@ -107,6 +109,19 @@ export const ui = {
   done: hexPaint(HEX.done),
   bold,
 };
+
+/**
+ * Lays a background colour under a whole row, as the web's selected rows
+ * (.navi.on, .titem.on). Inner resets would drop it, so it is restored after
+ * each; without colour the row is inverted instead.
+ */
+export function highlight(text: string, width: number, hex: string = HEX.raised): string {
+  const row = fit(text, width);
+  const mode = colorMode();
+  if (mode === "none") return c("7", fit(stripAnsi(row), width));
+  const bg = `${ESC}${mode === "truecolor" ? `48;2;${rgb(hex).join(";")}` : `48;5;${to256(hex)}`}m`;
+  return `${bg}${row.split(`${ESC}0m`).join(`${ESC}0m${bg}`)}${ESC}0m`;
+}
 
 /** Agent colours from the web PALETTE, with the same hash, so an agent has one colour everywhere. */
 export const PALETTE = ["#a1a1aa", "#3fb968", "#b48cf2", "#e8b84a", "#f2564c", "#3cc7bd", "#f07ab4"];
@@ -387,6 +402,16 @@ function bodyLines(root: string, snap: Snapshot, selected: LiveTask | undefined,
 export type Pane = "tasks" | "chat" | "activity" | "team";
 export const PANES: Pane[] = ["tasks", "chat", "activity", "team"];
 export const PANE_LABELS: Record<Pane, string> = { tasks: "Tasks", chat: "Chat", activity: "Activity", team: "Team" };
+/** The nav's icons, standing in for the web's SVGs. */
+export const PANE_ICONS: Record<Pane, string> = { tasks: "▣", chat: "◇", activity: "≈", team: "◎" };
+
+/** A sidebar group heading, as the web's .sgroup: small caps on the left, the count on the right. */
+export function groupHeading(title: string, width: number, count?: number | string): string {
+  const label = bold(ui.faint(title.toUpperCase()));
+  const n = count === undefined || count === "" ? "" : ui.faint(String(count));
+  const gap = Math.max(1, width - 2 - visibleLength(label) - visibleLength(n));
+  return fit(` ${label}${" ".repeat(gap)}${n} `, width);
+}
 
 export interface SidebarTask {
   id: string;
@@ -438,16 +463,17 @@ export function sidebarOrder<T extends SidebarTask>(tasks: T[], recent = 8): T[]
 
 /**
  * One sidebar row, exactly `width` wide: a marker, the state dot, the short title
- * (faint once done) and the age right-aligned. A focused selection is inverted.
+ * (faint once done) and the age right-aligned. The selection sits on the raised
+ * background, as the web's open task; a bar marks it while the list has the keys.
  */
 export function sidebarRow(task: SidebarTask, width: number, now = new Date(), selected = false, focused = false): string {
   const when = age(task.updatedAt, now);
   const title = ellipsize(shortTitle(task.objective), Math.max(1, width - 5 - when.length));
   const gap = Math.max(1, width - 4 - visibleLength(title) - when.length);
-  const paint = task.status === "done" ? ui.faint : ui.text;
-  const mark = selected ? ui.text("›") : " ";
-  const row = fit(`${mark}${task.warning ? ui.waiting("●") : stateDot(task)} ${selected ? bold(paint(title)) : paint(title)}${" ".repeat(gap)}${ui.faint(when)} `, width);
-  return selected && focused ? c("7", fit(stripAnsi(row), width)) : row;
+  const paint = task.status === "done" && !selected ? ui.muted : ui.text;
+  const mark = selected && focused ? ui.text("▌") : " ";
+  const row = `${mark}${task.warning ? ui.waiting("●") : stateDot(task)} ${selected ? bold(paint(title)) : paint(title)}${" ".repeat(gap)}${ui.faint(when)} `;
+  return selected ? highlight(row, width) : fit(row, width);
 }
 
 export interface TaskList {
@@ -471,8 +497,8 @@ export function taskListLines(
   const group = (title: string, list: SidebarTask[], always = false) => {
     if (!list.length && !always) return;
     if (lines.length) lines.push(fit("", width));
-    lines.push(fit(` ${bold(ui.muted(title))}${list.length ? ` ${ui.faint(String(list.length))}` : ""}`, width));
-    if (!list.length) lines.push(fit(`   ${ui.faint("Nothing finished yet.")}`, width));
+    lines.push(groupHeading(title, width, list.length || ""));
+    if (!list.length) lines.push(fit(`  ${ui.faint("Nothing finished yet.")}`, width));
     for (const task of list) {
       const selected = task.id === options.selectedId;
       if (selected) selectedLine = lines.length;
@@ -498,12 +524,13 @@ export function windowAround(total: number, size: number, line: number): number 
 /** The team pinned under the sidebar: each worker's dot and name, LEAD on the lead, dim when unavailable. */
 export function teamBlock(team: TeamMember[], width: number): string[] {
   if (!team.length) return [];
-  const lines = [fit(` ${bold(ui.muted("Team"))}`, width)];
+  const lines = [groupHeading("Team", width, `${team.filter((m) => m.up).length}/${team.length}`)];
   for (const m of team) {
     const badge = m.lead ? "LEAD" : "";
     const name = ellipsize(m.name, Math.max(1, width - 5 - (badge ? badge.length + 1 : 0)));
     const dotted = m.up ? agentPaint(m.id)("●") : ui.faint("○");
-    lines.push(fit(`  ${dotted} ${m.up ? ui.text(name) : ui.faint(name)}${badge ? ` ${ui.review(badge)}` : ""}`, width));
+    const gap = Math.max(1, width - 4 - visibleLength(name) - badge.length);
+    lines.push(fit(` ${dotted} ${m.up ? ui.text(name) : ui.faint(name)}${badge ? `${" ".repeat(gap)}${ui.review(badge)}` : ""}`, width));
   }
   return lines;
 }
@@ -538,9 +565,10 @@ export function sidebarLines(input: SidebarInput, width: number, height: number)
     nav.set(top.length, pane);
     const on = pane === input.pane;
     const count = pane === "tasks" && needs ? ui.review(String(needs)) : "";
-    const label = on ? `${ui.text("›")} ${bold(ui.text(PANE_LABELS[pane]))}` : `  ${ui.muted(PANE_LABELS[pane])}`;
-    const gap = Math.max(1, width - 2 - visibleLength(label) - visibleLength(count));
-    top.push(fit(` ${label}${" ".repeat(gap)}${count} `, width));
+    const label = on ? `${ui.text(PANE_ICONS[pane])} ${bold(ui.text(PANE_LABELS[pane]))}` : `${ui.faint(PANE_ICONS[pane])} ${ui.muted(PANE_LABELS[pane])}`;
+    const gap = Math.max(1, width - 3 - visibleLength(label) - visibleLength(count));
+    const row = ` ${label}${" ".repeat(gap)}${count}  `;
+    top.push(on ? highlight(row, width) : fit(row, width));
   }
   top.push(fit("", width));
 

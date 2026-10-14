@@ -41,7 +41,10 @@ import {
   fit,
   hexPaint,
   hhmm,
+  highlight,
   NARROW,
+  PANE_ICONS,
+  PANE_LABELS,
   PANES,
   shortTitle,
   sidebarLines,
@@ -220,34 +223,43 @@ export interface InputPills {
 
 const PLACEHOLDER = "Describe a task for your agents, or type / for commands";
 const CHAT_PLACEHOLDER = "Ask anything about this project, or type / for commands";
-const INPUT_HINT = "shift+tab agent · /mode · / for commands";
 
-/** The row under the prompt box: agent and mode pills, and a hint on the right when it fits. */
-export function pillRow(width: number, pills: InputPills): string {
-  const pill = (inner: string) => `${style.dim("[")} ${inner} ${style.dim("]")}`;
-  const agent = pills.agentId ? agentPaint(pills.agentId)(pills.agent) : style.text(pills.agent);
-  const where = pills.mode === "chat" ? "Chat · project root" : "Task · own worktree";
-  const left = ` ${pill(agent)} ${pill(style.muted(where))}`;
-  const gap = width - visibleLength(left) - INPUT_HINT.length - 1;
-  return gap >= 2 ? `${left}${" ".repeat(gap)}${style.dim(INPUT_HINT)} ` : ellipsize(left, width);
+/**
+ * The prompt box's bottom edge with the agent and mode set into it, as the web
+ * composer's pickers sit inside its frame: ╰─ ● Auto → Codex ─ Task · own worktree ──╯
+ */
+export function pillBorder(width: number, pills: InputPills): string {
+  const agent = pills.agentId ? `${agentPaint(pills.agentId)("●")} ${style.text(pills.agent)}` : style.text(pills.agent);
+  const where = pills.mode === "chat" ? `${style.text("Chat")} ${style.muted("· project root")}` : `${style.text("Task")} ${style.muted("· own worktree")}`;
+  const inner = ellipsize(`${agent} ${style.line("─")} ${where}`, Math.max(1, width - 6));
+  return `${style.line("╰─")} ${inner} ${style.line(`${"─".repeat(Math.max(0, width - 5 - visibleLength(inner)))}╯`)}`;
 }
 
-/** A rounded prompt box at exactly `width` columns; long input wraps inside it. */
-export function inputBox(width: number, buffer: string, cursor: number, pills?: InputPills): InputRender {
+/**
+ * A rounded prompt box at exactly `width` columns; long input wraps inside it.
+ * `joint` puts a ┴ in the top edge where the sidebar's divider meets it.
+ */
+export function inputBox(width: number, buffer: string, cursor: number, pills?: InputPills, joint?: number): InputRender {
   const w = Math.max(20, width);
   const tw = w - 4;
   const chars = [...buffer];
   const rows = Math.max(1, Math.floor(chars.length / tw) + 1);
   const placeholder = pills?.mode === "chat" ? CHAT_PLACEHOLDER : PLACEHOLDER;
-  const lines: string[] = [style.line(`╭${"─".repeat(w - 2)}╮`)];
+  const edge = [..."─".repeat(w - 2)];
+  if (joint !== undefined && joint > 0 && joint < w - 1) edge[joint - 1] = "┴";
+  const lines: string[] = [style.line(`╭${edge.join("")}╮`)];
   for (let r = 0; r < rows; r++) {
     const text = chars.slice(r * tw, (r + 1) * tw).join("");
     const body = !buffer && r === 0 ? style.dim(ellipsize(placeholder, tw)) : text;
     lines.push(`${style.line("│")} ${fit(body, tw)} ${style.line("│")}`);
   }
-  lines.push(style.line(`╰${"─".repeat(w - 2)}╯`));
-  if (pills) lines.push(pillRow(w, pills));
+  lines.push(pills ? pillBorder(w, pills) : style.line(`╰${"─".repeat(w - 2)}╯`));
   return { lines, cursorRow: 1 + Math.floor(cursor / tw), cursorCol: 2 + (cursor % tw) };
+}
+
+/** Key hints, as a footer: the keys bright, what they do faint. */
+export function keyHints(hints: [string, string][]): string {
+  return hints.map(([key, what]) => `${style.text(key)} ${style.dim(what)}`).join("   ");
 }
 
 export interface Command {
@@ -535,7 +547,9 @@ export function commandName(text: string): string {
   const words = parts.find((p) => p.length && p[0] !== "cd" && p[0] !== "export") ?? parts.find((p) => p.length) ?? [];
   if (!words.length) return "a command";
   const prog = words[0].split("/").pop()!;
-  const next = words.slice(1).find((w) => !w.startsWith("-") && !/^["'<$]/.test(w));
+  // A heredoc's body is not arguments: "python3 - <<'EOF' …" ran python3.
+  const stop = words.findIndex((w, i) => i > 0 && (w === "-" || w.startsWith("<")));
+  const next = words.slice(1, stop < 0 ? undefined : stop).find((w) => !w.startsWith("-") && !/^["'<$(]/.test(w));
   return TWO_WORD.has(prog) && next && !next.includes("/") ? `${prog} ${next}` : prog;
 }
 
@@ -556,11 +570,23 @@ function foldLine(run: ActivityEvent[]): string {
  * said in full (wrapped, never cut mid-sentence), then one folded line for the
  * commands and edits it led to. Your prompts read as yours.
  */
-export function storyLines(events: ActivityEvent[], width: number, titleOf?: (taskId: string | undefined) => string | undefined): string[] {
+export function storyLines(all: ActivityEvent[], width: number, titleOf?: (taskId: string | undefined) => string | undefined): string[] {
   const w = Math.max(20, width);
+  // Hooks repeat an agent's last words with every tool call; say them once and fold the work together.
+  const said = new Map<string, string>();
+  const events = all.filter((e) => {
+    if (e.kind === "prompt") said.clear();
+    if (e.kind !== "thought") return true;
+    const repeat = said.get(e.agent) === e.text;
+    said.set(e.agent, e.text);
+    return !repeat;
+  });
   const lines: string[] = [];
+  let lastTask: string | undefined;
   const head = (agent: string, who: string, at: string, task: string | undefined, paint: (s: string) => string) => {
-    const title = titleOf?.(task);
+    // The task's title shows when the story moves to another task, not on every entry.
+    const title = task !== lastTask ? titleOf?.(task) : undefined;
+    lastTask = task;
     const left = `${paint("●")} ${style.accent(who)} ${style.dim(hhmm(at))}`;
     const room = w - visibleLength(left) - 3;
     if (lines.length) lines.push(fit("", w));
@@ -599,8 +625,17 @@ export function storyLines(events: ActivityEvent[], width: number, titleOf?: (ta
   return lines;
 }
 
-/** A section heading on the task page. */
-const section = (label: string, w: number, count?: number) => [fit("", w), fit(` ${style.muted(label)}${count !== undefined ? ` ${style.dim(String(count))}` : ""}`, w)];
+/** A section heading in the main pane: the label, its count, and a faint rule to the edge. */
+export function heading(label: string, w: number, count?: number | string): string {
+  const head = ` ${style.accent(label)}${count !== undefined && count !== "" ? ` ${style.dim(String(count))}` : ""} `;
+  return fit(`${head}${style.line("─".repeat(Math.max(0, w - visibleLength(head) - 1)))}`, w);
+}
+const section = (label: string, w: number, count?: number) => [fit("", w), heading(label, w, count)];
+
+/** A page title, as the web's .pagehead: the name in bold, then what it is about. */
+export function pageHead(title: string, sub: string, w: number): string[] {
+  return [fit(ellipsize(` ${style.accent(title)}  ${style.muted(sub)}`, w), w), fit("", w)];
+}
 
 /** Wrapped list items with a marker, hanging-indented. */
 function items(list: string[], w: number, marker: (i: number) => string, paint: (s: string) => string = style.text): string[] {
@@ -628,21 +663,81 @@ export interface TaskPage {
   decisions: string[];
   failures: string[];
   files: string[];
-  changes?: { files: number; added: number; removed: number };
+  changes?: { files: number; added: number; removed: number; commits?: number };
+  /** The project has checks configured: the Checks step waits for them. */
+  checksConfigured?: boolean;
+  /** What AgentBrain's own checks found on this result. */
+  checks?: { command: string; ok: boolean }[];
+  /** Red flags on the result: the evidence contradicts what an agent said. */
+  flags?: { kind: string; agent: string; text: string }[];
+  /** Who finished it, while it waits for review. */
+  finishedBy?: string;
+  /** It went through a review (done tasks only: false means it skipped one). */
+  reviewed?: boolean;
 }
+
+export const STEPS = ["Delegated", "Working", "Checks", "Review", "Done"];
+
+/** Where a task is on the web's stepper: 0 delegated … 4 done. */
+export function taskStage(task: Pick<TaskPage, "status" | "checksConfigured" | "checks">): number {
+  if (task.status === "done") return 4;
+  if (task.status === "review") return task.checksConfigured && !task.checks?.length ? 2 : 3;
+  if (task.status === "running" || task.status === "checkpoint") return 1;
+  return 0;
+}
+
+/** The web's progress steps as one line: ✓ Delegated ── ✓ Working ── ● Checks ── ○ Review ── ○ Done */
+export function stepperLine(task: Pick<TaskPage, "status" | "checksConfigured" | "checks" | "reviewed" | "nextAction" | "merged">, w: number): string {
+  const n = taskStage(task);
+  const failed = task.checks?.some((c) => !c.ok);
+  const skipped = task.status === "done" && task.reviewed === false;
+  const tone = hexPaint(stateTone(task).hex);
+  const join = w >= 64 ? style.line(" ── ") : style.line(" › ");
+  const steps = STEPS.map((label, i) => {
+    if (skipped && (i === 2 || i === 3)) return style.dim(`– ${label}`);
+    if (i === 2 && failed) return `${style.red("✗")} ${style.red(label)}`;
+    if (i < n) return `${style.green("✓")} ${style.muted(label)}`;
+    if (i === n) return `${tone("●")} ${style.accent(label)}`;
+    return style.dim(`○ ${label}`);
+  });
+  return fit(ellipsize(`   ${steps.join(join)}`, w), w);
+}
+
+const FLAG_NAMES: Record<string, string> = { "no-change": "Nothing changed", "false-claim": "False claim", hallucination: "Hallucination", dissent: "Dissent" };
 
 /** The whole task, like the web's task page: what was asked, what's done and left, files, and its story. */
 export function taskPageLines(task: TaskPage, events: ActivityEvent[], width: number, now = new Date(), options: { fullBrief?: boolean } = {}): string[] {
   const w = Math.max(20, width);
   const tone = stateTone(task);
+  const paintTone = hexPaint(tone.hex);
   const lines: string[] = [];
   // The first sentence, whole: the page has room to wrap it.
   const title = String(task.objective).split(/(?<=[.!?])\s|\n/)[0].slice(0, 240);
   wrapText(title, w - 4).forEach((line, i) => lines.push(fit(` ${i ? " " : stateDot(task)} ${style.accent(line)}`, w)));
   const when = age(task.updatedAt, now);
-  const meta = [hexPaint(tone.hex)(tone.label), task.id, task.agent && agentLabel(task.agent), task.branch, when && `${when}${when === "now" ? "" : " ago"}`].filter(Boolean).join(style.dim(" · "));
-  lines.push(fit(`   ${style.dim(meta)}`, w));
-  if (task.nextAction && !["done", "merged"].includes(task.status)) lines.push(...wrapText(`Next: ${task.nextAction}`, w - 4).map((l) => fit(`   ${style.text(l)}`, w)));
+  const meta = [paintTone(tone.label), task.id, task.agent && agentLabel(task.agent), task.branch, when && `${when}${when === "now" ? "" : " ago"}`].filter(Boolean).join(style.dim(" · "));
+  lines.push(fit(ellipsize(`   ${style.dim(meta)}`, w), w));
+  if (task.changes && (task.changes.files || task.changes.commits)) {
+    const c = task.changes;
+    const commits = c.commits !== undefined ? `${c.commits} commit${c.commits === 1 ? "" : "s"} · ` : "";
+    lines.push(fit(`   ${style.muted(`${commits}${c.files} file${c.files === 1 ? "" : "s"}`)} ${style.green(`+${c.added}`)} ${style.red(`−${c.removed}`)}`, w));
+  }
+  lines.push(fit("", w), stepperLine(task, w));
+  if (task.nextAction && !["done", "merged"].includes(task.status)) {
+    lines.push(fit("", w));
+    wrapText(task.nextAction, w - 11).forEach((l, i) => lines.push(fit(` ${paintTone("▌")} ${i ? "      " : style.accent("Next  ")}${style.text(l)}`, w)));
+  }
+  // Waiting on you: what the checks found, any red flags, and how to decide.
+  if (task.status === "review") {
+    lines.push(...section("Review", w));
+    if (task.finishedBy) lines.push(fit(`   ${style.muted("Finished by")} ${agentPaint(task.finishedBy)(agentLabel(task.finishedBy))}`, w));
+    for (const check of task.checks ?? []) lines.push(fit(ellipsize(`   ${check.ok ? style.green("✓ passed") : style.red("✗ failed")} ${style.dim("·")} ${style.text(check.command)}`, w), w));
+    if (task.checksConfigured && !task.checks?.length) lines.push(fit(`   ${style.dim("Checks have not run on this result yet.")}`, w));
+    for (const flag of task.flags ?? []) {
+      wrapText(`${FLAG_NAMES[flag.kind] ?? flag.kind} · ${agentLabel(flag.agent)}: ${flag.text}`, w - 6).forEach((l, i) => lines.push(fit(`   ${i ? "  " : style.orange("⚠ ")}${style.orange(l)}`, w)));
+    }
+    lines.push(fit(`   ${keyHints([["/approve", "merge it"], ["/changes <what to fix>", "send it back"]])}`, w));
+  }
   // A long brief (an agent's hand-out) folds to a few lines; b shows all of it.
   const brief = task.objective.trim() !== title.trim() ? wrapText(task.objective, w - 4) : [];
   if (brief.length) {
@@ -661,9 +756,11 @@ export function taskPageLines(task: TaskPage, events: ActivityEvent[], width: nu
   if (task.decisions.length) { lines.push(...section("Decisions", w, task.decisions.length)); lines.push(...items(task.decisions, w, () => style.dim("·"), style.muted)); }
   if (task.failures.length) { lines.push(...section("What failed", w, task.failures.length)); lines.push(...items(task.failures, w, () => style.red("✗"), style.muted)); }
   if (task.files.length) {
-    const stats = task.changes ? ` ${style.green(`+${task.changes.added}`)} ${style.red(`−${task.changes.removed}`)}` : "";
-    lines.push(fit("", w), fit(` ${style.muted("Files changed")} ${style.dim(String(task.files.length))}${stats}`, w));
-    for (const file of task.files.slice(0, 12)) lines.push(fit(ellipsize(`   ${style.text(file)}`, w), w));
+    lines.push(...section("Files changed", w, task.files.length));
+    for (const file of task.files.slice(0, 12)) {
+      const dir = file.includes("/") ? file.slice(0, file.lastIndexOf("/") + 1) : "";
+      lines.push(fit(ellipsize(`   ${style.dim(dir)}${style.text(base(file))}`, w), w));
+    }
     if (task.files.length > 12) lines.push(fit(`   ${style.dim(`+${task.files.length - 12} more`)}`, w));
   }
   const story = storyLines(events, w - 1);
@@ -690,7 +787,12 @@ export interface RoomModel {
   pills: InputPills;
   commands?: Command[];
   selectedCommand?: number;
+  /** A message for the footer; replaces the key hints while it shows. */
   status?: string;
+  /** The footer's key hints: [key, what it does]. */
+  hints?: [string, string][];
+  /** Where the next prompt goes, right-aligned in the footer when it fits. */
+  route?: string;
   /** The main pane takes the whole width (Enter on a task; Esc goes back). */
   expanded?: boolean;
   now?: Date;
@@ -709,44 +811,58 @@ export interface RoomFrame {
   bodyRows: number;
 }
 
-/** The full-screen control room: header, facts, sidebar, main pane, compose box. */
+/** The top bar: the brand and project on the left, the web's facts on the right, as many as fit. */
+export function topBar(model: Pick<RoomModel, "project" | "tasks" | "agentsActive" | "decides" | "checks">, width: number): string {
+  const review = model.tasks.filter((t) => t.status === "review").length;
+  const running = model.tasks.filter((t) => t.status === "running").length;
+  const brand = ` ${style.accent("✻ AgentBrain")}  ${style.muted(model.project)}`;
+  const facts = [
+    `${review ? style.yellow("●") : style.dim("○")} ${style.text(String(review))} ${style.muted("to review")}`,
+    `${running ? style.teal("●") : style.dim("○")} ${style.text(String(running))} ${style.muted("running")}`,
+    `${style.text(String(model.agentsActive))} ${style.muted(`agent${model.agentsActive === 1 ? "" : "s"} active`)}`,
+    style.muted(model.decides),
+    ...(model.checks?.length ? [`${style.dim("checks")} ${style.muted(model.checks.join(" · "))}`] : []),
+  ];
+  const sep = style.dim("   ");
+  let shown = facts;
+  while (shown.length && visibleLength(brand) + 2 + visibleLength(shown.join(sep)) + 1 > width) shown = shown.slice(0, -1);
+  const right = shown.join(sep);
+  return fit(`${brand}${" ".repeat(Math.max(1, width - visibleLength(brand) - visibleLength(right) - 1))}${right} `, width);
+}
+
+/** The full-screen control room: top bar, sidebar, main pane, compose box, key hints. */
 export function renderRoom(model: RoomModel, width: number, height: number): RoomFrame {
   const w = Math.max(20, width);
   const h = Math.max(10, height);
   const now = model.now ?? new Date();
-  const review = model.tasks.filter((t) => t.status === "review").length;
-  const running = model.tasks.filter((t) => t.status === "running").length;
-  const n = (count: number, text: string) => `${style.accent(String(count))} ${style.muted(text)}`;
-  const facts = [
-    n(review, "to review"),
-    n(running, "running"),
-    n(model.agentsActive, `agent${model.agentsActive === 1 ? "" : "s"} active`),
-    style.muted(model.decides),
-    ...(model.checks?.length ? [`${style.muted("Checks:")} ${style.text(model.checks.join(" · "))}`] : []),
-  ];
+  const wide = w >= NARROW && !model.expanded;
+  const listWidth = wide ? Math.min(40, Math.max(22, Math.floor(w * 0.34))) : 0;
   const header = [
-    fit(` ${style.accent("AgentBrain")}  ${style.muted(model.project)}`, w),
-    fit(` ${facts.join(style.dim(" · "))}`, w),
+    topBar(model, w),
+    style.line(wide ? `${"─".repeat(listWidth)}┬${"─".repeat(w - listWidth - 1)}` : "─".repeat(w)),
   ];
 
-  const box = inputBox(w, model.buffer, model.cursor, model.pills);
+  const box = inputBox(w, model.buffer, model.cursor, model.pills, wide ? listWidth : undefined);
   const sugg = (model.commands ?? []).slice(0, 8);
   const suggLines = sugg.map((c, i) => {
     const label = `/${c.name}${c.args ? ` ${c.args}` : ""}`;
-    const line = `  ${label.padEnd(28)} ${c.help}`;
-    return fit(i === (model.selectedCommand ?? 0) ? style.accent(line) : style.dim(line), w);
+    const on = i === (model.selectedCommand ?? 0);
+    const line = `  ${on ? style.accent(label.padEnd(28)) : style.text(label.padEnd(28))} ${on ? style.text(c.help) : style.dim(c.help)}`;
+    return on ? highlight(line, w) : fit(line, w);
   });
-  const status = model.status ? [fit(ellipsize(`  ${model.status}`, w), w)] : [];
-  const compose = [...box.lines, ...status, ...suggLines];
+  const hints = model.hints?.length ? keyHints(model.hints) : "";
+  const left = model.status ? model.status : hints;
+  const route = model.route && visibleLength(left) + visibleLength(model.route) + 6 <= w ? style.dim(model.route) : "";
+  const footer = fit(ellipsize(` ${left}${route ? `${" ".repeat(Math.max(2, w - 2 - visibleLength(left) - visibleLength(route)))}${route}` : ""}`, w), w);
+  const compose = [...box.lines, footer, ...suggLines];
   const bodyH = Math.max(1, h - header.length - compose.length);
-  const wide = w >= NARROW && !model.expanded;
-  const listWidth = wide ? Math.min(40, Math.max(22, Math.floor(w * 0.34))) : 0;
   const emptySidebar = { lines: [] as string[], rows: new Map<number, string>(), nav: new Map<number, Pane>() };
   let sidebar = emptySidebar;
   const body = model.body;
   const maxScroll = Math.max(0, body.length - bodyH);
   const scroll = Math.max(0, Math.min(model.scroll ?? maxScroll, maxScroll));
   const vis = body.slice(scroll, scroll + bodyH);
+  const more = (n: number) => style.dim(` ↓ ${n} more lines · ↑↓ / pgup pgdn / wheel scroll`);
 
   const lines: string[] = [...header];
   let top = scroll;
@@ -762,19 +878,22 @@ export function renderRoom(model: RoomModel, width: number, height: number): Roo
     const rule = style.line("│");
     for (let r = 0; r < bodyH; r++) {
       let cell = vis[r] ?? "";
-      if (r === bodyH - 1 && scroll < maxScroll) cell = style.dim(` ↓ ${body.length - scroll - bodyH} more lines · ↑↓ / pgup pgdn / wheel scroll`);
+      if (r === bodyH - 1 && scroll < maxScroll) cell = more(body.length - scroll - bodyH);
       lines.push(`${sidebar.lines[r] ?? fit("", listWidth)}${rule}${fit(cell, paneW)}`);
     }
   } else {
     const nav = model.expanded
-      ? `${style.dim("esc")} ${style.muted("back")}${style.dim("  ·  pgup/pgdn scroll  ·  o open in editor")}`
-      : PANES.map((p) => (p === model.pane ? style.accent(p[0]!.toUpperCase() + p.slice(1)) : style.dim(p[0]!.toUpperCase() + p.slice(1)))).join(style.dim("  "));
+      ? `${style.dim("‹ esc")}  ${style.muted("Tasks")} ${style.dim("›")} ${style.text(model.selectedId ?? "")}`
+      : PANES.map((p) => {
+        const label = ` ${PANE_ICONS[p]} ${PANE_LABELS[p]} `;
+        return p === model.pane ? highlight(style.accent(label), visibleLength(label)) : style.muted(label);
+      }).join(" ");
     lines.push(fit(` ${nav}`, w));
     const room = Math.max(1, h - lines.length - compose.length);
     maxTop = Math.max(0, body.length - room);
     top = Math.max(0, Math.min(model.scroll ?? body.length, maxTop));
     bodyRows = room;
-    for (let r = 0; r < room; r++) lines.push(fit(body[top + r] ?? "", w));
+    for (let r = 0; r < room; r++) lines.push(fit(r === room - 1 && top < maxTop ? more(body.length - top - room) : body[top + r] ?? "", w));
   }
   const composeTop = lines.length;
   lines.push(...compose);
@@ -963,7 +1082,7 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
 
   const taskBody = (w: number): string[] => {
     const task = selectedTask();
-    if (!task) return log.length ? log : [style.dim("  No tasks yet. Type a request below.")];
+    if (!task) return [...pageHead("Tasks", path.basename(root) || root, w), fit(`   ${style.dim("No tasks yet. Describe one below, /mode task, and an agent picks it up in its own worktree.")}`, w)];
     const live = data.snap?.tasks.find((t) => t.id === task.id);
     const events = data.activity.filter((e) => e.task === task.id);
     const page = taskPageLines({
@@ -983,37 +1102,86 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
       failures: live?.failures ?? [],
       files: live?.git.changedFiles ?? [],
       ...(live?.changes ? { changes: live.changes } : {}),
+      checksConfigured: data.checks.length > 0,
+      checks: task.review?.checks ?? [],
+      flags: task.review?.flags ?? [],
+      ...(task.review?.worker ? { finishedBy: task.review.worker } : {}),
+      reviewed: Boolean(task.reviews?.length || task.review),
     }, events, w, new Date(), { fullBrief });
     return page;
   };
 
-  const activityBody = (w: number): string[] => {
-    const events = data.activity.slice(-200);
-    const story = storyLines(events, w, objective);
-    return story.length ? story : [style.dim("  No activity yet.")];
-  };
-
-  const teamBody = (w: number): string[] => {
-    const sessions = data.sessions.filter(sessionPresent);
-    const lines: string[] = [` ${style.accent("Team")}`];
-    for (const m of data.team) {
-      const live = sessions.filter((s) => s.agentId === m.id).sort((a, b) => (a.lastSeenAt ?? "").localeCompare(b.lastSeenAt ?? "")).at(-1);
-      const dotted = live ? agentPaint(m.id)("●") : m.up ? style.dim("●") : style.dim("○");
-      const state = live ? (live.activity === "working" ? style.green("working") : style.muted("open")) : m.up ? style.dim("ready") : style.dim("unavailable");
-      lines.push(fit("", w), fit(`  ${dotted} ${m.up || live ? style.text(m.name) : style.dim(m.name)}${m.lead ? ` ${style.yellow("LEAD")}` : ""}  ${state}`, w));
-      const said = live?.lastThought ?? live?.lastAction;
-      const detail = said ?? (!m.up && m.note ? m.note : undefined);
-      if (detail) for (const line of wrapText(detail, w - 6).slice(0, 3)) lines.push(fit(`     ${style.dim(line)}`, w));
-      if (live?.taskId) lines.push(fit(ellipsize(`     ${style.dim(`on ${live.taskId}${objective(live.taskId) ? ` · ${shortTitle(objective(live.taskId)!)}` : ""}`)}`, w), w));
+  /** One card per agent that is here right now: who, what it is on, and its latest step (the web's "Working now"). */
+  const workingNow = (w: number): string[] => {
+    // One card per agent and task: an agent's older sessions on the same task say less than its newest.
+    const newest = new Map<string, (typeof data.sessions)[number]>();
+    for (const s of data.sessions.filter(sessionPresent)) {
+      const key = `${s.agentId}|${s.taskId}`;
+      if ((newest.get(key)?.lastSeenAt ?? "") <= (s.lastSeenAt ?? "")) newest.set(key, s);
+    }
+    const live = [...newest.values()];
+    const lines = [heading("Working now", w, live.length)];
+    if (!live.length) return [...lines, fit(`   ${style.dim("No agent is working right now.")}`, w)];
+    for (const s of live) {
+      const state = s.activity === "working" ? style.green("working") : style.muted("open");
+      const left = `   ${agentTag(s.agentId)}`;
+      const when = s.lastSeenAt ? style.dim(age(s.lastSeenAt)) : "";
+      lines.push(fit(`${left}  ${state}${" ".repeat(Math.max(1, w - visibleLength(left) - 2 - visibleLength(state) - visibleLength(when) - 1))}${when}`, w));
+      const goal = objective(s.taskId);
+      if (s.taskId) lines.push(fit(ellipsize(`     ${style.dim(`on ${s.taskId}`)}${goal ? style.muted(` · ${shortTitle(goal)}`) : ""}`, w), w));
+      const said = s.lastThought ?? s.lastAction;
+      if (said) lines.push(fit(ellipsize(`     ${style.dim("⎿")} ${style.muted(said.replace(/\s+/g, " "))}`, w), w));
     }
     return lines;
   };
 
-  const chatBody = (): string[] => log.length ? log : [
-    "",
-    style.dim("  Nothing here yet. Ask anything about the project below: the answer streams here,"),
-    style.dim("  grounded in AgentBrain's shared memory. /mode task makes a request its own task instead."),
-  ];
+  const activityBody = (w: number): string[] => {
+    const events = data.activity.slice(-200);
+    const story = storyLines(events, w - 1, objective);
+    return [
+      ...pageHead("Activity", "everything your agents did, newest last", w),
+      ...(story.length ? story.map((l) => fit(` ${l}`, w)) : [fit(`   ${style.dim("No activity yet.")}`, w)]),
+      fit("", w),
+      ...workingNow(w),
+    ];
+  };
+
+  const teamBody = (w: number): string[] => {
+    const sessions = data.sessions.filter(sessionPresent);
+    const policy = reviewPolicy(root);
+    const lines: string[] = pageHead("Team", policy.mode === "lead" ? `${agentLabel(policy.reviewers[0])} leads and reviews every result` : policy.mode === "council" ? `a council of ${policy.reviewers.length} reviews every result` : "you review every result", w);
+    lines.push(heading("Agents", w, `${data.team.filter((m) => m.up).length} of ${data.team.length} ready`));
+    for (const m of data.team) {
+      const live = sessions.filter((s) => s.agentId === m.id).sort((a, b) => (a.lastSeenAt ?? "").localeCompare(b.lastSeenAt ?? "")).at(-1);
+      const dotted = live ? agentPaint(m.id)("●") : m.up ? style.dim("●") : style.dim("○");
+      const state = live ? (live.activity === "working" ? style.green("working") : style.muted("open")) : m.up ? style.dim("ready") : style.dim("unavailable");
+      const left = `   ${dotted} ${m.up || live ? style.accent(m.name) : style.dim(m.name)}${m.lead ? `  ${style.yellow("LEAD")}` : ""}`;
+      lines.push(fit("", w), fit(`${left}${" ".repeat(Math.max(2, w - visibleLength(left) - visibleLength(state) - 1))}${state}`, w));
+      const said = live?.lastThought ?? live?.lastAction;
+      const detail = said ?? (!m.up && m.note ? m.note : undefined);
+      if (live?.taskId) lines.push(fit(ellipsize(`     ${style.dim(`on ${live.taskId}`)}${objective(live.taskId) ? style.muted(` · ${shortTitle(objective(live.taskId)!)}`) : ""}`, w), w));
+      if (detail) wrapText(detail, w - 8).slice(0, 3).forEach((line, i) => lines.push(fit(`     ${style.dim(i ? " " : "⎿")} ${style.muted(line)}`, w)));
+    }
+    return lines;
+  };
+
+  /** The web's empty chat: a question in the middle, what answers it, and a few to start from. */
+  const chatBody = (w: number): string[] => {
+    if (log.length) return log;
+    const center = (text: string) => fit(`${" ".repeat(Math.max(0, Math.floor((w - visibleLength(text)) / 2)))}${text}`, w);
+    const project = path.basename(root) || root;
+    const sub = wrapText("Answers come from an agent that reads the code, the tasks and the shared memory. /mode task has the work done in its own worktree instead.", Math.min(70, w - 4));
+    const starters = ["What changed today?", "What is each agent working on?", "Where is the review logic?", "Summarize the open tasks"];
+    const room = Math.max(0, Math.floor((Math.max(0, (frame?.bodyRows ?? 20) - 6 - sub.length - starters.length)) / 2));
+    return [
+      ...Array.from({ length: room }, () => fit("", w)),
+      center(style.accent(`What do you want to know about ${project}?`)),
+      fit("", w),
+      ...sub.map((l) => center(style.muted(l))),
+      fit("", w),
+      ...starters.map((q) => center(`${style.dim("›")} ${style.text(q)}`)),
+    ];
+  };
 
   let bodyKey = "";
   let bodyLines: string[] = [];
@@ -1053,13 +1221,20 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     const cmds = suggestions(buffer);
     if (selected >= cmds.length) selected = 0;
     const pick = choice === "auto" ? ready()[0] : undefined;
-    const why = pick ? `Next prompt → ${pick.worker.name}${pick.reasons[0] ? ` (${pick.reasons[0]})` : ""} · ` : "";
+    const route = pick ? `next prompt → ${pick.worker.name}${pick.reasons[0] ? ` (${pick.reasons[0]})` : ""}` : undefined;
+    const hints: [string, string][] = buffer
+      ? [["enter", mode === "chat" ? "ask" : "send as a task"], ["shift+tab", "agent"], ["esc", "clear"]]
+      : pane === "tasks" && !expanded
+        ? [["↑↓", "select"], ["enter", "open"], ["tab", "view"], ["/", "commands"], ["shift+tab", "agent"], ["^C^C", "quit"]]
+        : pane === "tasks"
+          ? [["esc", "back"], ["↑↓", "scroll"], ["b", "brief"], ["o", "open in editor"], ["tab", "view"]]
+          : [["↑↓", "scroll"], ["tab", "view"], ["/", "commands"], ["shift+tab", "agent"], ["^C^C", "quit"]];
     const bodyW = paneWidth();
     // A view's lines are built once per change in what it shows, not on every keypress.
     const key = `${pane}|${pane === "tasks" ? selectedId : ""}|${expanded}|${fullBrief}|${bodyW}|${data.version}`;
     if (key !== bodyKey) {
       bodyKey = key;
-      bodyLines = pane === "activity" ? activityBody(bodyW) : pane === "team" ? teamBody(bodyW) : pane === "chat" ? chatBody() : taskBody(bodyW);
+      bodyLines = pane === "activity" ? activityBody(bodyW) : pane === "team" ? teamBody(bodyW) : pane === "chat" ? chatBody(bodyW) : taskBody(bodyW);
     }
     const body = bodyLines;
     return {
@@ -1079,7 +1254,9 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
       pills: pills(),
       commands: cmds,
       selectedCommand: selected,
-      status: status || `${why}${pane === "tasks" && !expanded ? "enter opens the task · " : ""}tab switches view · ctrl-c twice to exit`,
+      ...(status ? { status } : {}),
+      hints,
+      ...(route ? { route } : {}),
       expanded,
     };
   };
