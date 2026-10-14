@@ -104,9 +104,33 @@ waits in review. A **lead** approves or sends it back. A **council** votes:
   files that don't exist (in the work or in a review), and votes against the
   consensus.
 
-Approval merges the task's worktree branch and marks it done. Changes become
+Approval lands the task's result on your branch and marks it done. Changes become
 the task's remaining items and hand it back. Your verdict, from the CLI or the
 control room, always decides (recorded as an override).
+
+**Not every change needs the same review.** AgentBrain sorts each result into
+docs, comments, tests or code. Docs-only and comment-only results land by
+themselves once the checks pass and nothing is flagged; protected paths
+(`.github/workflows/` by default) wait for you, whatever the reviewers vote:
+
+```bash
+agentbrain review rules                                   # what lands by itself, what only you approve
+agentbrain review rules --auto docs,comments --protect ".github/workflows/,src/auth/"
+agentbrain review rules --auto none                       # every result waits for a reviewer
+```
+
+**Results land per file, not as branch merges.** A result is the set of files
+it changed since it started. Each file is merged with main's version against
+that starting point, and the commit is built aside and moved in only if main
+hasn't moved meanwhile, so your uncommitted work in other files is never
+touched. Rewritten history on main (a squash, a rebase) can't make a result
+conflict, and a link an agent committed by accident (say, to another
+checkout's `node_modules`) is left out. When main really did change the same
+lines, nothing lands: the task's worktree gets main's changes with conflict
+markers in just those files, and it goes back to its agent to resolve them.
+
+Before changing code another agent wrote, agents ask who changed it, in which
+task and why (`agentbrain_history`); you can too: `agentbrain history src/auth/login.ts`.
 
 ### Agents talking to each other
 
@@ -537,14 +561,15 @@ message tells Copilot the exact directory to work in.
 ```bash
 agentbrain task create "Add prune command" --worktree   # .agentbrain/worktrees/<id>, branch agentbrain/<id>
 agentbrain run vscode <task-id>                         # the agent works only in that folder
-agentbrain worktree merge <task-id>                     # merge the branch back, remove the worktree
+agentbrain worktree merge <task-id>                     # land the result as one commit, remove the worktree
 ```
 
 Every worktree shares the project's AgentBrain state, and commands, the MCP
 server and the commit hook inside a worktree apply to that worktree's task.
 Git state, changed files and stall warnings are per task, so two agents on two
-tasks never see, or trip over, each other's edits. `worktree merge` stops on
-conflicts and leaves them for you; `worktree remove` refuses to discard
+tasks never see, or trip over, each other's edits. `worktree merge` lands
+nothing on conflicts and puts conflict markers in just those files in the
+worktree; `worktree remove` refuses to discard
 uncommitted work unless you pass `--force`.
 
 ### Headless: no window at all
@@ -632,6 +657,8 @@ agentbrain lead <agent-id>        # set the reviewing lead agent
 agentbrain council <agent-id>...  # configure a reviewing council
 agentbrain checks <command>...    # configure checks for submitted work
 agentbrain review [task-id]       # inspect or decide pending reviews
+agentbrain review rules           # what lands without a reviewer, what only you approve
+agentbrain history <file>         # who changed a file, in which task and why
 agentbrain doctor                 # check setup and print fixes for anything missing
 agentbrain vault                  # regenerate the Obsidian Markdown vault
 agentbrain mcp                    # run the MCP server (normally started by an agent)

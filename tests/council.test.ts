@@ -17,6 +17,7 @@ import {
 } from "../src/core/review.js";
 import { getTask, initStore, saveTask } from "../src/core/store.js";
 import { addWorktree } from "../src/core/worktree.js";
+import { setReviewRules } from "../src/core/reviewrules.js";
 import { tempRepo } from "./helpers.js";
 
 const worker = (id: string) => ({ id, sessionId: `${id}-1` });
@@ -255,6 +256,8 @@ describe("approving while someone else works in the main checkout", () => {
 
     const second = setup();
     setLead(second.repo, "claude-code");
+    // A docs-only result would land by itself before the local edit; this is about a reviewed one.
+    setReviewRules(second.repo, { autoApprove: [] });
     commitIn(second.wt, "README.md", "from the task\n");
     updateTask(second.repo, second.task.id, { status: "done", agent: worker("vscode") });
     fs.writeFileSync(path.join(second.repo, "README.md"), "local edit\n");

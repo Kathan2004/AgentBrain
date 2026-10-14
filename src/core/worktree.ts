@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { bringUpToDate, changedFiles, landChanges, recordChangeset, startingPoint } from "./changeset.js";
 import { worktreesDir } from "./paths.js";
 import type { TaskState } from "./state.js";
 import { applyToWorkdir } from "./permissions.js";
@@ -106,13 +107,15 @@ export interface MergeResult {
   task: TaskState;
   merged: number;
   conflicts: string[];
+  /** Files left out of the result (links out of the repository). */
+  skipped?: string[];
 }
 
 /**
- * Merges the task's branch into the main checkout's current branch
- * (`--no-ff`, so the task stays visible in history), then removes the
- * worktree. On conflict the merge is left in progress for the developer and
- * the worktree is kept.
+ * Lands the task's result on the main checkout's current branch as one commit
+ * (see changeset.ts: per file, against where the task started, so history it
+ * didn't touch can't conflict), then removes the worktree. On conflict
+ * nothing changes, and the conflicting files are returned.
  */
 export function mergeWorktree(root: string, taskId: string): MergeResult {
   const task = getTask(root, taskId);
@@ -122,35 +125,60 @@ export function mergeWorktree(root: string, taskId: string): MergeResult {
   if (fs.existsSync(wtPath) && git(wtPath, ["status", "--porcelain"])) {
     throw new Error(`${wtPath} has uncommitted changes. Commit them in the worktree first.`);
   }
+  const head = git(root, ["rev-parse", "HEAD"]);
+  const tip = git(root, ["rev-parse", branch]);
+  const base = startingPoint(root, task.worktree.base, tip, head);
   // Someone (the developer, or another agent) may be working in the main checkout at the same
-  // time. That's fine unless the task's branch changes the same files: only then stop, and say which.
+  // time. That's fine unless the task changes the same files: only then stop, and say which.
   const dirty = git(root, ["diff", "--name-only", "HEAD"]).split("\n").filter(Boolean);
   if (dirty.length) {
-    const touched = new Set(git(root, ["diff", "--name-only", `HEAD...${branch}`]).split("\n").filter(Boolean));
+    const touched = new Set(changedFiles(root, base, tip).files.map((f) => f.path));
     const overlap = dirty.filter((file) => touched.has(file));
     if (overlap.length) {
       throw new Error(`Can't merge yet: ${overlap.join(", ")} ${overlap.length === 1 ? "has" : "have"} uncommitted changes in the main checkout that this task also changes. Commit or stash ${overlap.length === 1 ? "it" : "them"}, then approve again.`);
     }
   }
 
-  const merged = Number(git(root, ["rev-list", "--count", `HEAD..${branch}`]));
-  if (merged === 0) return { ...removeWorktree(root, task.id), merged: 0, conflicts: [] };
+  const merged = Number(git(root, ["rev-list", "--count", `${base}..${tip}`]));
+  const title = task.objective.split("\n")[0];
+  const landed = landChanges(root, {
+    base,
+    tip,
+    label: task.id,
+    message: `${title.length > 72 ? `${title.slice(0, 71)}…` : title}\n\nLanded from ${branch}.\n\nAgentBrain-Task: ${task.id}\n`,
+  });
+  if (landed.conflicts.length) return { task, merged, conflicts: landed.conflicts, skipped: landed.skipped.map((s) => s.path) };
 
-  try {
-    const title = task.objective.split("\n")[0];
-    git(root, ["merge", "--no-ff", "-m", `Merge ${branch}: ${title.length > 72 ? `${title.slice(0, 71)}…` : title}`, branch]);
-  } catch {
-    const conflicts = git(root, ["diff", "--name-only", "--diff-filter=U"]).split("\n").filter(Boolean);
-    return { task, merged, conflicts };
-  }
-  // Remember exactly what was merged: after a squash, Git alone can no longer tell.
-  const tip = git(root, ["rev-parse", branch]);
-  const base = task.worktree?.base;
   removeWorktree(root, task.id);
   const after = getTask(root, task.id);
-  after.merged = { branch, commit: tip, at: new Date().toISOString(), ...(base ? { base } : {}) };
+  // Remember exactly what landed: the branch's commits never reach main, so Git alone can't tell.
+  after.merged = { branch, commit: tip, at: new Date().toISOString(), base, ...(landed.commit ? { landed: landed.commit } : {}), files: landed.files.map((f) => f.path) };
   saveTask(root, after);
-  return { task: after, merged, conflicts: [] };
+  if (landed.commit) {
+    recordChangeset(root, {
+      id: `cs-${Date.now()}`, task: task.id, ...(task.agent?.id ? { agent: task.agent.id } : {}), base, tip, commit: landed.commit,
+      at: after.merged.at, files: landed.files.map((f) => ({ path: f.path, status: f.status })), ...(task.review?.change ? { kind: task.review.change.kind } : {}),
+    });
+  }
+  return { task: after, merged: landed.commit ? merged : 0, conflicts: [], skipped: landed.skipped.map((s) => s.path) };
+}
+
+/**
+ * Hands a conflicting result back up to date: its worktree gets main's files
+ * plus its own, with conflict markers only where they really conflict, and
+ * its starting point becomes main. Returns the files to resolve.
+ */
+export function syncWorktree(root: string, taskId: string): string[] {
+  const task = getTask(root, taskId);
+  if (!task.worktree) throw new Error(`${task.id} has no worktree.`);
+  const head = git(root, ["rev-parse", "HEAD"]);
+  const tip = git(root, ["rev-parse", task.worktree.branch]);
+  const base = startingPoint(root, task.worktree.base, tip, head);
+  const { conflicts } = bringUpToDate(root, task.worktree, base, task.id);
+  const after = getTask(root, task.id);
+  after.worktree = { ...after.worktree!, base: head };
+  saveTask(root, after);
+  return conflicts;
 }
 
 /**

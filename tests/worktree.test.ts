@@ -142,7 +142,9 @@ describe("task worktrees", () => {
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("- README.md");
     expect(fs.existsSync(wtB)).toBe(true);
-    execFileSync("git", ["merge", "--abort"], { cwd: repo });
+    // Nothing landed on main; the worktree got main's change with markers in just that file.
+    expect(fs.readFileSync(path.join(repo, "README.md"), "utf8")).toBe("from main\n");
+    expect(fs.readFileSync(path.join(wtB, "README.md"), "utf8")).toMatch(/<<<<<<< main\nfrom main\n=======\nfrom task\n>>>>>>> /);
   });
 
   it("lists the task's commits in the brief", () => {

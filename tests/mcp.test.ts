@@ -105,6 +105,7 @@ describe("MCP server", () => {
       "agentbrain_message",
       "agentbrain_delegate",
       "agentbrain_recall",
+      "agentbrain_history",
       "agentbrain_remember",
       "agentbrain_list_tasks",
     ]);

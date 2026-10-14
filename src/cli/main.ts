@@ -42,7 +42,9 @@ import { RULES_TARGETS, writeRules } from "../core/rules.js";
 import { findSession, getProject, getTask, initStore, listSessions, listTasks, openActiveTaskId, saveProject, sessionAlive } from "../core/store.js";
 import type { AgentRef } from "../core/state.js";
 import { describeActivity, taskActivity } from "../core/stall.js";
-import { addWorktree, mergeWorktree, pruneWorktrees, removeWorktree, taskWorkdir } from "../core/worktree.js";
+import { addWorktree, mergeWorktree, pruneWorktrees, removeWorktree, syncWorktree, taskWorkdir } from "../core/worktree.js";
+import { fileHistory, formatHistory } from "../core/history.js";
+import { reviewRules, setReviewRules, type ChangeKind, type ReviewRules } from "../core/reviewrules.js";
 import { taskTimeline } from "../core/timeline.js";
 import { pruneTask } from "../core/prune.js";
 import { exportTask } from "../core/export.js";
@@ -74,10 +76,14 @@ Control plane
   agentbrain message <agent|all> "<text>" Message the agents working on this project (they see it in their next step)
   agentbrain inbox                        Messages for you (or for --agent <id>)
   agentbrain context [task-id]            Exactly what every agent is given for the task (same for every tool)
+  agentbrain history <file>               Who changed a file, in which task and why (results, edits, commits)
   agentbrain recall "<query>"             Search the project's shared memory (the Obsidian vault in .agentbrain/vault)
   agentbrain review [task-id]             Show results waiting for review: claims, diff, checks, flags, votes
   agentbrain review <task-id> --approve | --changes "<notes>"
                                           Vote as a reviewer, or decide as the developer (override)
+  agentbrain review rules [--auto docs,comments] [--protect ".github/workflows/,src/auth/"]
+                                          Kinds of change that land without a reviewer (docs, comments,
+                                          tests, code; --auto none for none), and paths only you approve
 
 Console
   agentbrain                              Open the console: type a task, an agent takes it, you review the result
@@ -240,6 +246,8 @@ function parseCli() {
         quorum: { type: "string" },
         until: { type: "string" },
         clear: { type: "boolean" },
+        auto: { type: "string" },
+        protect: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -1105,6 +1113,16 @@ function limits(agent?: string): void {
 
 function review(taskId?: string): void {
   const cwd = root();
+  if (taskId === "rules") {
+    const list = (value: string) => value.split(",").map((x) => x.trim()).filter((x) => x && x !== "none");
+    const change: Partial<ReviewRules> = {};
+    if (flags.auto !== undefined) change.autoApprove = list(flags.auto) as ChangeKind[];
+    if (flags.protect !== undefined) change.protect = list(flags.protect);
+    const rules = Object.keys(change).length ? setReviewRules(cwd, change) : reviewRules(cwd);
+    console.log(`Land without a reviewer (checks pass, nothing flagged): ${rules.autoApprove.length ? rules.autoApprove.map((k) => `${k}-only changes`).join(", ") : "nothing"}`);
+    console.log(`Only you can approve changes to: ${rules.protect.length ? rules.protect.join(", ") : "nothing protected"}`);
+    return;
+  }
   if (flags.verify) {
     if (!taskId) throw new Error("Usage: agentbrain review <task-id> --verify");
     const { task } = verifyTask(cwd, taskId);
@@ -1122,7 +1140,7 @@ function review(taskId?: string): void {
   if (!id) throw new Error("Nothing is waiting for review.");
   const result = reviewTask(cwd, id, { verdict: flags.approve ? "approved" : "changes", reviewer: callerId() ?? "developer", notes: flags.changes });
   if (result.conflicts) {
-    console.log(`✗ ${id} conflicts with the current branch in: ${result.conflicts.join(", ")}. Merge aborted; still in review.`);
+    console.log(`✗ Main changed the same lines as ${id} in: ${result.conflicts.join(", ")}. Nothing landed; its worktree now has main's changes with conflict markers in just those files, and the task went back to be resolved.`);
     process.exitCode = 1;
   } else if (!result.outcome) {
     const t = result.tally ?? computeTally(cwd, result.task);
@@ -1246,12 +1264,15 @@ async function main(): Promise<void> {
     const cwd = root();
     const { task, merged, conflicts } = mergeWorktree(cwd, resolveTaskId(cwd, rest[0], undefined, process.cwd()));
     if (conflicts.length) {
-      console.log(`✗ Merging agentbrain/${task.id} hit conflicts; the merge is left in progress:`);
+      const left = syncWorktree(cwd, task.id);
+      console.log(`✗ Main changed the same lines as agentbrain/${task.id}; nothing landed:`);
       for (const file of conflicts) console.log(`  - ${file}`);
-      console.log("  Resolve them and commit (or git merge --abort). The worktree is kept.");
+      console.log(left.length
+        ? `  Its worktree now has main's changes, with conflict markers in just those files. Resolve them there, commit, and merge again.`
+        : "  Its worktree is now up to date with main; merge again.");
       process.exitCode = 1;
     } else {
-      console.log(`✓ Merged ${merged} commit(s) from agentbrain/${task.id} and removed its worktree.`);
+      console.log(`✓ Merged ${merged} commit(s) from agentbrain/${task.id} as one commit and removed its worktree.`);
     }
   } else if (command === "worktree" && subcommand === "prune") {
     const result = pruneWorktrees(root(), { branches: flags.branches, dryRun: flags["dry-run"] });
@@ -1335,6 +1356,10 @@ async function main(): Promise<void> {
     const cwd = root();
     const id = resolveTaskId(cwd, subcommand, undefined, process.cwd());
     console.log(buildPrompt(cwd, id, cliCommand()));
+  } else if (command === "history") {
+    if (!subcommand) throw new Error("Usage: agentbrain history <file>");
+    const cwd = root();
+    console.log(formatHistory(fileHistory(cwd, path.resolve(process.cwd(), subcommand))));
   } else if (command === "recall") {
     const query = [subcommand, ...rest].filter(Boolean).join(" ");
     if (!query) throw new Error('Usage: agentbrain recall "<what you are looking for>"');

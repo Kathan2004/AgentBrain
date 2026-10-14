@@ -24,6 +24,7 @@ import {
   writeCheckpoint,
   type TaskPatch,
 } from "../core/actions.js";
+import { fileHistory, formatHistory } from "../core/history.js";
 import { findRoot } from "../core/paths.js";
 import { awaitingVote, reviewerNotice, reviewSummary, reviewTask } from "../core/review.js";
 import { routeTask } from "../core/routing.js";
@@ -188,6 +189,13 @@ const TOOLS: ToolDef[] = [
       "Search the project's shared memory (the AgentBrain vault): lessons from reviews, decisions and why, which " +
       "files tasks touched, notes other agents and the developer kept. Use it before deciding how to do something.",
     inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+  },
+  {
+    name: "agentbrain_history",
+    description:
+      "Who changed a file, in which task, and why: tasks working on it now, results that landed (with the decisions " +
+      "behind them), recent edits by every agent, and its commits. Ask before changing code another agent wrote.",
+    inputSchema: { type: "object", properties: { file: { type: "string", description: "Path, relative to the project" } }, required: ["file"] },
   },
   {
     name: "agentbrain_remember",
@@ -744,6 +752,10 @@ export class AgentBrainMcpServer {
         if (!hits.length) return "Nothing in the project's memory matches. If you learn something worth keeping, use agentbrain_remember.";
         return hits.map((h) => `## ${h.note}\n${h.excerpt}`).join("\n\n") + "\n\n(Notes live in .agentbrain/vault; open it in Obsidian to browse.)";
       }
+      case "agentbrain_history": {
+        const root = this.requireRoot();
+        return formatHistory(fileHistory(root, String(args.file ?? "")));
+      }
       case "agentbrain_remember": {
         const root = this.requireRoot();
         const file = remember(root, { title: String(args.title ?? ""), text: String(args.text ?? ""), author: this.agent.id, tags: strings(args.tags) });
@@ -764,8 +776,8 @@ export class AgentBrainMcpServer {
         const left = awaitingVote(root, this.agent.id).length;
         const more = left ? ` ${left} more result(s) waiting for your review.` : " Nothing else is waiting for your review.";
         if (result.conflicts) {
-          return `Approved, but ${result.task.id}'s branch conflicts with the main checkout in ${result.conflicts.join(", ")}. ` +
-            "The merge was aborted and the task is still in review." + more;
+          return `Approved, but main changed the same lines as ${result.task.id} in ${result.conflicts.join(", ")}. ` +
+            "Nothing landed; AgentBrain brought its worktree up to date with conflict markers in just those files and sent it back to be resolved." + more;
         }
         if (!result.outcome) {
           const t = result.tally;

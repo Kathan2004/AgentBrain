@@ -40,7 +40,11 @@ export interface TaskState {
   /** Status changes, oldest first (capped): who moved the task where, and when. */
   events?: TaskEvent[];
   /** Set by `agentbrain worktree merge`: which branch tip was merged, so cleanup can trust it after a squash. */
-  merged?: { branch: string; commit: string; at: string; /** Where the branch started, to show its changes later. */ base?: string };
+  merged?: {
+    branch: string; commit: string; at: string;
+    /** Where the branch started, to show its changes later. */ base?: string;
+    /** The commit on main the result landed as, and the files it changed. */ landed?: string; files?: string[];
+  };
   /** Set while the task waits for review: who finished it, votes, AgentBrain's own checks, flags. */
   review?: ReviewState;
   /** Decisions on earlier submissions, oldest first. */
@@ -106,6 +110,10 @@ export interface ReviewState {
    * also changes: the approval stands and AgentBrain merges as soon as they're gone.
    */
   pendingMerge?: { by: string; notes?: string; at: string; why: string };
+  /** What kind of change the result is (docs, comments, tests, code), and protected files it touches. */
+  change?: { kind: "docs" | "comments" | "tests" | "code"; files: number; protected?: string[] };
+  /** Landed by the review rules, without a reviewer: why. */
+  autoApproved?: string;
 }
 
 export interface ReviewVerdict {

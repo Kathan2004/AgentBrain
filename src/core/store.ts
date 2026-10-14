@@ -42,6 +42,8 @@ export interface ProjectState {
    * AgentBrain can't see itself, like Copilot's inside VS Code. No `until`: until cleared.
    */
   outOfQuota?: Record<string, { at: string; until?: string }>;
+  /** Review rules: kinds of change that land without a reviewer, and paths only the developer approves. */
+  review?: { autoApprove?: ("docs" | "comments" | "tests" | "code")[]; protect?: string[] };
 }
 
 export function writeJson(file: string, value: unknown): void {
@@ -62,7 +64,7 @@ export function initStore(cwd: string): void {
 
   // Runtime files that are personal to this machine never belong in Git.
   const ignore = path.join(brainDir(cwd), ".gitignore");
-  const wanted = ["activity.jsonl", "ui.json", "ui.log", "reputation.json"];
+  const wanted = ["activity.jsonl", "ui.json", "ui.log", "reputation.json", "changesets.jsonl"];
   const current = fs.existsSync(ignore) ? fs.readFileSync(ignore, "utf8") : "";
   const missing = wanted.filter((line) => !current.split("\n").includes(line));
   if (missing.length) fs.writeFileSync(ignore, `${current}${current && !current.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`, "utf8");

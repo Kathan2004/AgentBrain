@@ -8,7 +8,8 @@ import { brainDir } from "./paths.js";
 import { compilePatterns, redact } from "./redact.js";
 import type { ReviewCheck, ReviewFlag, ReviewVote, TaskState } from "./state.js";
 import { getProject, getTask, listTasks, readJson, saveProject, saveTask, writeJson } from "./store.js";
-import { mergeWorktree, taskWorkdir } from "./worktree.js";
+import { autoApproval, describeChange } from "./reviewrules.js";
+import { mergeWorktree, syncWorktree, taskWorkdir } from "./worktree.js";
 import { gitBinary } from "./platform.js";
 
 /**
@@ -44,7 +45,7 @@ export interface ReviewPolicy {
 }
 
 /** The to-do a task gets when its approved branch conflicts with main. */
-export const CONFLICT_PREFIX = "Merge main into this branch and resolve the conflicts in";
+export const CONFLICT_PREFIX = "Resolve the conflict markers AgentBrain left (main changed the same lines) in";
 
 export function reviewPriority(task: Pick<TaskState, "review">): number {
   const priorities: Record<ReviewFlag["kind"], number> = {
@@ -259,6 +260,9 @@ export function verifyTask(root: string, taskId: string): ReviewResult {
   const after = getTask(root, taskId);
   if (!after.review || after.review.requestedAt !== task.review.requestedAt) return { task: after };
   after.review.checks = checks;
+  const change = describeChange(root, after);
+  if (change) after.review.change = change;
+  else delete after.review.change;
   after.review.flags = [...(after.review.flags ?? []).filter((f) => f.kind === "dissent" || f.agent !== after.review!.worker), ...verifyClaims(root, after, checks)];
   after.review.verifiedAt = new Date().toISOString();
   saveTask(root, after);
@@ -311,7 +315,9 @@ export function computeTally(root: string, task: TaskState): Tally {
   const changes = votes.filter((v) => v.verdict === "changes").reduce((s, v) => s + weight(v.agent), 0);
   const failed = (task.review?.checks ?? []).filter((c) => !c.ok);
   const pendingChecks = policy.checks.length > 0 && Boolean(task.review) && !task.review?.verifiedAt;
-  const blocked = failed.length ? `checks failed: ${failed.map((c) => c.command).join(", ")}` : pendingChecks ? "checks still running" : undefined;
+  const guarded = task.review?.change?.protected ?? [];
+  const blocked = failed.length ? `checks failed: ${failed.map((c) => c.command).join(", ")}` : pendingChecks ? "checks still running"
+    : guarded.length ? `protected files need the developer: ${guarded.join(", ")}` : undefined;
   const quorum = policy.mode === "council" ? policy.quorum : 1;
   let outcome: Tally["outcome"] = "pending";
   if (total > 0 && changes / total > 1 - quorum + 1e-9) outcome = "changes";
@@ -392,7 +398,15 @@ function tally(root: string, taskId: string): ReviewResult {
   const task = getTask(root, taskId);
   if (task.status !== "review") return { task };
   const t = computeTally(root, task);
-  if (t.outcome === "pending") return { task, tally: t };
+  if (t.outcome === "pending") {
+    // Low-risk changes the review rules allow land without waiting for a reviewer.
+    const rule = autoApproval(root, task);
+    if (!rule) return { task, tally: t };
+    task.review!.autoApproved = rule;
+    saveTask(root, task);
+    recordActivity(root, { agent: "agentbrain", task: task.id, kind: "review", text: `Approved by the review rules: ${rule}, checks pass, nothing flagged` });
+    return { ...decide(root, task, "approved", `rules (${rule})`, undefined, t), tally: t };
+  }
   const notes = (task.review?.votes ?? [])
     .filter((v) => v.verdict === "changes" && v.notes)
     .map((v) => (reviewPolicy(root).mode === "council" ? `${v.notes} (${v.agent})` : v.notes!))
@@ -433,9 +447,13 @@ function decide(
         return { task: waiting, tally: t, pendingMerge: why };
       }
       if (result.conflicts.length) {
-        git(root, ["merge", "--abort"]);
-        // Approved but out of date: it goes back to be brought up to date (autopilot hands it on),
-        // instead of sitting in review where nobody would notice.
+        // Approved but out of date: AgentBrain brings its branch up to date with main itself, leaving
+        // conflict markers only in the files that really conflict, and it goes back to resolve just those.
+        let conflicts = result.conflicts;
+        try {
+          conflicts = syncWorktree(root, current.id);
+        } catch { /* the agent merges main itself */ }
+        result.conflicts = conflicts.length ? conflicts : result.conflicts;
         const again = getTask(root, current.id);
         const todo = `${CONFLICT_PREFIX} ${result.conflicts.join(", ")}`;
         again.status = "handoff";
@@ -443,7 +461,7 @@ function decide(
         again.nextAction = `${todo}, then set the task to review again (it was approved)`;
         delete again.review;
         saveTask(root, again, "agentbrain");
-        recordActivity(root, { agent: "agentbrain", task: current.id, kind: "review", text: `Approved, but the branch conflicts with main (${result.conflicts.join(", ")}); sent back to merge main and resolve them` });
+        recordActivity(root, { agent: "agentbrain", task: current.id, kind: "review", text: `Approved, but main changed the same lines (${result.conflicts.join(", ")}); brought up to date and sent back to resolve just those` });
         return { task: again, conflicts: result.conflicts, tally: t };
       }
       merged = result.merged;
@@ -538,6 +556,11 @@ export function reviewSummary(root: string, task: TaskState, viewer?: string): s
   if (task.decisions.length) lines.push("Decisions:", ...task.decisions.map((x) => `- ${x}`));
   if (task.failures.length) lines.push("Known failures:", ...task.failures.map((x) => `- ${x}`));
   if (commits.length) lines.push("Commits:", ...commits.map((c) => `- ${c}`));
+  if (review?.change) {
+    const kinds = { docs: "docs only", comments: "comments only", tests: "tests (and docs) only", code: "code" };
+    lines.push(`Kind of change: ${kinds[review.change.kind]}, ${review.change.files} file(s)${review.autoApproved ? `; approved by the review rules (${review.autoApproved})` : ""}`);
+    if (review.change.protected?.length) lines.push(`Protected files (only the developer can approve): ${review.change.protected.join(", ")}`);
+  }
   if (files) lines.push("Changed:", "```", files, "```");
   if (uncommitted) lines.push("Uncommitted:", "```", uncommitted, "```");
   if (review?.checks?.length) lines.push("Checks AgentBrain ran itself:", ...review.checks.map((c) => `- ${c.ok ? "PASS" : "FAIL"} ${c.command}${c.ok ? "" : `\n${c.tail}`}`));
