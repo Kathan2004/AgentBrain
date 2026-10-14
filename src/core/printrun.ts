@@ -7,7 +7,7 @@ import { releaseStandIn } from "./standin.js";
 import { execFileSync } from "node:child_process";
 import { spawnPortable, gitBinary } from "./platform.js";
 import { autoContinue, claudeBinary, codexBinary } from "./delegate.js";
-import { OLLAMA_URL, localModel, ollamaEnv } from "./ollama.js";
+import { OLLAMA_URL, localModel, localModelRoom, ollamaEnv } from "./ollama.js";
 import { recordActivity, type ActivityKind } from "./activity.js";
 import { describeTool } from "./claudehooks.js";
 import { thoughtFrom } from "./thoughts.js";
@@ -50,6 +50,8 @@ export function printAgent(name: string): PrintAgent {
   if (id !== "ollama") return { id, command };
   const model = localModel();
   if (!model) throw new Error("No local model yet: run agentbrain local setup");
+  const tight = localModelRoom(model);
+  if (tight) throw new Error(`The local model ${tight}.`);
   return { id, command, model, env: ollamaEnv(model) };
 }
 

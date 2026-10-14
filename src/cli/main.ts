@@ -10,6 +10,7 @@ import { TOOL_KINDS, type ToolKind } from "../adapters/acp.js";
 import { requestStop, runHeadless, sendToSession, sessionControl } from "../core/headless.js";
 import { routeTask } from "../core/routing.js";
 import { addToQueue, readQueue, removeFromQueue, shiftQueue, waitUntilSettled } from "../core/queue.js";
+import { HOOK_ADAPTERS, handlePlatformHook, installHooksFor, uninstallAllHooks } from "../core/agenthooks.js";
 import { runTui } from "../ui/tui.js";
 import { runConsole } from "../ui/console.js";
 import { MENTIONS, claudeBinary, codexBinary, delegate, listWorkers, planGoal } from "../core/delegate.js";
@@ -935,6 +936,11 @@ async function on(): Promise<void> {
   try { installPostCommitHook(cwd); } catch { /* not a Git repository */ }
   const hook = installClaudeHooks(cwd, `${[config.command === "agentbrain" ? "agentbrain" : JSON.stringify(config.command), ...config.args.map((a) => JSON.stringify(a))].join(" ")} hook claude`);
   console.log(`✓ Streaming Claude Code activity (${path.relative(cwd, hook.file)})`);
+  // Every connected agent with hooks streams its work live, not just Claude Code.
+  const connectedIds = detectConnectors(cwd).filter((c) => c.connected).map((c) => c.id);
+  for (const r of installHooksFor(cwd, connectedIds, config.command, config.args)) {
+    console.log(r.error ? `  ! ${r.adapter.label} hooks: ${r.error}` : `✓ Streaming ${r.adapter.label} activity (${path.relative(cwd, r.file!)})`);
+  }
   const lead = getLead(cwd);
   console.log(lead ? `✓ Lead agent: ${lead}` : "  No lead agent yet: agentbrain lead claude-code   (or pick one in the control room)");
   const ui = await startUiDaemon(cwd, self.command, self.args);
@@ -951,6 +957,7 @@ function vault(): void {
 async function off(): Promise<void> {
   const cwd = root();
   console.log(uninstallClaudeHooks(cwd) ? "✓ Stopped streaming Claude Code activity" : "  Claude Code activity was not being streamed");
+  for (const label of uninstallAllHooks(cwd)) console.log(`✓ Stopped streaming ${label} activity`);
   console.log((await stopUiDaemon(cwd)) ? "✓ Stopped the control room" : "  The control room was not running");
   console.log("Task state, memory and MCP configs are kept. `agentbrain on` turns everything back on.");
 }
@@ -1343,6 +1350,13 @@ async function main(): Promise<void> {
     markRead(cwd, me);
   } else if (command === "hook" && subcommand === "claude") {
     await claudeHook();
+  } else if (command === "hook" && HOOK_ADAPTERS.some((a) => a.platform === subcommand)) {
+    let input = "";
+    for await (const chunk of process.stdin) input += chunk;
+    let payload: unknown = {};
+    try { payload = JSON.parse(input); } catch { /* never get in the agent's way */ }
+    const reply = handlePlatformHook(subcommand!, payload);
+    if (reply) process.stdout.write(reply);
   } else if (command === "hook" && subcommand === "post-commit") {
     postCommit(process.cwd());
   } else {

@@ -384,9 +384,9 @@ function bodyLines(root: string, snap: Snapshot, selected: LiveTask | undefined,
 // ---------------------------------------------------------------- sidebar (the web control room's left column)
 
 /** What the main pane of the full-screen console shows, as the web's nav. */
-export type Pane = "tasks" | "activity" | "team";
-export const PANES: Pane[] = ["tasks", "activity", "team"];
-export const PANE_LABELS: Record<Pane, string> = { tasks: "Tasks", activity: "Activity", team: "Team" };
+export type Pane = "tasks" | "chat" | "activity" | "team";
+export const PANES: Pane[] = ["tasks", "chat", "activity", "team"];
+export const PANE_LABELS: Record<Pane, string> = { tasks: "Tasks", chat: "Chat", activity: "Activity", team: "Team" };
 
 export interface SidebarTask {
   id: string;

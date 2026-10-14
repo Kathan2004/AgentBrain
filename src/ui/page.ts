@@ -373,6 +373,7 @@ function connectorCard(c){
   h+='<div class="connector-status">'+connectorStatus(c)+'</div>';
   if(c.connect&&c.connect.file){h+='<div class="connector-path">Connect writes the '+esc(c.connect.scope)+' config: <span class="mono">'+esc(c.connect.file)+'</span></div><div class="actions">'+(c.connected?'<button data-disconnect="'+esc(c.id)+'">Disconnect</button>':'<button class="primary" data-connect="'+esc(c.id)+'"'+(!c.installed||c.signedIn===false?' disabled':'')+'>Connect</button>')+'</div>'}
   else if(c.connect&&c.connect.manual)h+='<div class="connector-manual">'+esc(c.connect.manual)+'</div>';
+  if(c.tracking&&c.installed)h+='<div class="connector-note">'+esc(c.tracking)+'</div>';
   if(c.note)h+='<div class="connector-note">'+esc(c.note)+'</div>';
   return h+'</div>';
 }

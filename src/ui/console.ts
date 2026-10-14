@@ -524,41 +524,152 @@ export function taskDetailLines(
   return lines;
 }
 
+/** "src/ui/console.ts" → "console.ts"; the fold line names files, not paths. */
+const base = (file: string) => file.split("/").pop() ?? file;
+
+const TWO_WORD = new Set(["git", "npm", "npx", "pnpm", "yarn", "node", "python3", "python", "cargo", "go", "make", "docker", "gh", "agentbrain"]);
+
+/** "S=/tmp/x; cd repo && npx vitest run tests/a.ts" → "npx vitest": what ran, not its arguments. */
+export function commandName(text: string): string {
+  const parts = text.replace(/^\$ /, "").split(/\s*(?:&&|\|\||;|\|)\s*/).map((p) => p.trim().split(/\s+/).filter((w) => w && !/^\w+=/.test(w)));
+  const words = parts.find((p) => p.length && p[0] !== "cd" && p[0] !== "export") ?? parts.find((p) => p.length) ?? [];
+  if (!words.length) return "a command";
+  const prog = words[0].split("/").pop()!;
+  const next = words.slice(1).find((w) => !w.startsWith("-") && !/^["'<$]/.test(w));
+  return TWO_WORD.has(prog) && next && !next.includes("/") ? `${prog} ${next}` : prog;
+}
+
+/** What a run of commands and edits did, as one line: "Ran npm test, git status · edited tui.ts, console.ts". */
+function foldLine(run: ActivityEvent[]): string {
+  const commands = run.filter((e) => e.kind === "command").map((e) => commandName(e.text));
+  const files = [...new Set(run.filter((e) => e.kind === "edit").flatMap((e) => e.files?.length ? e.files : [e.text.replace(/^Edited /, "").replace(/ \(.*$/, "")]).map(base))];
+  const unique = [...new Set(commands)];
+  const parts = [
+    unique.length ? `Ran ${unique.slice(0, 3).join(", ")}${unique.length > 3 ? ` +${unique.length - 3} more` : ""}` : "",
+    files.length ? `edited ${files.slice(0, 4).join(", ")}${files.length > 4 ? ` +${files.length - 4} more` : ""}` : "",
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
 /**
- * Activity as a transcript: each thought/prompt heads the commands and edits
- * it led to, folded as "Ran N commands" like the web story.
+ * Activity as a transcript, like Claude Code's own: who and when, then what they
+ * said in full (wrapped, never cut mid-sentence), then one folded line for the
+ * commands and edits it led to. Your prompts read as yours.
  */
 export function storyLines(events: ActivityEvent[], width: number, titleOf?: (taskId: string | undefined) => string | undefined): string[] {
   const w = Math.max(20, width);
   const lines: string[] = [];
+  const head = (agent: string, who: string, at: string, task: string | undefined, paint: (s: string) => string) => {
+    const title = titleOf?.(task);
+    const left = `${paint("●")} ${style.accent(who)} ${style.dim(hhmm(at))}`;
+    const room = w - visibleLength(left) - 3;
+    if (lines.length) lines.push(fit("", w));
+    lines.push(fit(title && room > 12 ? `${left}${style.dim(` · ${ellipsize(shortTitle(title), room)}`)}` : left, w));
+    void agent;
+  };
   for (let i = 0; i < events.length; ) {
     const event = events[i];
-    if (event.kind === "session") {
+    if (event.kind === "session" || (event.kind === "tool" && /^(Read|Grep|Glob|LS) /.test(event.text))) { i++; continue; }
+    if (event.kind === "thought" || event.kind === "prompt") {
+      const mine = event.kind === "prompt";
+      head(event.agent, mine ? (event.agent === "developer" ? "You" : `You → ${agentLabel(event.agent)}`) : agentLabel(event.agent), event.at, event.task, mine ? style.text : agentPaint(event.agent));
+      for (const line of wrapText(event.text, w - 2)) lines.push(fit(`  ${mine ? style.text(line) : style.muted(line)}`, w));
       i++;
+      const run: ActivityEvent[] = [];
+      while (i < events.length && events[i].agent === event.agent && ["command", "edit", "tool"].includes(events[i].kind)) run.push(events[i++]);
+      const fold = foldLine(run);
+      if (fold) lines.push(fit(ellipsize(`  ${style.dim("⎿ ")}${style.dim(fold)}`, w), w));
       continue;
     }
-    if (event.kind === "thought" || event.kind === "prompt") {
-      const head = event.kind === "prompt" ? style.text(event.text) : style.muted(event.text);
-      lines.push(fit(railLine(event.agent, event.at, head, titleOf?.(event.task), w), w));
-      i++;
-      let commands = 0;
-      let edits = 0;
-      while (i < events.length && events[i].agent === event.agent && (events[i].kind === "command" || events[i].kind === "edit" || events[i].kind === "tool")) {
-        if (events[i].kind === "command") commands++;
-        else if (events[i].kind === "edit") edits++;
-        i++;
-      }
-      const parts = [
-        commands ? `Ran ${commands} command${commands === 1 ? "" : "s"}` : "",
-        edits ? `edited ${edits} file${edits === 1 ? "" : "s"}` : "",
-      ].filter(Boolean);
-      if (parts.length) lines.push(fit(ellipsize(`    ${style.dim(parts.join(", "))}`, w), w));
+    // Commands and edits with no stated reason before them: fold them under the agent too.
+    if (event.kind === "command" || event.kind === "edit" || event.kind === "tool") {
+      const run: ActivityEvent[] = [];
+      while (i < events.length && events[i].agent === event.agent && ["command", "edit", "tool"].includes(events[i].kind)) run.push(events[i++]);
+      const fold = foldLine(run);
+      if (!fold) continue;
+      head(event.agent, agentLabel(event.agent), event.at, event.task, agentPaint(event.agent));
+      const unreported = run.some((e) => /seen on disk/.test(e.text));
+      lines.push(fit(ellipsize(`  ${style.dim("⎿ ")}${style.dim(fold + (unreported ? " (seen on disk)" : ""))}`, w), w));
       continue;
     }
     const feed = new FeedFormatter(titleOf ?? (() => undefined), () => w);
     lines.push(...feed.format(event).map((l) => fit(l, w)));
     i++;
   }
+  return lines;
+}
+
+/** A section heading on the task page. */
+const section = (label: string, w: number, count?: number) => [fit("", w), fit(` ${style.muted(label)}${count !== undefined ? ` ${style.dim(String(count))}` : ""}`, w)];
+
+/** Wrapped list items with a marker, hanging-indented. */
+function items(list: string[], w: number, marker: (i: number) => string, paint: (s: string) => string = style.text): string[] {
+  const out: string[] = [];
+  list.forEach((item, i) => {
+    const mark = marker(i);
+    wrapText(item, w - 3 - visibleLength(mark)).forEach((line, j) => out.push(fit(`  ${j ? " ".repeat(visibleLength(mark)) : mark} ${paint(line)}`, w)));
+  });
+  return out;
+}
+
+export interface TaskPage {
+  id: string;
+  objective: string;
+  status: string;
+  updatedAt?: string;
+  nextAction?: string;
+  merged?: unknown;
+  agent?: string;
+  branch?: string;
+  requestedBy?: string;
+  request?: string;
+  completed: string[];
+  remaining: string[];
+  decisions: string[];
+  failures: string[];
+  files: string[];
+  changes?: { files: number; added: number; removed: number };
+}
+
+/** The whole task, like the web's task page: what was asked, what's done and left, files, and its story. */
+export function taskPageLines(task: TaskPage, events: ActivityEvent[], width: number, now = new Date(), options: { fullBrief?: boolean } = {}): string[] {
+  const w = Math.max(20, width);
+  const tone = stateTone(task);
+  const lines: string[] = [];
+  // The first sentence, whole: the page has room to wrap it.
+  const title = String(task.objective).split(/(?<=[.!?])\s|\n/)[0].slice(0, 240);
+  wrapText(title, w - 4).forEach((line, i) => lines.push(fit(` ${i ? " " : stateDot(task)} ${style.accent(line)}`, w)));
+  const when = age(task.updatedAt, now);
+  const meta = [hexPaint(tone.hex)(tone.label), task.id, task.agent && agentLabel(task.agent), task.branch, when && `${when}${when === "now" ? "" : " ago"}`].filter(Boolean).join(style.dim(" · "));
+  lines.push(fit(`   ${style.dim(meta)}`, w));
+  if (task.nextAction && !["done", "merged"].includes(task.status)) lines.push(...wrapText(`Next: ${task.nextAction}`, w - 4).map((l) => fit(`   ${style.text(l)}`, w)));
+  // A long brief (an agent's hand-out) folds to a few lines; b shows all of it.
+  const brief = task.objective.trim() !== title.trim() ? wrapText(task.objective, w - 4) : [];
+  if (brief.length) {
+    const shown = options.fullBrief || brief.length <= 5 ? brief : brief.slice(0, 4);
+    lines.push(...section("Brief", w));
+    lines.push(...shown.map((l) => fit(`   ${style.muted(l)}`, w)));
+    if (shown.length < brief.length) lines.push(fit(`   ${style.dim(`… ${brief.length - shown.length} more lines · b shows the whole brief`)}`, w));
+  }
+  // Your own words, when you asked for it (an agent's hand-out reads as that agent's).
+  if (task.request && task.request !== task.objective) {
+    lines.push(...section(task.requestedBy && task.requestedBy !== "developer" ? `${agentLabel(task.requestedBy)} asked` : "You asked", w));
+    lines.push(...wrapText(task.request, w - 4).map((l) => fit(`   ${style.text(l)}`, w)));
+  }
+  if (task.completed.length) { lines.push(...section("Done", w, task.completed.length)); lines.push(...items(task.completed, w, () => style.green("✓"))); }
+  if (task.remaining.length) { lines.push(...section("Left to do", w, task.remaining.length)); lines.push(...items(task.remaining, w, (i) => style.dim(`${i + 1}.`))); }
+  if (task.decisions.length) { lines.push(...section("Decisions", w, task.decisions.length)); lines.push(...items(task.decisions, w, () => style.dim("·"), style.muted)); }
+  if (task.failures.length) { lines.push(...section("What failed", w, task.failures.length)); lines.push(...items(task.failures, w, () => style.red("✗"), style.muted)); }
+  if (task.files.length) {
+    const stats = task.changes ? ` ${style.green(`+${task.changes.added}`)} ${style.red(`−${task.changes.removed}`)}` : "";
+    lines.push(fit("", w), fit(` ${style.muted("Files changed")} ${style.dim(String(task.files.length))}${stats}`, w));
+    for (const file of task.files.slice(0, 12)) lines.push(fit(ellipsize(`   ${style.text(file)}`, w), w));
+    if (task.files.length > 12) lines.push(fit(`   ${style.dim(`+${task.files.length - 12} more`)}`, w));
+  }
+  const story = storyLines(events, w - 1);
+  lines.push(...section("Story", w, undefined));
+  if (story.length) lines.push(...story.map((l) => fit(` ${l}`, w)));
+  else lines.push(fit(`   ${style.dim("Nothing recorded for this task yet.")}`, w));
   return lines;
 }
 
@@ -580,6 +691,8 @@ export interface RoomModel {
   commands?: Command[];
   selectedCommand?: number;
   status?: string;
+  /** The main pane takes the whole width (Enter on a task; Esc goes back). */
+  expanded?: boolean;
   now?: Date;
 }
 
@@ -590,6 +703,10 @@ export interface RoomFrame {
   composeTop: number;
   cursorRow: number;
   cursorCol: number;
+  /** First body line shown, the most it can be, and how many lines show: for scrolling. */
+  top: number;
+  maxTop: number;
+  bodyRows: number;
 }
 
 /** The full-screen control room: header, facts, sidebar, main pane, compose box. */
@@ -622,7 +739,7 @@ export function renderRoom(model: RoomModel, width: number, height: number): Roo
   const status = model.status ? [fit(ellipsize(`  ${model.status}`, w), w)] : [];
   const compose = [...box.lines, ...status, ...suggLines];
   const bodyH = Math.max(1, h - header.length - compose.length);
-  const wide = w >= NARROW;
+  const wide = w >= NARROW && !model.expanded;
   const listWidth = wide ? Math.min(40, Math.max(22, Math.floor(w * 0.34))) : 0;
   const emptySidebar = { lines: [] as string[], rows: new Map<number, string>(), nav: new Map<number, Pane>() };
   let sidebar = emptySidebar;
@@ -632,6 +749,9 @@ export function renderRoom(model: RoomModel, width: number, height: number): Roo
   const vis = body.slice(scroll, scroll + bodyH);
 
   const lines: string[] = [...header];
+  let top = scroll;
+  let maxTop = maxScroll;
+  let bodyRows = bodyH;
   if (wide) {
     sidebar = sidebarLines(
       { tasks: model.tasks, team: model.team, pane: model.pane, selectedId: model.selectedId, focused: !model.buffer, now },
@@ -641,13 +761,20 @@ export function renderRoom(model: RoomModel, width: number, height: number): Roo
     const paneW = Math.max(1, w - listWidth - 1);
     const rule = style.line("│");
     for (let r = 0; r < bodyH; r++) {
-      lines.push(`${sidebar.lines[r] ?? fit("", listWidth)}${rule}${fit(vis[r] ?? "", paneW)}`);
+      let cell = vis[r] ?? "";
+      if (r === bodyH - 1 && scroll < maxScroll) cell = style.dim(` ↓ ${body.length - scroll - bodyH} more lines · ↑↓ / pgup pgdn / wheel scroll`);
+      lines.push(`${sidebar.lines[r] ?? fit("", listWidth)}${rule}${fit(cell, paneW)}`);
     }
   } else {
-    const nav = PANES.map((p) => (p === model.pane ? style.accent(p[0]!.toUpperCase() + p.slice(1)) : style.dim(p[0]!.toUpperCase() + p.slice(1)))).join(style.dim("  "));
+    const nav = model.expanded
+      ? `${style.dim("esc")} ${style.muted("back")}${style.dim("  ·  pgup/pgdn scroll  ·  o open in editor")}`
+      : PANES.map((p) => (p === model.pane ? style.accent(p[0]!.toUpperCase() + p.slice(1)) : style.dim(p[0]!.toUpperCase() + p.slice(1)))).join(style.dim("  "));
     lines.push(fit(` ${nav}`, w));
     const room = Math.max(1, h - lines.length - compose.length);
-    for (let r = 0; r < room; r++) lines.push(fit(vis[r] ?? "", w));
+    maxTop = Math.max(0, body.length - room);
+    top = Math.max(0, Math.min(model.scroll ?? body.length, maxTop));
+    bodyRows = room;
+    for (let r = 0; r < room; r++) lines.push(fit(body[top + r] ?? "", w));
   }
   const composeTop = lines.length;
   lines.push(...compose);
@@ -659,6 +786,9 @@ export function renderRoom(model: RoomModel, width: number, height: number): Roo
     composeTop,
     cursorRow: composeTop + box.cursorRow,
     cursorCol: box.cursorCol,
+    top,
+    maxTop,
+    bodyRows,
   };
 }
 
@@ -731,6 +861,8 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
   let cursor = 0;
   let selected = 0;
   let pane: Pane = "tasks";
+  let expanded = false;
+  let fullBrief = false;
   let selectedId: string | undefined;
   let scroll: number | undefined;
   let log: string[] = [];
@@ -748,7 +880,24 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     }
     return objectives.get(taskId);
   };
-  const feed = new FeedFormatter(objective, () => width() - 1);
+
+  /**
+   * Everything the views show, read from disk in the background (on a change,
+   * at most every few seconds for Git) and never on a keypress: typing,
+   * scrolling and switching views only re-render what's already in memory.
+   */
+  const data = {
+    version: 0,
+    tasks: [] as TaskState[],
+    sessions: [] as ReturnType<typeof listSessions>,
+    activity: [] as ActivityEvent[],
+    snap: null as ReturnType<typeof snapshot> | null,
+    checks: [] as string[],
+    decides: "",
+    team: [] as (TeamMember & { note?: string })[],
+    signature: "",
+    heavyAt: 0,
+  };
 
   const decidesText = () => {
     const p = reviewPolicy(root);
@@ -788,18 +937,24 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     return "You decide";
   };
 
-  const team = (): TeamMember[] => {
+  /** Everyone who works here: agents AgentBrain can start, the lead, and anyone connected right now. */
+  const team = (): (TeamMember & { note?: string })[] => {
     const policy = reviewPolicy(root);
     const lead = policy.mode === "lead" ? policy.reviewers[0] : null;
-    return rankWorkers(root)
-      .filter((c) => c.worker.installed && c.worker.how !== "pull")
-      .map((c) => ({ id: c.worker.id, name: c.worker.name, up: c.worker.available, lead: c.worker.id === lead }));
+    const present = data.sessions.filter(sessionPresent);
+    const members: (TeamMember & { note?: string })[] = (ready(), ranked)
+      .filter((c) => c.worker.installed && (c.worker.how !== "pull" || c.worker.id === lead || present.some((s) => s.agentId === c.worker.id)))
+      .map((c) => ({ id: c.worker.id, name: c.worker.name, up: c.worker.available, lead: c.worker.id === lead, ...(c.worker.available ? {} : { note: c.reasons[0] ?? c.worker.note }) }));
+    for (const id of [lead, ...present.map((s) => s.agentId)]) {
+      if (id && !members.some((m) => m.id === id)) members.push({ id, name: agentLabel(id), up: present.some((s) => s.agentId === id), lead: id === lead, ...(present.some((s) => s.agentId === id) ? {} : { note: "not open right now" }) });
+    }
+    return members;
   };
 
-  const orderedTasks = () => sidebarOrder(listTasks(root));
+  const orderedTasks = () => sidebarOrder(data.tasks);
 
   const selectedTask = (): TaskState | undefined => {
-    const tasks = listTasks(root);
+    const tasks = data.tasks;
     const order = sidebarOrder(tasks);
     if (selectedId && order.some((t) => t.id === selectedId)) return tasks.find((t) => t.id === selectedId);
     selectedId = order[0]?.id;
@@ -809,73 +964,137 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
   const taskBody = (w: number): string[] => {
     const task = selectedTask();
     if (!task) return log.length ? log : [style.dim("  No tasks yet. Type a request below.")];
-    const snap = snapshot(root, { includeDone: true });
-    const live = snap.tasks.find((t) => t.id === task.id);
-    const files = live?.git.changedFiles ?? [];
-    const remaining = live?.remaining ?? task.remaining;
-    const detail = taskDetailLines(
-      { ...task, files, remaining: remaining ?? [] },
-      w,
-      { ...(task.agent ? { agent: agentLabel(task.agent.id) } : {}), action: task.nextAction, now: new Date() },
-    );
-    return log.length ? [...detail, "", ...log] : detail;
+    const live = data.snap?.tasks.find((t) => t.id === task.id);
+    const events = data.activity.filter((e) => e.task === task.id);
+    const page = taskPageLines({
+      id: task.id,
+      objective: task.objective,
+      status: task.status,
+      updatedAt: task.updatedAt,
+      nextAction: task.nextAction,
+      merged: task.merged,
+      agent: task.agent?.id,
+      branch: task.worktree?.branch ?? task.merged?.branch,
+      requestedBy: live?.requestedBy,
+      request: live?.request,
+      completed: live?.completed ?? [],
+      remaining: live?.remaining ?? task.remaining ?? [],
+      decisions: live?.decisions ?? [],
+      failures: live?.failures ?? [],
+      files: live?.git.changedFiles ?? [],
+      ...(live?.changes ? { changes: live.changes } : {}),
+    }, events, w, new Date(), { fullBrief });
+    return page;
   };
 
   const activityBody = (w: number): string[] => {
-    const events = readActivity(root, 120);
+    const events = data.activity.slice(-200);
     const story = storyLines(events, w, objective);
     return story.length ? story : [style.dim("  No activity yet.")];
   };
 
   const teamBody = (w: number): string[] => {
-    const sessions = listSessions(root).filter((s) => !s.endedAt);
-    const lines: string[] = [` ${style.accent("Team")}`, ""];
-    for (const m of team()) {
-      const live = sessions.filter((s) => s.agentId === m.id).at(-1);
-      const dotted = m.up ? agentPaint(m.id)("●") : style.dim("○");
-      lines.push(fit(`  ${dotted} ${m.up ? style.text(m.name) : style.dim(m.name)}${m.lead ? ` ${style.yellow("LEAD")}` : ""}`, w));
-      const doing = live?.lastAction;
-      if (doing) lines.push(fit(ellipsize(`     ${style.dim(doing)}`, w), w));
-      else if (!m.up) lines.push(fit(`     ${style.dim("unavailable")}`, w));
+    const sessions = data.sessions.filter(sessionPresent);
+    const lines: string[] = [` ${style.accent("Team")}`];
+    for (const m of data.team) {
+      const live = sessions.filter((s) => s.agentId === m.id).sort((a, b) => (a.lastSeenAt ?? "").localeCompare(b.lastSeenAt ?? "")).at(-1);
+      const dotted = live ? agentPaint(m.id)("●") : m.up ? style.dim("●") : style.dim("○");
+      const state = live ? (live.activity === "working" ? style.green("working") : style.muted("open")) : m.up ? style.dim("ready") : style.dim("unavailable");
+      lines.push(fit("", w), fit(`  ${dotted} ${m.up || live ? style.text(m.name) : style.dim(m.name)}${m.lead ? ` ${style.yellow("LEAD")}` : ""}  ${state}`, w));
+      const said = live?.lastThought ?? live?.lastAction;
+      const detail = said ?? (!m.up && m.note ? m.note : undefined);
+      if (detail) for (const line of wrapText(detail, w - 6).slice(0, 3)) lines.push(fit(`     ${style.dim(line)}`, w));
+      if (live?.taskId) lines.push(fit(ellipsize(`     ${style.dim(`on ${live.taskId}${objective(live.taskId) ? ` · ${shortTitle(objective(live.taskId)!)}` : ""}`)}`, w), w));
     }
     return lines;
   };
 
+  const chatBody = (): string[] => log.length ? log : [
+    "",
+    style.dim("  Nothing here yet. Ask anything about the project below: the answer streams here,"),
+    style.dim("  grounded in AgentBrain's shared memory. /mode task makes a request its own task instead."),
+  ];
+
+  let bodyKey = "";
+  let bodyLines: string[] = [];
+
+  /** Reads what the views show. `heavy` adds Git state (files changed per task), which is slow on big repos. */
+  const load = (heavy: boolean) => {
+    data.tasks = listTasks(root);
+    data.sessions = listSessions(root);
+    data.activity = readActivity(root, 600);
+    const project = getProject(root);
+    data.checks = project.checks ?? [];
+    data.decides = decidesFact();
+    if (heavy) { data.snap = snapshot(root, { includeDone: true }); data.heavyAt = Date.now(); }
+    rankedAt = 0;
+    data.team = team();
+    data.version++;
+  };
+
+  /** A cheap fingerprint of AgentBrain's state: the activity log's size and every task and session file's time. */
+  const signature = () => {
+    const parts: string[] = [];
+    const stat = (file: string) => { try { const st = fs.statSync(file); parts.push(`${st.size}:${st.mtimeMs}`); } catch { parts.push("-"); } };
+    stat(activityFile(root));
+    for (const dir of [path.join(root, ".agentbrain", "tasks"), path.join(root, ".agentbrain", "agents")]) {
+      try { for (const name of fs.readdirSync(dir)) stat(path.join(dir, name)); } catch { /* none yet */ }
+    }
+    try { for (const t of fs.readdirSync(path.join(root, ".agentbrain", "tasks"))) stat(path.join(root, ".agentbrain", "tasks", t, "task.json")); } catch { /* none */ }
+    return parts.join("|");
+  };
+
   const paneWidth = () => {
     const cols = width();
-    return cols >= NARROW ? Math.max(20, cols - Math.min(40, Math.max(22, Math.floor(cols * 0.34))) - 1) : cols;
+    return cols >= NARROW && !expanded ? Math.max(20, cols - Math.min(40, Math.max(22, Math.floor(cols * 0.34))) - 1) : cols;
   };
 
   const model = (): RoomModel => {
     const cmds = suggestions(buffer);
     if (selected >= cmds.length) selected = 0;
     const pick = choice === "auto" ? ready()[0] : undefined;
-    const why = pick ? `${pick.reasons.slice(0, 2).join(", ")} · ` : "";
+    const why = pick ? `Next prompt → ${pick.worker.name}${pick.reasons[0] ? ` (${pick.reasons[0]})` : ""} · ` : "";
     const bodyW = paneWidth();
-    const body = pane === "activity" ? activityBody(bodyW) : pane === "team" ? teamBody(bodyW) : taskBody(bodyW);
+    // A view's lines are built once per change in what it shows, not on every keypress.
+    const key = `${pane}|${pane === "tasks" ? selectedId : ""}|${expanded}|${fullBrief}|${bodyW}|${data.version}`;
+    if (key !== bodyKey) {
+      bodyKey = key;
+      bodyLines = pane === "activity" ? activityBody(bodyW) : pane === "team" ? teamBody(bodyW) : pane === "chat" ? chatBody() : taskBody(bodyW);
+    }
+    const body = bodyLines;
     return {
       project: path.basename(root) || root,
-      tasks: listTasks(root),
+      tasks: data.tasks,
       team: team(),
-      agentsActive: listSessions(root).filter(sessionPresent).length,
-      decides: decidesFact(),
-      checks: getProject(root).checks ?? [],
+      agentsActive: data.sessions.filter(sessionPresent).length,
+      decides: data.decides,
+      checks: data.checks,
       pane,
       selectedId,
       body,
-      scroll,
+      // The activity feed sits at its newest line; a task page or the team starts at the top.
+      scroll: scroll ?? (pane === "activity" ? undefined : 0),
       buffer,
       cursor,
       pills: pills(),
       commands: cmds,
       selectedCommand: selected,
-      status: status || `${why}decides: ${decidesText()} · ctrl-c twice to exit`,
+      status: status || `${why}${pane === "tasks" && !expanded ? "enter opens the task · " : ""}tab switches view · ctrl-c twice to exit`,
+      expanded,
     };
   };
 
+  /** Only the lines that changed are written: no flicker, little to send. */
+  let shown: string[] = [];
+  let shownSize = "";
   const draw = () => {
     frame = renderRoom(model(), width(), height());
-    write(`${ESC}H${frame.lines.join("\r\n")}${ESC}${frame.cursorRow + 1};${frame.cursorCol + 1}H${ESC}?25h`);
+    const size = `${width()}x${height()}`;
+    if (size !== shownSize) { shown = []; shownSize = size; write(`${ESC}2J`); }
+    let outText = `${ESC}?25l`;
+    frame.lines.forEach((line, i) => { if (shown[i] !== line) outText += `${ESC}${i + 1};1H${line}`; });
+    shown = frame.lines;
+    write(`${outText}${ESC}${frame.cursorRow + 1};${frame.cursorCol + 1}H${ESC}?25h`);
   };
 
   const redraw = () => draw();
@@ -883,7 +1102,11 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     if (!lines.length) return;
     log.push(...lines);
     if (log.length > 400) log = log.slice(-300);
+    // Answers and command output read in the Chat view, at their newest line.
+    pane = "chat";
+    expanded = false;
     scroll = undefined;
+    data.version++;
     draw();
   };
 
@@ -1171,40 +1394,28 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
 
   // ------------------------------------------------------------ live feed
 
-  let offset = fs.existsSync(activityFile(root)) ? fs.statSync(activityFile(root)).size : 0;
-  let partial = "";
+  // Re-read only when something changed (and Git at most every few seconds), then redraw.
   const poll = () => {
     try {
-      const file = activityFile(root);
-      if (!fs.existsSync(file)) return;
-      const size = fs.statSync(file).size;
-      if (size < offset) offset = 0; // the file was trimmed
-      if (size === offset) return;
-      const fd = fs.openSync(file, "r");
-      const chunk = Buffer.alloc(size - offset);
-      fs.readSync(fd, chunk, 0, chunk.length, offset);
-      fs.closeSync(fd);
-      offset = size;
-      const text = partial + chunk.toString("utf8");
-      const lines = text.split("\n");
-      partial = lines.pop() ?? "";
-      const rendered: string[] = [];
-      for (const line of lines.filter(Boolean)) {
-        try { rendered.push(...feed.format(JSON.parse(line) as ActivityEvent)); } catch { /* skip a bad line */ }
-      }
-      print(rendered);
+      const sig = signature();
+      const changed = sig !== data.signature;
+      const gitDue = Date.now() - data.heavyAt > 5_000;
+      if (!changed && !gitDue) return;
+      data.signature = sig;
+      load(gitDue);
+      draw();
     } catch {
-      // the feed is best-effort
+      // the next tick tries again
     }
   };
-  const feedTimer = setInterval(poll, 400);
+  const feedTimer = setInterval(poll, 700);
 
   // ------------------------------------------------------------ input
 
   function quit(): void {
     clearInterval(feedTimer);
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
-    write(`${ESC}?25h${ESC}?1049l`);
+    write(`${ESC}?1007l${ESC}?25h${ESC}?1049l`);
     write(style.dim("Agents keep working in the background. `agentbrain` brings you back.\n"));
     process.exit(0);
   }
@@ -1230,6 +1441,11 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
       return redraw();
     }
     if (key?.ctrl && key.name === "d" && !buffer) return quit();
+    if (key?.name === "return" && !buffer && pane === "tasks") {
+      expanded = !expanded;
+      scroll = 0;
+      return redraw();
+    }
     if (key?.name === "return") {
       // Enter on a half-typed command picks the highlighted suggestion first.
       if (options.length && options[selected] && buffer !== `/${options[selected].name}`) {
@@ -1255,12 +1471,16 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
       scroll = undefined;
       return redraw();
     }
-    if (key?.name === "pageup") {
-      scroll = Math.max(0, (scroll ?? 0) - 10);
+    if (key?.name === "pageup" || key?.name === "pagedown") {
+      if (frame) {
+        const page = Math.max(1, frame.bodyRows - 2) * (key.name === "pageup" ? -1 : 1);
+        const next = Math.max(0, Math.min(frame.maxTop, frame.top + page));
+        scroll = (pane === "activity" || pane === "chat") && next >= frame.maxTop ? undefined : next;
+      }
       return redraw();
     }
-    if (key?.name === "pagedown") {
-      scroll = (scroll ?? 0) + 10;
+    if (!buffer && !options.length && key?.name === "b" && pane === "tasks") {
+      fullBrief = !fullBrief;
       return redraw();
     }
     if (!buffer && !options.length && key?.name === "o") {
@@ -1297,16 +1517,23 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
       cursor = [...buffer].length;
       return redraw();
     }
+    // Up/down pick a task in the task list; everywhere else (a task page, chat, activity, team) they scroll.
+    const scrollBy = (n: number) => {
+      if (!frame) return;
+      const next = Math.max(0, Math.min(frame.maxTop, frame.top + n));
+      scroll = pane === "activity" || pane === "chat" ? (next >= frame.maxTop ? undefined : next) : next;
+    };
+    const listMode = pane === "tasks" && !expanded;
     if (key?.name === "up") {
       if (options.length) selected = (selected - 1 + options.length) % options.length;
       else if (buffer || historyIndex >= 0) {
         if (history.length) { historyIndex = Math.min(historyIndex + 1, history.length - 1); buffer = history[historyIndex]; cursor = [...buffer].length; }
-      } else {
+      } else if (listMode) {
         const order = orderedTasks();
         const i = Math.max(0, order.findIndex((t) => t.id === selectedId));
         selectedId = order[Math.max(0, i - 1)]?.id ?? selectedId;
         scroll = undefined;
-      }
+      } else scrollBy(-3);
       return redraw();
     }
     if (key?.name === "down") {
@@ -1314,12 +1541,12 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
       else if (buffer || historyIndex >= 0) {
         if (historyIndex > 0) { historyIndex--; buffer = history[historyIndex]; cursor = [...buffer].length; }
         else { historyIndex = -1; buffer = ""; cursor = 0; }
-      } else {
+      } else if (listMode) {
         const order = orderedTasks();
         const i = Math.max(0, order.findIndex((t) => t.id === selectedId));
         selectedId = order[Math.min(order.length - 1, i + 1)]?.id ?? selectedId;
         scroll = undefined;
-      }
+      } else scrollBy(3);
       return redraw();
     }
     if (key?.name === "left") { cursor = Math.max(0, cursor - 1); return redraw(); }
@@ -1327,7 +1554,10 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
     if ((key?.ctrl && key.name === "a") || key?.name === "home") { cursor = 0; return redraw(); }
     if ((key?.ctrl && key.name === "e") || key?.name === "end") { cursor = [...buffer].length; return redraw(); }
     if (key?.ctrl && key.name === "u") { buffer = ""; cursor = 0; return redraw(); }
-    if (key?.name === "escape") { if (options.length) { buffer = ""; cursor = 0; } return redraw(); }
+    if (key?.name === "escape") {
+      if (options.length) { buffer = ""; cursor = 0; } else if (expanded) { expanded = false; scroll = undefined; }
+      return redraw();
+    }
     if (key?.name === "backspace") {
       if (cursor > 0) { const chars = [...buffer]; chars.splice(cursor - 1, 1); buffer = chars.join(""); cursor--; }
       return redraw();
@@ -1350,7 +1580,12 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
 
   // ------------------------------------------------------------ start
 
-  write(`${ESC}?1049h${ESC}?25h`);
+  // Alternate screen; the wheel scrolls (terminals send it as up/down there).
+  write(`${ESC}?1049h${ESC}?1007h${ESC}?25h`);
+  // Draw at once from AgentBrain's own files; Git details (files changed) fill in right after.
+  load(false);
+  data.signature = signature();
+  setTimeout(() => { try { load(true); draw(); } catch { /* next poll */ } }, 50);
   if (pendingReviews(root).length) {
     log.push(style.dim("  /review to inspect · /approve · /changes <what to fix>"));
   }

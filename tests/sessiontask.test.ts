@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createTask, updateTask } from "../src/core/actions.js";
 import { readActivity } from "../src/core/activity.js";
 import { handleClaudeHook } from "../src/core/claudehooks.js";
-import { initStore, listSessions } from "../src/core/store.js";
+import { getTask, initStore, listSessions, saveTask } from "../src/core/store.js";
 import { sessionPresent } from "../src/ui/model.js";
 import { tempRepo } from "./helpers.js";
 
@@ -18,6 +18,41 @@ describe("what a Claude session is working on", () => {
     const last = readActivity(r).filter((e) => e.text.includes("pwd")).at(-1);
     expect(last).toBeTruthy();
     expect(last?.task).toBeUndefined();
+  });
+});
+
+describe("a background run's steps", () => {
+  it("are recorded once: the run reports them, so its own Claude hooks stay quiet", () => {
+    const r = tempRepo("agentbrain-headless-");
+    initStore(r);
+    process.env.AGENTBRAIN_SESSION = "print-1";
+    try {
+      handleClaudeHook({ session_id: "s9", cwd: r, hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "npm test" } });
+      handleClaudeHook({ session_id: "s9", cwd: r, hook_event_name: "UserPromptSubmit", prompt: "You are starting AgentBrain task x" });
+    } finally {
+      delete process.env.AGENTBRAIN_SESSION;
+    }
+    expect(readActivity(r).map((e) => e.agent)).toEqual(["agentbrain"]);
+    expect(listSessions(r)).toEqual([]);
+  });
+
+  it("aren't where your own Claude session's prompts go, though both are Claude Code", () => {
+    const r = tempRepo("agentbrain-elsewhere-");
+    initStore(r);
+    const task = createTask(r, "Redesign the terminal");
+    saveTask(r, { ...getTask(r, task.id), status: "running", agent: { id: "claude-code", sessionId: "print-1" } });
+    handleClaudeHook({ session_id: "mine", cwd: r, hook_event_name: "UserPromptSubmit", prompt: "check its status" });
+    expect(readActivity(r).find((e) => e.kind === "prompt")?.task).toBeUndefined();
+    // Still not once the run finishes and the task waits for review.
+    saveTask(r, { ...getTask(r, task.id), status: "review" });
+    handleClaudeHook({ session_id: "mine", cwd: r, hook_event_name: "UserPromptSubmit", prompt: "and now?" });
+    expect(readActivity(r).filter((e) => e.kind === "prompt").every((e) => e.task === undefined)).toBe(true);
+    // A task you claimed yourself (through AgentBrain's MCP, a different session id) is still yours.
+    const mine = createTask(r, "Fix the login bug");
+    saveTask(r, { ...getTask(r, mine.id), status: "running", agent: { id: "claude-code", sessionId: "mcp-123" } });
+    saveTask(r, { ...getTask(r, task.id), status: "done" });
+    handleClaudeHook({ session_id: "mine2", cwd: r, hook_event_name: "UserPromptSubmit", prompt: "go" });
+    expect(readActivity(r).filter((e) => e.kind === "prompt").at(-1)?.task).toBe(mine.id);
   });
 });
 

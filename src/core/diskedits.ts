@@ -1,6 +1,7 @@
 import path from "node:path";
 import { readActivity, recordActivity } from "./activity.js";
 import { getProject, listSessions } from "./store.js";
+import { hookedAgents } from "./agenthooks.js";
 
 /**
  * Edits nobody reported. Claude Code tells AgentBrain about every edit through
@@ -13,7 +14,7 @@ import { getProject, listSessions } from "./store.js";
 /** Agents that report their own edits; a change they made shows up without help. */
 const HOOKED = new Set(["claude-code", "ollama", "codex"]);
 const SETTLE_MS = 4_000;
-const SKIP = /(^|\/)(\.git|node_modules|dist|coverage|\.next|\.turbo|\.cache)(\/|$)|\.(log|lock|tmp|swp)$|~$/;
+const SKIP = /(^|\/)(\.git|node_modules|dist|coverage|\.next|\.turbo|\.cache)(\/|$)|\.(log|lock|tmp|swp)$|\.tmp\.|~$/;
 
 /** The project path and task of a changed file, or null when it isn't project source (AgentBrain's own state, build output…). */
 export function editTarget(root: string, absFile: string): { rel: string; task?: string } | null {
@@ -25,14 +26,25 @@ export function editTarget(root: string, absFile: string): { rel: string; task?:
   return { rel };
 }
 
+/**
+ * A hooked agent in the middle of a turn: its shell commands (a build, a script
+ * writing files) change files before its hook reports the command, so an
+ * unreported edit right now is most likely its, not someone else's.
+ */
+function hookedAgentBusy(root: string, now = Date.now()): boolean {
+  const hooked = new Set([...HOOKED, ...hookedAgents(root)]);
+  return listSessions(root).some((s) => !s.endedAt && hooked.has(s.agentId) && s.activity === "working" && now - Date.parse(s.lastSeenAt ?? s.startedAt) < 10 * 60_000);
+}
+
 /** Who most likely made an edit no agent reported. */
 export function likelyEditor(root: string, now = Date.now()): string {
+  const hooked = new Set([...HOOKED, ...hookedAgents(root)]);
   const recent = listSessions(root)
-    .filter((s) => !s.endedAt && !HOOKED.has(s.agentId) && s.mode !== "headless" && now - Date.parse(s.lastSeenAt ?? s.startedAt) < 30 * 60_000)
+    .filter((s) => !s.endedAt && !hooked.has(s.agentId) && s.mode !== "headless" && now - Date.parse(s.lastSeenAt ?? s.startedAt) < 30 * 60_000)
     .sort((a, b) => (b.lastSeenAt ?? b.startedAt).localeCompare(a.lastSeenAt ?? a.startedAt));
   if (recent[0]) return recent[0].agentId;
   const lead = getProject(root).lead;
-  if (lead && !HOOKED.has(lead)) return lead;
+  if (lead && !hooked.has(lead)) return lead;
   return "developer";
 }
 
@@ -63,6 +75,9 @@ export function diskEditRecorder(root: string, settleMs = SETTLE_MS): { changed:
       // One note per file per minute: a save storm is one edit.
       if (Date.now() - (recorded.get(key) ?? 0) < 60_000) return;
       if (reported(root, target, first - 30_000)) return;
+      // Unless an agent without hooks is working too, a busy hooked agent made it (its hook reports the command later).
+      const unhookedWorking = listSessions(root).some((x) => !x.endedAt && x.activity === "working" && !new Set([...HOOKED, ...hookedAgents(root)]).has(x.agentId) && Date.now() - Date.parse(x.lastSeenAt ?? x.startedAt) < 10 * 60_000);
+      if (hookedAgentBusy(root) && !unhookedWorking) return;
       recorded.set(key, Date.now());
       recordActivity(root, {
         agent: likelyEditor(root),

@@ -130,7 +130,31 @@ export function getTask(cwd: string, taskId: string): TaskState {
   if (!fs.existsSync(path.join(taskDir(cwd, taskId), "task.json"))) {
     throw new Error(`Task "${taskId}" not found.`);
   }
-  return readJson<TaskState>(path.join(taskDir(cwd, taskId), "task.json"));
+  return normalizeTask(readJson<TaskState>(path.join(taskDir(cwd, taskId), "task.json")));
+}
+
+/** Text of a list item some agent wrote as an object ({ text }, { decision, why }…) instead of a string. */
+export function itemText(item: unknown): string {
+  if (typeof item === "string") return item;
+  if (item && typeof item === "object") {
+    const o = item as Record<string, unknown>;
+    const main = o.text ?? o.decision ?? o.step ?? o.item ?? o.description ?? o.title ?? o.what ?? o.failure ?? o.summary;
+    const why = o.why ?? o.reason ?? o.rationale;
+    if (typeof main === "string") return typeof why === "string" && why ? `${main} (${why})` : main;
+    const strings = Object.values(o).filter((v): v is string => typeof v === "string");
+    if (strings.length) return strings.join(" — ");
+  }
+  return String(item ?? "");
+}
+
+/** Older task files can hold objects where the lists hold text; read them as text. */
+function normalizeTask(task: TaskState): TaskState {
+  const t = task as unknown as Record<string, unknown>;
+  for (const key of ["completed", "remaining", "decisions", "failures", "blockers", "fixed"]) {
+    // "[object Object]" is what an object became when an older version saved it as text: nothing left to show.
+    if (Array.isArray(t[key])) t[key] = (t[key] as unknown[]).map(itemText).filter((x) => x && x !== "[object Object]");
+  }
+  return task;
 }
 
 /** The active task's id, unless that task is done (closed or merged) or gone. */

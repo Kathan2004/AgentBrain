@@ -14,7 +14,7 @@ import { limitReason, quotaReason } from "./limits.js";
 import type { TaskState } from "./state.js";
 import { getProject, getTask, listTasks, saveProject, saveTask } from "./store.js";
 import { addWorktree } from "./worktree.js";
-import { localModel, ollamaBinary, ollamaModels } from "./ollama.js";
+import { localModel, localModelRoom, ollamaBinary, ollamaModels } from "./ollama.js";
 
 /**
  * Hands a prompt to an agent without opening anything new: the developer types
@@ -123,7 +123,10 @@ export function listWorkers(): Worker[] {
   if (ollama) {
     const models = ollamaModels();
     const model = models ? localModel() : null;
-    const ready = Boolean(claude && model && models?.some((m) => m.replace(/:latest$/, "") === model));
+    const pulled = Boolean(claude && model && models?.some((m) => m.replace(/:latest$/, "") === model));
+    // Not when it can't fit in memory right now: a model that doesn't fit freezes the whole machine.
+    const tight = pulled && model ? localModelRoom(model) : null;
+    const ready = pulled && !tight;
     workers.push({
       id: "ollama",
       name: model ? `Local model (${model})` : "Local model (Ollama)",
@@ -131,7 +134,7 @@ export function listWorkers(): Worker[] {
       ...(claude ? { command: claude } : {}),
       installed: true,
       available: ready,
-      ...(ready ? {} : { note: !claude ? "needs Claude Code's CLI to drive it" : models === null ? "Ollama isn't running: open the Ollama app" : "no model yet: run agentbrain local setup" }),
+      ...(ready ? {} : { note: tight ? tight : !claude ? "needs Claude Code's CLI to drive it" : models === null ? "Ollama isn't running: open the Ollama app" : "no model yet: run agentbrain local setup" }),
     });
   }
 

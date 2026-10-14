@@ -1,4 +1,5 @@
 import { diskEditRecorder } from "../core/diskedits.js";
+import { watchTranscripts } from "../core/transcripts.js";
 import { CLOSE_REASONS, closeTask } from "../core/close.js";
 import { readActivity } from "../core/activity.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -156,6 +157,8 @@ export async function startUiServer(
   // Edits from editors without hooks (Cursor, Copilot, by hand) show up in Activity too.
   const diskEdits = diskEditRecorder(root);
   const stopWatching = watchProject(root, sendEvent, diskEdits.changed);
+  // Agents without hooks: follow the transcripts they keep on disk.
+  const stopTranscripts = process.env.VITEST ? () => {} : watchTranscripts(root);
 
   const handler = async (request: IncomingMessage, response: ServerResponse) => {
     let url: URL;
@@ -318,6 +321,7 @@ export async function startUiServer(
     close: async () => {
       stopWatching();
       diskEdits.stop();
+      stopTranscripts();
       for (const client of clients) client.end();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },

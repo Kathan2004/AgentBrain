@@ -66,6 +66,54 @@ export function setLocalModel(model: string, home = os.homedir()): void {
   fs.writeFileSync(configFile(home), `${JSON.stringify({ model }, null, 2)}\n`);
 }
 
+const GB = 1024 ** 3;
+let roomCache: { at: number; model: string; reason: string | null } | undefined;
+
+/** Memory the system could hand out now: free plus reclaimable pages (macOS's vm_stat), else Node's free memory. */
+export function availableMemory(): number {
+  if (process.platform === "darwin") {
+    const result = spawnSyncPortable("vm_stat", [], { encoding: "utf8", timeout: 2_000 });
+    const text = String(result.stdout ?? "");
+    const page = Number(/page size of (\d+)/.exec(text)?.[1] ?? 16384);
+    const pages = (label: string) => Number(new RegExp(`Pages ${label}:\\s+(\\d+)`).exec(text)?.[1] ?? 0);
+    if (result.status === 0) return (pages("free") + pages("inactive") + pages("speculative") + pages("purgeable")) * page;
+  }
+  return os.freemem();
+}
+
+/** "5.2 GB" / "800 MB" → bytes. */
+function sizeOf(text: string): number {
+  const m = /([\d.]+)\s*(GB|MB|KB)/i.exec(text);
+  if (!m) return 0;
+  return Number(m[1]) * (m[2].toUpperCase() === "GB" ? GB : m[2].toUpperCase() === "MB" ? 1024 ** 2 : 1024);
+}
+
+/**
+ * Why the local model shouldn't start now, or null when it fits. A model loaded
+ * with an agent's context takes about twice its file size (qwen3:8b: 5.2 GB on
+ * disk, ~10 GB running); starting it without that much memory to spare pushes
+ * the whole machine into swap and freezes it. An already loaded model is fine.
+ */
+export function localModelRoom(model: string): string | null {
+  if (roomCache && roomCache.model === model && Date.now() - roomCache.at < 15_000) return roomCache.reason;
+  let reason: string | null = null;
+  const bin = ollamaBinary();
+  if (bin) {
+    const bare = (m: string) => m.replace(/:latest$/, "");
+    const loaded = String(spawnSyncPortable(bin, ["ps"], { encoding: "utf8", timeout: 5_000 }).stdout ?? "").split("\n").slice(1).some((l) => bare(l.trim().split(/\s+/)[0] ?? "") === bare(model));
+    if (!loaded) {
+      const row = String(spawnSyncPortable(bin, ["list"], { encoding: "utf8", timeout: 5_000 }).stdout ?? "").split("\n").find((l) => bare(l.trim().split(/\s+/)[0] ?? "") === bare(model));
+      const needed = sizeOf(row ?? "") * 1.9;
+      const free = availableMemory();
+      if (needed && free < needed + 1.5 * GB) {
+        reason = `needs about ${(needed / GB).toFixed(0)} GB of memory to run and only ${(free / GB).toFixed(1)} GB is free; it would freeze this machine (close some apps, or pick a smaller model: agentbrain local qwen3:4b)`;
+      }
+    }
+  }
+  roomCache = { at: Date.now(), model, reason };
+  return reason;
+}
+
 /** Environment that points Claude Code at Ollama instead of Anthropic. */
 export function ollamaEnv(model: string): Record<string, string> {
   return {

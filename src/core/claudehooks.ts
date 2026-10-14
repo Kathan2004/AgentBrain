@@ -90,6 +90,10 @@ export interface ClaudeHookPayload {
   reason?: string;
   stop_hook_active?: boolean;
   transcript_path?: string;
+  /** Set when Cursor runs this hook. */
+  cursor_version?: string;
+  /** An agent's stated reason, when its hook hands it over directly (Cursor's afterAgentThought). */
+  thought?: string;
 }
 
 /** The real path, resolving the nearest folder that exists (the file may not exist yet). */
@@ -149,14 +153,24 @@ export function describeTool(name: string, input: Record<string, any> = {}, root
 }
 
 /** The task this Claude session is working on: its worktree's, the one it owns, else the active one. */
-function sessionTask(root: string, cwd: string, session: AgentSessionState | null): string | undefined {
+function sessionTask(root: string, cwd: string, session: AgentSessionState | null, agent = AGENT, sessionId = session?.sessionId): string | undefined {
   const here = taskForDir(root, cwd);
   if (here) return here.id;
+  const tasks = listTasks(root);
+  // A task a background run holds (one AgentBrain started, in its own worktree) isn't this session's,
+  // even when it's the same agent, and stays the run's while it waits for review: the run reports its work.
+  const elsewhere = (t: (typeof tasks)[number]) => {
+    const holder = t.agent?.sessionId;
+    if (t.status === "done" || !holder || holder === sessionId) return false;
+    return /^(print|exec)-/.test(holder) || getSession(root, t.agent!.id, holder)?.mode === "headless";
+  };
   // A finished task isn't what the session is doing now: its later work stays untagged.
-  if (session?.taskId && listTasks(root).some((t) => t.id === session.taskId && t.status !== "done")) return session.taskId;
-  const owned = listTasks(root).filter((t) => t.status === "running" && t.agent?.id === AGENT);
+  if (session?.taskId && tasks.some((t) => t.id === session.taskId && t.status !== "done" && !elsewhere(t))) return session.taskId;
+  const owned = tasks.filter((t) => t.status === "running" && t.agent?.id === agent && !elsewhere(t));
   if (owned.length === 1) return owned[0].id;
-  return openActiveTaskId(root);
+  const active = openActiveTaskId(root);
+  const task = active ? tasks.find((t) => t.id === active) : undefined;
+  return task && !elsewhere(task) ? active : undefined;
 }
 
 function reviewList(root: string): string {
@@ -168,6 +182,22 @@ function reviewList(root: string): string {
  * or "" for nothing. Never throws.
  */
 export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = process.cwd()): string {
+  // Cursor runs Claude Code's hooks too (it reads .claude/settings*.json). Its own
+  // .cursor/hooks.json reports it as Cursor, so don't credit its work to Claude here.
+  if (payload.cursor_version) return "";
+  // Copilot in VS Code also reads Claude's hook files; its payloads are camelCase and it reports through .github/hooks.
+  if (!payload.hook_event_name && (payload as any).hookEventName) return "";
+  return handleAgentHook(payload, fallbackCwd, AGENT, "Claude Code");
+}
+
+/**
+ * The hook handler for any agent with hooks: sessions, prompts, edits, commands
+ * and its stated reasons, tagged with the task it is working on. Replies that
+ * only Claude Code understands (review nudges, delivering messages) are Claude-only,
+ * so other agents' unread messages aren't consumed without being shown.
+ */
+export function handleAgentHook(payload: ClaudeHookPayload, fallbackCwd: string, AGENT: string, LABEL: string): string {
+  const claude = AGENT === "claude-code";
   try {
     const cwd = payload.cwd ?? fallbackCwd;
     const root = findRoot(cwd);
@@ -176,9 +206,12 @@ export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = proce
     const sessionId = payload.session_id;
     const now = new Date().toISOString();
     const existing = getSession(root, AGENT, sessionId);
-    const taskId = sessionTask(root, cwd, existing);
+    const taskId = sessionTask(root, cwd, existing, AGENT, sessionId);
     const patterns = compilePatterns(getProject(root).redactPatterns);
-    const note = (kind: ActivityKind, text: string, files?: string[]) =>
+    // A run AgentBrain started reports its own steps from the agent's output stream; recording
+    // them from the hooks too would show every step twice, under a second session.
+    const runByAgentBrain = Boolean(process.env.AGENTBRAIN_SESSION);
+    const note = (kind: ActivityKind, text: string, files?: string[]) => runByAgentBrain ? undefined :
       recordActivity(root, { agent: AGENT, session: sessionId, ...(taskId ? { task: taskId } : {}), kind, text: redact(text, patterns), ...(files ? { files } : {}) });
 
     let lastAction = existing?.lastAction;
@@ -186,11 +219,11 @@ export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = proce
     let activity: AgentSessionState["activity"] = existing?.activity ?? "idle";
     let endedAt: string | undefined;
     let output = "";
-    const isLead = isReviewer(root, AGENT);
+    const isLead = claude && isReviewer(root, AGENT);
 
-    if (event === "PostToolUse" || event === "Stop") {
+    if (event === "PostToolUse" || event === "Stop" || event === "Thought") {
       // The reason behind what Claude does next, in its own words, once per new explanation.
-      const said = latestThought(payload.transcript_path);
+      const said = payload.thought ?? latestThought(payload.transcript_path);
       if (said && said !== existing?.lastThought) {
         note("thought", said);
         lastThought = said;
@@ -198,7 +231,7 @@ export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = proce
     }
 
     if (event === "SessionStart") {
-      note("session", `Claude Code session ${payload.source === "resume" ? "resumed" : "started"}`);
+      note("session", `${LABEL} session ${payload.source === "resume" ? "resumed" : "started"}`);
       activity = "idle";
       if (isLead && awaitingVote(root, AGENT).length) {
         output = JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext:
@@ -209,7 +242,7 @@ export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = proce
       // A run AgentBrain started gets AgentBrain's brief as its prompt: that's a hand-off, not the developer asking.
       if (process.env.AGENTBRAIN_SESSION || /^You are (starting|continuing) AgentBrain task/.test(text)) {
         const verb = /^You are continuing/.test(text) ? "Handed back to" : "Started";
-        recordActivity(root, { agent: "agentbrain", ...(taskId ? { task: taskId } : {}), kind: "handoff", text: `${verb} Claude Code with the task's brief` });
+        recordActivity(root, { agent: "agentbrain", ...(taskId ? { task: taskId } : {}), kind: "handoff", text: `${verb} ${LABEL} with the task's brief` });
       } else note("prompt", text.length > 200 ? `${text.slice(0, 200)}…` : text);
       activity = "working";
       lastAction = "Thinking about a new prompt";
@@ -236,7 +269,7 @@ export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = proce
             if (task.review) task.review.nudged = [...(task.review.nudged ?? []), sessionId];
             saveTask(root, task);
           }
-          note("review", `Asked Claude Code to review ${fresh.map((t) => t.id).join(", ")}`);
+          note("review", `Asked ${LABEL} to review ${fresh.map((t) => t.id).join(", ")}`);
           activity = "working";
           output = JSON.stringify({ decision: "block", reason:
             `AgentBrain: you review other agents' work here; check what they finished before stopping:\n` +
@@ -245,8 +278,10 @@ export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = proce
             "agentbrain_review with verdict approve, or changes plus concrete notes. Then tell the developer what you decided." });
         }
       }
+    } else if (event === "Thought") {
+      activity = "working";
     } else if (event === "SessionEnd") {
-      note("session", `Claude Code session ended${payload.reason ? ` (${payload.reason})` : ""}`);
+      note("session", `${LABEL} session ended${payload.reason ? ` (${payload.reason})` : ""}`);
       endedAt = now;
     } else {
       return "";
@@ -254,7 +289,9 @@ export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = proce
 
     // Messages from other agents (or the developer) reach Claude as soon as it does something,
     // and before it goes idle, so agents working in parallel can coordinate.
-    if (event === "SessionStart" || event === "UserPromptSubmit" || event === "PostToolUse") {
+    if (!claude) {
+      // Other agents' hooks don't take Claude's JSON replies; their messages wait for agentbrain_brief.
+    } else if (event === "SessionStart" || event === "UserPromptSubmit" || event === "PostToolUse") {
       // A new session starts with the project's hardest-won lessons, like any other agent.
       const digest = event === "SessionStart"
         ? sharedContext(root, { taskId, objective: taskId ? getTask(root, taskId).objective : undefined, agentId: AGENT })
@@ -272,7 +309,7 @@ export function handleClaudeHook(payload: ClaudeHookPayload, fallbackCwd = proce
       }
     }
 
-    saveSession(root, {
+    if (!runByAgentBrain) saveSession(root, {
       schemaVersion: SCHEMA_VERSION,
       agentId: AGENT,
       sessionId,

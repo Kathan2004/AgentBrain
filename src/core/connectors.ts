@@ -1,3 +1,5 @@
+import { adapterForConnector, excludeLocally, hookCommandFor } from "./agenthooks.js";
+import { TRANSCRIPT_AGENTS } from "./transcripts.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -40,6 +42,8 @@ export interface Connector {
   /** How to sign in or install, when that's the missing step. */
   hint?: string;
   note?: string;
+  /** How the control room sees what this agent does, live. */
+  tracking?: string;
 }
 
 interface Def {
@@ -238,6 +242,16 @@ function entry(def: Def, root: string, command: string, args: string[]): Record<
   return { command, args: full };
 }
 
+/** How an agent's work reaches the control room live: its own hooks, its transcripts, or its MCP connection plus the disk. */
+function trackingFor(def: Def): string | null {
+  if (def.id === "claude-code" || def.id === "claude-code-ext") return "Live through Claude Code hooks";
+  const hooks = adapterForConnector(def.id);
+  if (hooks) return `Live through ${hooks.label} hooks (installed on Connect)`;
+  if (TRANSCRIPT_AGENTS.includes(def.id)) return "Live from its transcripts on disk (no hooks needed)";
+  if (def.mcp) return "No hooks: seen through its AgentBrain connection and edits on disk";
+  return null;
+}
+
 /** Lists what is installed (and every known tool, installed or not, with `all`). */
 export function detectConnectors(root: string, options: { all?: boolean } = {}): Connector[] {
   return DEFS.map((def) => {
@@ -254,6 +268,7 @@ export function detectConnectors(root: string, options: { all?: boolean } = {}):
       connect: def.mcp ? { scope: def.mcp.scope, file: def.mcp.scope === "project" ? path.relative(root, def.mcp.file(root)) : def.mcp.file(root) } : def.manual ? { manual: def.manual } : null,
       ...(def.hint ? { hint: def.hint } : {}),
       ...(def.note ? { note: def.note } : {}),
+      ...(trackingFor(def) ? { tracking: trackingFor(def)! } : {}),
     };
     if (installed && def.signedIn) connector.signedIn = def.signedIn(location!);
     return connector;
@@ -270,6 +285,11 @@ export function findConnector(id: string): Def {
 export function connectConnector(root: string, id: string, command: string, args: string[]): { file: string; action: "created" | "updated" | "unchanged" } {
   const def = findConnector(id);
   if (!def.mcp) throw new Error(def.manual ?? `${def.name} can't be connected: ${def.note ?? "no MCP support"}.`);
+  // An agent with hooks also reports what it does, live (prompts, edits, commands, thoughts).
+  const hooks = adapterForConnector(def.id);
+  if (hooks) {
+    try { if (hooks.install(root, hookCommandFor(hooks.platform, command, args.slice(0, Math.max(0, args.lastIndexOf("mcp"))))).action === "created") excludeLocally(root, hooks.file); } catch { /* a hook file the developer wrote by hand; leave it */ }
+  }
   const file = def.mcp.file(root);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const existed = fs.existsSync(file);
@@ -298,6 +318,11 @@ export function connectConnector(root: string, id: string, command: string, args
 export function disconnectConnector(root: string, id: string): boolean {
   const def = findConnector(id);
   if (!def.mcp) return false;
+  // Only when no other connected connector shares these hooks (Copilot in VS Code and Copilot CLI do).
+  const hooks = adapterForConnector(def.id);
+  if (hooks && !hooks.connectors.some((other) => other !== def.id && DEFS.some((d) => d.id === other && d.find() && hasAgentBrain(d, root)))) {
+    try { hooks.uninstall(root); } catch { /* leave a hand-written file alone */ }
+  }
   const file = def.mcp.file(root);
   if (!fs.existsSync(file)) return false;
   if (def.mcp.format === "json") {

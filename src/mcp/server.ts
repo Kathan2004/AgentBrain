@@ -31,7 +31,10 @@ import { sendMessage, takeUnread, unreadFor } from "../core/messages.js";
 import { delegate } from "../core/delegate.js";
 import { recall, remember } from "../core/vault.js";
 import { changesSince, liveTeam, relevantMemory, sharedContext } from "../core/context.js";
-import { listSessions } from "../core/store.js";
+import { getSession, listSessions, saveSession } from "../core/store.js";
+import { hookedAgents } from "../core/agenthooks.js";
+import { recordActivity } from "../core/activity.js";
+import { SCHEMA_VERSION } from "../core/state.js";
 import { taskTimeline } from "../core/timeline.js";
 import { taskForDir } from "../core/worktree.js";
 import { getProject, getTask, listTasks } from "../core/store.js";
@@ -307,9 +310,52 @@ export class AgentBrainMcpServer {
     this.send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
   }
 
+  private presenceTimer: NodeJS.Timeout | null = null;
+  private presentAs: boolean | null = null;
+
+  /**
+   * An agent without hooks (Windsurf's, Cline's, Zed's, any MCP client) still shows
+   * up live: while it is connected, its MCP connection is its session, so the team
+   * view counts it and edits nobody reported are credited to it. Agents whose hooks
+   * report for them (Claude Code, Cursor…) already have a session; skip those.
+   */
+  private present(activity: "working" | "idle" | "ended", tool = ""): void {
+    if (!this.root || this.options.agent || this.agent.id === "mcp-client") return;
+    try {
+      if (this.presentAs === null) this.presentAs = !hookedAgents(this.root).includes(this.agent.id);
+      if (!this.presentAs) return;
+      const now = new Date().toISOString();
+      const existing = getSession(this.root, this.agent.id, this.agent.sessionId);
+      if (!existing) recordActivity(this.root, { agent: this.agent.id, session: this.agent.sessionId, kind: "session", text: `${this.agent.id} connected (no hooks: its work is followed through AgentBrain and on disk)` });
+      if (activity === "ended" && existing) recordActivity(this.root, { agent: this.agent.id, session: this.agent.sessionId, kind: "session", text: `${this.agent.id} disconnected` });
+      const taskId = this.pendingTask()?.id ?? existing?.taskId ?? "";
+      saveSession(this.root, {
+        schemaVersion: SCHEMA_VERSION,
+        agentId: this.agent.id,
+        sessionId: this.agent.sessionId,
+        taskId,
+        taskIds: [...new Set([...(existing?.taskIds ?? []), ...(taskId ? [taskId] : [])])],
+        startedAt: existing?.startedAt ?? now,
+        lastSeenAt: now,
+        activity: activity === "working" ? "working" : "idle",
+        ...(activity === "ended" ? { endedAt: now, stopReason: "disconnected" } : {}),
+        ...(tool ? { lastAction: `Called ${tool}` } : existing?.lastAction ? { lastAction: existing.lastAction } : {}),
+      });
+      // Stay "seen" while connected, so the session doesn't look abandoned between calls.
+      if (activity !== "ended" && !this.presenceTimer) {
+        this.presenceTimer = setInterval(() => this.present("idle"), 5 * 60_000);
+        this.presenceTimer.unref?.();
+      }
+    } catch {
+      // presence is best-effort
+    }
+  }
+
   /** Called on disconnect: hand off any task this agent still owns. */
   close(reason: string): void {
     if (this.closed) return;
+    if (this.presenceTimer) clearInterval(this.presenceTimer);
+    this.present("ended");
     this.closed = true;
     this.watcher?.close();
     // Under `run --headless` the runner owns the session and hands off itself, with a better reason.
@@ -388,6 +434,7 @@ export class AgentBrainMcpServer {
       case "notifications/initialized":
         if (!this.root && this.clientSupportsRoots) await this.resolveRootFromClient();
         this.watch();
+        this.present("idle");
         return undefined;
       case "notifications/roots/list_changed":
         if (!this.root) await this.resolveRootFromClient();
@@ -398,6 +445,7 @@ export class AgentBrainMcpServer {
       case "tools/list":
         return { tools: this.tools() };
       case "tools/call":
+        this.present("working", String(params.name ?? ""));
         return this.callTool(String(params.name), params.arguments ?? {});
       case "resources/list":
         return {
