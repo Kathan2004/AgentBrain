@@ -125,7 +125,8 @@ interface Followed { size: number; seen: number; project?: boolean; cwd?: string
 
 /** Follows every agent transcript on this machine; records those working in `root`. Returns a stop function. */
 export function watchTranscripts(root: string, options: { intervalMs?: number; scanMs?: number; codexDirs?: string[]; storage?: string[] } = {}): (() => void) & { tick: () => void } {
-  const since = Date.now();
+  // File clocks are coarser than Date.now(): a file written just after this can look a little older.
+  const since = Date.now() - 2000;
   const followed = new Map<string, Followed>();
   const emit = (agent: string, label: string, session: string, cwd: string): Emit => (payload) => {
     const file = payload.tool_input?.file_path;
