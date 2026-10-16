@@ -267,6 +267,8 @@ async function mergedBase(root: string, task: TaskState, tip: string): Promise<s
   const merges = await gitOut(root, ["rev-list", "--all", "--merges", "--parents"]);
   const merge = merges.split("\n").map((l) => l.trim().split(" ")).find((p) => p.slice(2).includes(tip));
   if (merge) base = (await gitOut(root, ["merge-base", merge[1], tip])).trim() || null;
+  // Landed per file (no merge commit): where main was just before it landed.
+  if (!base && task.merged?.landed) base = (await gitOut(root, ["merge-base", `${task.merged.landed}^`, tip])).trim() || null;
   if (!base && task.createdAt) base = (await gitOut(root, ["rev-list", "-1", "--first-parent", `--before=${task.createdAt}`, tip])).trim() || null;
   if (base === tip) base = null;
   baseCache.set(task.id, base);
