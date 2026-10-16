@@ -119,6 +119,20 @@ agentbrain review rules --auto docs,comments --protect ".github/workflows/,src/a
 agentbrain review rules --auto none                       # every result waits for a reviewer
 ```
 
+**Focus reviewers** each review every result for one concern only, next to
+whoever decides (or on their own, with no lead or council):
+
+```bash
+agentbrain review focus codex "security"                         # every result
+agentbrain review focus gemini "test quality" --paths src/,tests/  # only results touching these
+agentbrain review focus codex --clear
+```
+
+AgentBrain asks them as soon as a result is in (a background run, or a message
+in the agent's chat). A focus reviewer can't approve work on its own, but it
+can send it back over its concern, and approval waits for it for up to 30
+minutes, so a silent one never stalls the project.
+
 **Results land per file, not as branch merges.** A result is the set of files
 it changed since it started. Each file is merged with main's version against
 that starting point, and the commit is built aside and moved in only if main
@@ -658,6 +672,7 @@ agentbrain council <agent-id>...  # configure a reviewing council
 agentbrain checks <command>...    # configure checks for submitted work
 agentbrain review [task-id]       # inspect or decide pending reviews
 agentbrain review rules           # what lands without a reviewer, what only you approve
+agentbrain review focus           # agents that review every result for one concern
 agentbrain history <file>         # who changed a file, in which task and why
 agentbrain doctor                 # check setup and print fixes for anything missing
 agentbrain vault                  # regenerate the Obsidian Markdown vault

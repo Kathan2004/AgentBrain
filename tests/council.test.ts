@@ -52,10 +52,11 @@ describe("lead agent", () => {
     expect(getTask(repo, parent.id).status).not.toBe("done");
 
     expect(reviewTask(repo, second.id, { verdict: "approved", reviewer: "claude-code" }).outcome).toBe("approved");
-    expect(getTask(repo, parent.id)).toMatchObject({
-      status: "done",
-      decisions: [`All pieces done: ${first.id}, ${second.id}`],
-    });
+    const closed = getTask(repo, parent.id);
+    expect(closed.status).toBe("done");
+    // Tasks created in the same millisecond get ids that don't sort in creation order: any order will do.
+    expect(closed.decisions).toHaveLength(1);
+    expect(closed.decisions[0].replace(/^All pieces done: /, "").split(", ").sort()).toEqual([first.id, second.id].sort());
     expect(readActivity(repo)).toEqual(expect.arrayContaining([
       expect.objectContaining({
         agent: "agentbrain",

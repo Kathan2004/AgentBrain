@@ -111,7 +111,9 @@ export interface ReviewState {
    */
   pendingMerge?: { by: string; notes?: string; at: string; why: string };
   /** What kind of change the result is (docs, comments, tests, code), and protected files it touches. */
-  change?: { kind: "docs" | "comments" | "tests" | "code"; files: number; protected?: string[] };
+  change?: { kind: "docs" | "comments" | "tests" | "code"; files: number; protected?: string[]; /** The changed files (up to 500). */ paths?: string[] };
+  /** Focus reviewers already asked to review this submission. */
+  focusAsked?: string[];
   /** Landed by the review rules, without a reviewer: why. */
   autoApproved?: string;
 }

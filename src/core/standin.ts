@@ -4,6 +4,7 @@ import path from "node:path";
 import { recordActivity } from "./activity.js";
 import { deliverToChat, rankWorkers } from "./delegate.js";
 import { brainDir } from "./paths.js";
+import { focusBrief, focusStatus } from "./focus.js";
 import { pendingReviews, reviewPolicy } from "./review.js";
 import type { TaskState } from "./state.js";
 import { getTask, saveTask } from "./store.js";
@@ -132,6 +133,43 @@ export function askLead(root: string, taskId: string, self: { command: string; a
   return true;
 }
 
+/**
+ * Focus reviewers are asked like the lead: a background run when the agent
+ * can run in the background, else a message in its chat; agents that can't be
+ * asked see the result waiting in their next session. Once per submission each.
+ */
+export function askFocus(root: string, taskId: string, self: { command: string; args: string[] }, now = new Date()): string[] {
+  const task = getTask(root, taskId);
+  const review = task.review;
+  if (task.status !== "review" || !review || review.pendingMerge) return [];
+  if (reviewPolicy(root).checks.length && !review.verifiedAt) return [];
+  if ((review.flags ?? []).some((f) => f.kind === "no-change")) return [];
+  const asked: string[] = [];
+  const ranked = rankWorkers(root, now);
+  for (const f of focusStatus(root, task, now).waiting) {
+    if ((review.focusAsked ?? []).includes(f.agent)) continue;
+    const choice = ranked.find((c) => c.worker.id === f.agent);
+    if (!choice?.worker.available || (choice.worker.how !== "print" && choice.worker.how !== "chat")) continue;
+    if (choice.worker.how === "chat") {
+      const wt = task.worktree;
+      const sent = deliverToChat(root, {
+        from: "agentbrain",
+        to: f.agent,
+        text: `Please give ${taskId} your ${f.area} review. Read its packet with agentbrain_brief (task_id ${taskId})` +
+          `${wt ? ` and the diff (git -C ${JSON.stringify(wt.path)} diff ${wt.base.slice(0, 12)}...HEAD)` : ""}. ${focusBrief(f)} ` +
+          `Then call agentbrain_review with task_id ${taskId}. Don't edit the code or change the task's status.`,
+      });
+      if (!sent) continue;
+    } else spawnReview(root, taskId, f.agent, self);
+    const fresh = getTask(root, taskId);
+    fresh.review!.focusAsked = [...(fresh.review!.focusAsked ?? []), f.agent];
+    saveTask(root, fresh);
+    recordActivity(root, { agent: "agentbrain", task: taskId, kind: "review", text: `Asked ${f.agent} for its ${f.area} review of ${review.worker}'s result` });
+    asked.push(f.agent);
+  }
+  return asked;
+}
+
 function spawnReview(root: string, taskId: string, agent: string, self: { command: string; args: string[] }): void {
   const log = path.join(brainDir(root), "agents", `review-${taskId}.log`);
   fs.mkdirSync(path.dirname(log), { recursive: true });
@@ -150,6 +188,7 @@ export function standInSweep(root: string, self: { command: string; args: string
       if (standIn && now.getTime() - Date.parse(standIn.at) > STAND_IN_TIMEOUT_MINUTES * 60_000) {
         releaseStandIn(root, task.id, standIn.agent, `no verdict after ${STAND_IN_TIMEOUT_MINUTES} minutes`);
       }
+      for (const agent of askFocus(root, task.id, self, now)) started.push(`${task.id}:${agent}`);
       if (askLead(root, task.id, self, now)) {
         started.push(`${task.id}:lead`);
         continue;

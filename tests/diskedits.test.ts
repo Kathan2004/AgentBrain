@@ -37,4 +37,21 @@ describe("edits nobody reported", () => {
     const edits = readActivity(r).filter((e) => e.kind === "edit" && /seen on disk/.test(e.text));
     expect(edits.map((e) => [e.agent, e.files?.[0]])).toEqual([["cursor", "a.ts"]]);
   });
+
+  it("doesn't count a removed task worktree's files as edits", async () => {
+    const r = tempRepo("agentbrain-disk-");
+    initStore(r);
+    const wt = path.join(r, ".agentbrain", "worktrees", "task-1");
+    fs.mkdirSync(wt, { recursive: true });
+    const rec = diskEditRecorder(r, 50);
+    fs.writeFileSync(path.join(wt, "kept.ts"), "x\n");
+    rec.changed(path.join(wt, "kept.ts"));
+    await wait(150);
+    rec.changed(path.join(wt, "gone.ts"));
+    fs.rmSync(wt, { recursive: true, force: true });
+    await wait(150);
+    rec.stop();
+    const edits = readActivity(r).filter((e) => e.kind === "edit" && /seen on disk/.test(e.text));
+    expect(edits.map((e) => [e.task, e.files?.[0]])).toEqual([["task-1", "kept.ts"]]);
+  });
 });

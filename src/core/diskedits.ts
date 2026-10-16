@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { readActivity, recordActivity } from "./activity.js";
 import { getProject, listSessions } from "./store.js";
@@ -72,6 +73,8 @@ export function diskEditRecorder(root: string, settleMs = SETTLE_MS): { changed:
     if (existing) clearTimeout(existing);
     pending.set(key, setTimeout(() => {
       pending.delete(key);
+      // A task's worktree being removed deletes every file in it: that's cleanup, not edits.
+      if (target.task && !fs.existsSync(path.join(root, ".agentbrain", "worktrees", target.task))) return;
       // One note per file per minute: a save storm is one edit.
       if (Date.now() - (recorded.get(key) ?? 0) < 60_000) return;
       if (reported(root, target, first - 30_000)) return;

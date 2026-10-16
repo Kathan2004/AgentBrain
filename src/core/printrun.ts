@@ -2,7 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { buildPrompt, closeSession, recordSession, takeOver, updateTask, writeCheckpoint } from "./actions.js";
-import { reviewSummary } from "./review.js";
+import { focusBrief, focusFor } from "./focus.js";
+import type { TaskState } from "./state.js";
+import { reviewPolicy, reviewSummary } from "./review.js";
 import { releaseStandIn } from "./standin.js";
 import { execFileSync } from "node:child_process";
 import { spawnPortable, gitBinary } from "./platform.js";
@@ -171,11 +173,18 @@ Git worktree. Read the code you need (you can't edit anything), then:
    per piece naming its task id.
 4. Do not write code and do not mark this task done: it stays open until its pieces are reviewed.`;
 
+function reviewRole(root: string, task: TaskState, me: string): string {
+  if (task.review?.standIn?.agent === me) return `You are standing in for the lead reviewer because ${task.review.standIn.why}.`;
+  const focus = focusFor(root, task).find((f) => f.agent === me);
+  if (focus && !reviewPolicy(root).reviewers.includes(me)) return focusBrief(focus);
+  return "You are the lead reviewer on this project: work by other agents counts as done only when you approve it.";
+}
+
 function reviewJob(root: string, taskId: string, me: string): string {
   const task = getTask(root, taskId);
   return `## Your job: review this result, don't build
 
-${task.review?.standIn?.agent === me ? `You are standing in for the lead reviewer because ${task.review.standIn.why}.` : "You are the lead reviewer on this project: work by other agents counts as done only when you approve it."}
+${reviewRole(root, task, me)}
 ${reviewSummary(root, task, me)}
 
 1. Read the diff (git diff and git log in this directory) and the changed files. Run the tests or checks

@@ -1,4 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
+import { focusReviewers, type FocusReviewer } from "../core/focus.js";
+import { reviewRules, type ReviewRules } from "../core/reviewrules.js";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import { firstStep } from "../core/actions.js";
@@ -87,6 +89,10 @@ export interface Snapshot {
   activity: ActivityEvent[];
   permissions: "ask" | "all";
   policy: { mode: "none" | "lead" | "council"; reviewers: string[]; quorum: number; checks: string[]; tolerates: number };
+  /** Review rules: kinds of change that land without a reviewer, and paths only the developer approves. */
+  rules: ReviewRules;
+  /** Agents that review every result for one concern. */
+  focus: FocusReviewer[];
   reputation: Record<string, Reputation>;
   /** Agents the developer can pick as reviewers: built-in ones plus any seen in this repo. */
   knownAgents: string[];
@@ -217,6 +223,8 @@ export function snapshot(root: string, options: { includeDone?: boolean } = {}):
     activity: readActivity(root, 300),
     policy: { ...policy, tolerates: policy.mode === "council" ? faultTolerance(policy.reviewers.length, policy.quorum) : 0 },
     reputation: readReputation(root),
+    rules: reviewRules(root),
+    focus: focusReviewers(root),
     knownAgents: [...known].sort(),
     workers: rankWorkers(root).map((c) => ({ ...c.worker, reasons: c.reasons })),
     ...(project.worker ? { worker: project.worker } : {}),
@@ -273,6 +281,15 @@ async function mergedBase(root: string, task: TaskState, tip: string): Promise<s
   if (base === tip) base = null;
   baseCache.set(task.id, base);
   return base;
+}
+
+/** A task done straight on main: from just before its first recorded commit to its last. */
+function commitRange(root: string, task: TaskState): { base: string; tip: string; shas: string[] } | null {
+  const shas = readActivity(root, 5000)
+    .filter((e) => e.kind === "commit" && e.task === task.id)
+    .map((e) => e.text.split(" ")[0])
+    .filter((sha) => /^[0-9a-f]{7,40}$/.test(sha) && gitSync(root, ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]).trim());
+  return shas.length ? { base: `${shas[0]}^`, tip: shas.at(-1)!, shas } : null;
 }
 
 /** A task done straight on main (no worktree): the HEADs AgentBrain saw at its first and last checkpoint. */
@@ -357,10 +374,14 @@ export async function taskChanges(root: string, task: TaskState, maxBytes = 400_
   const tipIndex = shas.findIndex(Boolean);
   let tip = tipIndex >= 0 ? refs[tipIndex] : undefined;
   let approximate = false;
+  // Commits recorded as this task's: others that landed in between aren't listed as its own.
+  let ownShas: string[] | undefined;
   if (!base && tip && tipIndex >= 0) base = (await mergedBase(root, task, shas[tipIndex])) ?? undefined;
   if (!task.worktree && !task.merged) {
-    const span = checkpointRange(root, task);
-    if (span) { base = span.base; tip = span.tip; approximate = true; }
+    const own = commitRange(root, task);
+    const span = own ?? checkpointRange(root, task);
+    if (span) { base = span.base; tip = span.tip; approximate = !own; }
+    if (own) ownShas = own.shas;
   }
   const range = base && tip ? `${base}..${tip}` : null;
 
@@ -381,7 +402,7 @@ export async function taskChanges(root: string, task: TaskState, maxBytes = 400_
   const commits = log.split("\x1e").map((r) => r.trim()).filter(Boolean).map((r) => {
     const [sha, subject, body, author, at] = r.split("\x1f");
     return { sha, subject, body: (body ?? "").trim(), author, at };
-  });
+  }).filter((c) => !ownShas || ownShas.some((s) => c.sha.startsWith(s)));
   const stats = new Map<string, { path: string; added: number; removed: number; status: string }>();
   for (const out of [numCommitted, numPending]) {
     for (const line of out.split("\n")) {

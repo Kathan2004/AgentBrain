@@ -32,6 +32,7 @@ h2{font-size:13px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;
 .steps{display:flex;gap:0;margin:12px 0 8px;font-size:12px;color:var(--faint)}.step{flex:1;position:relative;padding-top:12px;text-align:left}.step:before{content:"";position:absolute;top:3px;left:0;right:0;height:3px;background:var(--line);border-radius:2px}.step:not(:last-child){margin-right:4px}.step.done{color:var(--muted)}.step.done:before{background:var(--ok)}.step.now{color:var(--ink);font-weight:600}.step.now:before{background:var(--accent)}.step.bad:before{background:var(--bad)}
 .log{margin-top:6px;border-top:1px solid var(--line);padding-top:8px}.log div{font-size:12.5px;color:var(--muted);display:flex;gap:8px;padding:1px 0}.log .g{width:14px;text-align:center;flex:none;color:var(--faint)}.log .t{font-family:var(--mono);color:var(--faint);flex:none;font-size:11.5px;padding-top:1px}
 .check{font-family:var(--mono);font-size:12.5px}.ok{color:var(--ok)}.row.closed>span:nth-child(2){color:var(--faint);text-decoration:line-through}.x{color:var(--faint)}button.more{display:block;margin:8px auto;background:none;border:0;color:var(--accent);cursor:pointer;font:inherit}.bad{color:var(--bad)}
+.focusrow{display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap}.focusrow select,.focusrow input{flex:1 1 120px;min-width:0}.focusrow input{border:1px solid var(--line);background:var(--card);color:inherit;border-radius:9px;padding:7px 11px;font:inherit;font-size:14px}.focusrow input.mono{font-family:var(--mono);font-size:12.5px}.focusrow input:focus{outline:2px solid var(--accent);outline-offset:-1px}.dhead .hist{margin-left:auto;padding:2px 8px;font-size:12px}.dhead .hist+.dstat{margin-left:8px}.hist-panel{padding:10px 14px;border-bottom:1px solid var(--line);display:grid;gap:3px}.hist-panel .why{color:var(--faint);padding-left:12px}
 .flag{background:color-mix(in srgb,var(--bad) 9%,transparent);border-radius:8px;padding:7px 10px;margin:8px 0;font-size:13px}.flag b{color:var(--bad)}
 .actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center}
 .notes{width:100%;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:8px 10px;min-height:44px;margin-top:10px;font-size:13.5px;resize:vertical}
@@ -254,6 +255,7 @@ function renderHome(){
   visibleReview.forEach(function(t){var rv=t.review||{};var ty=t.tally;
     h+='<div class="card need"><div class="title link" data-open="'+esc(t.id)+'" title="'+esc(t.objective)+'">'+esc(shortTitle(t.objective))+'</div>'+metaHtml(t)+'<div class="sub">Finished by <b style="color:'+color(rv.worker||t.agent||'')+'">'+esc(name(rv.worker||t.agent||'?'))+'</b> '+ago(rv.requestedAt||t.updatedAt)+' · <span class="mono">'+esc(t.id)+'</span></div><div class="sub"><b>Next:</b> '+esc(nextAction(t))+'</div>'+stepsHtml(t);
     if(S.policy.checks.length){if((rv.checks||[]).length)h+=rv.checks.map(function(c){return '<div class="check '+(c.ok?'ok':'bad')+'" title="'+esc(c.tail)+'">'+(c.ok?'✓ passed':'✗ failed')+' · '+esc(c.command)+'</div>'}).join('');else if(t.review)h+='<div class="check sub">Running checks…</div>';else h+='<div class="sub">Checks have not run on this result yet. <button class="ghost" data-verify="'+esc(t.id)+'">Run checks</button></div>'}
+    h+=reviewRulesHtml(rv,ty);
     (rv.flags||[]).forEach(function(f){h+='<div class="flag"><b>⚠ '+esc({'no-change':'Nothing changed','false-claim':'False claim','hallucination':'Hallucination','dissent':'Dissent'}[f.kind]||f.kind)+'</b> · '+esc(name(f.agent))+': '+esc(f.text)+'</div>'});
     if(ty&&ty.total>0&&S.policy.mode!=='none'){h+='<div class="meter"><div class="a" style="width:'+(ty.approve/ty.total*100)+'%"></div><div class="c" style="width:'+(ty.changes/ty.total*100)+'%"></div><div class="q" style="left:'+(ty.quorum*100)+'%"></div></div><div class="sub">'+(S.policy.mode==='council'?'Council: '+ty.approve.toFixed(1)+' approve, '+ty.changes.toFixed(1)+' changes of '+ty.total.toFixed(1)+' (needs '+Math.round(ty.quorum*100)+'%)':'Lead: '+((rv.votes||[]).length?'voted':'has not voted yet'))+(function(){var w=ty.eligible.filter(function(x){return !(rv.votes||[]).some(function(v){return v.agent===x})});return w.length?' · <b>waiting for '+w.map(name).map(esc).join(', ')+'</b> (or decide yourself below)':''})()+'</div>';
       (rv.votes||[]).forEach(function(v){h+='<div class="sub"><b style="color:'+color(v.agent)+'">'+esc(name(v.agent))+'</b> '+(v.verdict==='approved'?'<span class="ok">approve</span>':'<span class="bad">changes</span>')+(v.notes?': '+esc(v.notes):'')+'</div>'})}
@@ -389,13 +391,16 @@ function renderConnectors(){
 
 /* ---------- settings ---------- */
 function renderSettings(){
-  if(!settings||!settings.dirty)settings={mode:S.policy.mode,agents:S.policy.reviewers.slice(),quorum:S.policy.quorum||0.67,checks:S.policy.checks.join('\n'),dirty:false};var d=settings;
+  if(!settings||!settings.dirty)settings={mode:S.policy.mode,agents:S.policy.reviewers.slice(),quorum:S.policy.quorum||0.67,checks:S.policy.checks.join('\n'),autoApprove:S.rules.autoApprove.slice(),protect:S.rules.protect.join('\n'),focus:S.focus.map(function(f){return {agent:f.agent,area:f.area,paths:(f.paths||[]).join(', ')}}),dirty:false};var d=settings;
   var h='<div class="card"><div class="set"><div><label>Appearance</label><div class="sub">System follows your computer\'s light or dark setting.</div></div><div><span class="seg">'+['system','light','dark'].map(function(t){return '<button data-theme-pick="'+t+'" class="'+(theme()===t?'on':'')+'">'+THEME_NAME[t]+'</button>'}).join('')+'</span></div></div><div class="set"><div><label>New tasks go to</label><div class="sub">The agent that picks up what you type.</div></div><div><select id="worker"><option value="auto"'+(S.worker?'':' selected')+'>Auto: the best-placed agent each time</option>'+S.workers.map(function(w){return '<option value="'+esc(w.id)+'"'+(w.id===S.worker?' selected':'')+(w.available?'':' disabled')+'>'+esc(w.name)+(w.available?'':' ('+esc((w.note||'unavailable').replace(/: .*/,''))+')')+'</option>'}).join('')+'</select></div></div>';
   h+='<div class="set"><div><label>Agent permissions</label><div class="sub">'+(S.permissions==='all'?'Agents run any tool or command without asking, including Copilot in VS Code (this project only).':'Each agent asks before running commands.')+'</div></div><div><span class="seg">'+[['ask','Ask'],['all','Allow all']].map(function(x){return '<button data-perm="'+x[0]+'" class="'+(S.permissions===x[0]?'on':'')+'">'+x[1]+'</button>'}).join('')+'</span></div></div>';
   h+='<div class="set"><div><label>Who decides</label><div class="sub">Whose approval finished work needs.</div></div><div><span class="seg">'+[['none','Me'],['lead','A lead agent'],['council','A council']].map(function(x){return '<button data-mode="'+x[0]+'" class="'+(d.mode===x[0]?'on':'')+'">'+x[1]+'</button>'}).join('')+'</span>';
   if(d.mode==='lead')h+='<div class="agents">'+S.knownAgents.map(function(a){return '<button class="chip'+(d.agents[0]===a?' on':'')+'" data-lead="'+esc(a)+'">'+esc(name(a))+'</button>'}).join('')+'</div><div class="sub" style="margin-top:6px">The lead reviews every other agent\'s work. You can always override.</div>';
   if(d.mode==='council'){var f=Math.max(0,Math.floor(d.agents.length*(1-d.quorum)+1e-9));h+='<div class="agents">'+S.knownAgents.map(function(a){return '<button class="chip'+(d.agents.indexOf(a)>=0?' on':'')+'" data-member="'+esc(a)+'">'+esc(name(a))+' <span class="sub">w '+weight(a).toFixed(2)+'</span></button>'}).join('')+'</div><div class="actions"><span class="sub">Quorum</span><select id="quorum">'+[[0.51,'51%'],[0.67,'67%'],[0.75,'75%'],[1,'100%']].map(function(q){return '<option value="'+q[0]+'"'+(Math.abs(d.quorum-q[0])<0.02?' selected':'')+'>'+q[1]+'</option>'}).join('')+'</select><span class="sub">'+d.agents.length+' members · a result survives '+f+' broken, compromised or hallucinating reviewer'+(f===1?'':'s')+'</span></div><div class="sub" style="margin-top:6px">Votes are sealed until each member votes and weighted by reputation; mix vendors so one model\'s blind spot can\'t decide.</div>'}
   h+='</div></div><div class="set"><div><label>Checks</label><div class="sub">AgentBrain runs these itself on every result; failing ones block approval. One per line.</div></div><div><textarea id="checks" class="notes" style="margin:0;font-family:var(--mono)" placeholder="npm test">'+esc(d.checks)+'</textarea></div></div>';
+  h+='<div class="set"><div><label>Lands without review</label><div class="sub">Results of these kinds land by themselves once the checks pass and nothing is flagged. Tests-only is off by default: weakening tests is how agents fake a pass.</div></div><div><div class="agents" style="margin:0">'+KINDS.map(function(k){return '<button class="chip'+(d.autoApprove.indexOf(k[0])>=0?' on':'')+'" data-auto="'+k[0]+'">'+k[1]+'</button>'}).join('')+'</div></div></div>';
+  h+='<div class="set"><div><label>Only you approve</label><div class="sub">Changes under these paths wait for you, whatever the reviewers vote. One per line; end folders with /.</div></div><div><textarea id="protect" class="notes" style="margin:0;font-family:var(--mono)" placeholder=".github/workflows/">'+esc(d.protect)+'</textarea></div></div>';
+  h+='<div class="set"><div><label>Focus reviewers</label><div class="sub">Agents that review every result for one concern only. They can send work back over it; approval waits for them up to 30 minutes.</div></div><div>'+d.focus.map(function(f,i){return '<div class="focusrow"><select data-fagent="'+i+'">'+S.knownAgents.map(function(a){return '<option value="'+esc(a)+'"'+(a===f.agent?' selected':'')+'>'+esc(name(a))+'</option>'}).join('')+'</select><input data-farea="'+i+'" value="'+esc(f.area)+'" placeholder="Concern, e.g. security" aria-label="Concern"><input data-fpaths="'+i+'" class="mono" value="'+esc(f.paths)+'" placeholder="Only these paths (optional)" aria-label="Paths"><button class="ghost" data-fdel="'+i+'" aria-label="Remove">Remove</button></div>'}).join('')+'<button class="ghost" id="addFocus">Add a focus reviewer</button></div></div>';
   h+='<div class="actions"><button class="primary" id="save"'+(d.dirty?'':' disabled')+'>Save</button>'+(d.dirty?'<button class="ghost" id="cancel">Cancel</button>':'')+'</div></div>';
   if(Object.keys(S.reputation).length)h+='<h2>Reputation</h2><div class="card">'+Object.keys(S.reputation).map(function(a){var r=S.reputation[a];return '<div class="sub" style="padding:3px 0"><b style="color:'+color(a)+'">'+esc(name(a))+'</b> · weight '+r.score.toFixed(2)+' · agreed '+r.agreed+' · dissented '+r.dissented+' · flagged '+r.flagged+'</div>'}).join('')+'</div>';
   var m=document.getElementById('main');m.innerHTML=h;
@@ -406,7 +411,15 @@ function renderSettings(){
   m.querySelectorAll('[data-member]').forEach(function(b){b.onclick=function(){var a=b.dataset.member,i=d.agents.indexOf(a);if(i>=0)d.agents.splice(i,1);else d.agents.push(a);d.dirty=true;renderSettings()}});
   var q=document.getElementById('quorum');if(q)q.onchange=function(){d.quorum=Number(q.value);d.dirty=true;renderSettings()};
   var c=document.getElementById('checks');c.oninput=function(){d.checks=c.value;if(!d.dirty){d.dirty=true;var s=document.getElementById('save');s.disabled=false}};
-  document.getElementById('save').onclick=function(){Promise.all([post('/api/policy',{mode:d.mode,agents:d.agents,quorum:d.mode==='council'?d.quorum:undefined}),post('/api/settings',{checks:d.checks.split('\n')})]).then(function(r){if(r[0].ok&&r[1].ok){d.dirty=false;toast('Saved')}})};
+  var touched=function(){if(!d.dirty){d.dirty=true;document.getElementById('save').disabled=false}};
+  m.querySelectorAll('[data-auto]').forEach(function(b){b.onclick=function(){var k=b.dataset.auto,i=d.autoApprove.indexOf(k);if(i>=0)d.autoApprove.splice(i,1);else d.autoApprove.push(k);d.dirty=true;renderSettings()}});
+  var pr=document.getElementById('protect');pr.oninput=function(){d.protect=pr.value;touched()};
+  m.querySelectorAll('[data-fagent]').forEach(function(x){x.onchange=function(){d.focus[+x.dataset.fagent].agent=x.value;touched()}});
+  m.querySelectorAll('[data-farea]').forEach(function(x){x.oninput=function(){d.focus[+x.dataset.farea].area=x.value;touched()}});
+  m.querySelectorAll('[data-fpaths]').forEach(function(x){x.oninput=function(){d.focus[+x.dataset.fpaths].paths=x.value;touched()}});
+  m.querySelectorAll('[data-fdel]').forEach(function(x){x.onclick=function(){d.focus.splice(+x.dataset.fdel,1);d.dirty=true;renderSettings()}});
+  document.getElementById('addFocus').onclick=function(){var used=d.focus.map(function(f){return f.agent});var a=S.knownAgents.filter(function(x){return used.indexOf(x)<0})[0]||S.knownAgents[0];d.focus.push({agent:a,area:'',paths:''});d.dirty=true;renderSettings();var last=m.querySelectorAll('[data-farea]');if(last.length)last[last.length-1].focus()};
+  document.getElementById('save').onclick=function(){Promise.all([post('/api/policy',{mode:d.mode,agents:d.agents,quorum:d.mode==='council'?d.quorum:undefined}),post('/api/settings',{checks:d.checks.split('\n'),autoApprove:d.autoApprove,protect:d.protect.split('\n'),focus:d.focus.filter(function(f){return f.area.trim()}).map(function(f){return {agent:f.agent,area:f.area,paths:f.paths.split(',')}})})]).then(function(r){if(r[0].ok&&r[1].ok){d.dirty=false;toast('Saved')}})};
   var cc=document.getElementById('cancel');if(cc)cc.onclick=function(){d.dirty=false;renderSettings()};
 }
 
@@ -430,9 +443,36 @@ function parseDiff(patch){
   return files;
 }
 function bar(a,r){var t=a+r||1,g=Math.round(5*a/t),b=Math.min(5-g,Math.round(5*r/t));var s='';for(var i=0;i<5;i++)s+='<i class="'+(i<g?'g':i<g+b?'r':'n')+'"></i>';return '<span class="dbar">'+s+'</span>'}
+var histOpen={},histCache={};
+var KINDS=[['docs','Docs only'],['comments','Comments only'],['tests','Tests only'],['code','Any code']];
+function historyHtml(r){
+  if(!r)return '<div class="hist-panel sub">Loading history…</div>';
+  if(r.error)return '<div class="hist-panel sub">'+esc(r.error)+'</div>';
+  var h='<div class="hist-panel">';
+  if(r.open.length)h+='<div class="sub"><b>Being worked on</b></div>'+r.open.map(function(o){return '<div class="sub"><a href="#" data-open="'+esc(o.task)+'">'+esc(shortTitle(o.objective))+'</a> · '+esc(o.status)+(o.agent?' · <b style="color:'+color(o.agent)+'">'+esc(name(o.agent))+'</b>':'')+'</div>'}).join('');
+  if(r.landed.length)h+='<div class="sub"><b>Results that changed it</b></div>'+r.landed.map(function(l){return '<div class="sub">'+esc(l.at.slice(0,10))+' · <a href="#" data-open="'+esc(l.task)+'">'+esc(shortTitle(l.objective)||l.task)+'</a>'+(l.agent?' by <b style="color:'+color(l.agent)+'">'+esc(name(l.agent))+'</b>':'')+' · <span class="mono">'+esc(l.commit)+'</span>'+l.why.map(function(w){return '<div class="why">why: '+esc(w)+'</div>'}).join('')+'</div>'}).join('');
+  if(r.edits.length)h+='<div class="sub"><b>Recent edits</b></div>'+r.edits.slice(0,5).map(function(e){return '<div class="sub">'+ago(e.at)+' · <b style="color:'+color(e.agent)+'">'+esc(name(e.agent))+'</b>'+(e.task?' · <a href="#" data-open="'+esc(e.task)+'">'+esc(e.task)+'</a>':'')+'</div>'}).join('');
+  if(r.commits.length)h+='<div class="sub"><b>Commits</b></div>'+r.commits.slice(0,5).map(function(c){return '<div class="sub mono">'+esc(c)+'</div>'}).join('');
+  if(!r.open.length&&!r.landed.length&&!r.edits.length&&!r.commits.length)h+='<div class="sub">No agent has changed it through AgentBrain, and Git has no commits for it.</div>';
+  return h+'</div>';
+}
+/** What the review rules and focus reviewers say about a result. */
+function reviewRulesHtml(rv,ty){
+  var h='',ch=rv.change;
+  if(ch)h+='<div class="sub">'+esc({docs:'Docs only',comments:'Comments only',tests:'Tests and docs only',code:'Code'}[ch.kind]||ch.kind)+' · '+ch.files+' file'+(ch.files===1?'':'s')+(rv.autoApproved?' · <span class="ok">approved by the review rules</span>':'')+'</div>';
+  if(ch&&ch.protected&&ch.protected.length)h+='<div class="flag"><b>Protected</b> · only you can approve changes to '+ch.protected.map(function(p){return '<span class="mono">'+esc(p)+'</span>'}).join(', ')+'</div>';
+  var f=ty&&ty.focus;
+  if(f){
+    f.changes.forEach(function(x){h+='<div class="flag"><b>Focus review</b> · '+esc(x)+' asked for changes</div>'});
+    if(f.waiting.length)h+='<div class="sub">Waiting for the focus review of <b>'+f.waiting.map(esc).join(', ')+'</b> (up to 30 minutes)</div>';
+    if(f.skipped.length)h+='<div class="sub">'+f.skipped.map(esc).join(', ')+' didn\'t review in time; no longer waiting</div>';
+  }
+  return h;
+}
 function fileHtml(f,i){
   var open=openFiles[f.path]!==undefined?openFiles[f.path]:f.rows.length<=400;
-  var h='<div class="dfile" id="f'+i+'"><div class="dhead" data-file="'+esc(f.path)+'"><span class="caret">'+(open?'▾':'▸')+'</span><span class="mono">'+esc(f.path)+'</span><span class="dstat"><span class="ok">+'+f.added+'</span> <span class="bad">−'+f.removed+'</span> '+bar(f.added,f.removed)+'</span></div>';
+  var h='<div class="dfile" id="f'+i+'"><div class="dhead" data-file="'+esc(f.path)+'"><span class="caret">'+(open?'▾':'▸')+'</span><span class="mono">'+esc(f.path)+'</span><button class="ghost hist" data-hist="'+esc(f.path)+'" title="Who changed this file, in which task and why">History</button><span class="dstat"><span class="ok">+'+f.added+'</span> <span class="bad">−'+f.removed+'</span> '+bar(f.added,f.removed)+'</span></div>';
+  if(histOpen[f.path])h+=historyHtml(histCache[f.path]);
   if(open){
     if(f.binary)h+='<div class="sub" style="padding:10px 14px">Binary file</div>';
     else h+='<table class="diff"><colgroup><col class="lnc"><col class="lnc"><col></colgroup>'+f.rows.map(function(r){
@@ -490,12 +530,14 @@ function renderTask(){
     var sb=document.getElementById('sendBack');if(sb)sb.onclick=function(){var n=prompt('What should change?');if(n)post('/api/review',{taskId:t.id,verdict:'changes',notes:n}).then(function(x){if(x.ok)toast('Sent back')})};
     var close=document.getElementById('closeTask');if(close)close.onclick=function(){var choices=['Accidental task','Duplicate task','No longer needed','Already handled'];var answer=prompt('Close task as:\n1. Accidental task\n2. Duplicate task\n3. No longer needed\n4. Already handled','1');if(!answer)return;var index=Number(answer.trim());if(!/^[1-4]$/.test(answer.trim())){toast('Choose 1, 2, 3, or 4');return}close.disabled=true;post('/api/close',{taskId:t.id,reason:choices[index-1]}).then(function(x){if(x.ok){toast('Task closed');setTab('home')}else close.disabled=false})};
     m.querySelectorAll('[data-dtab]').forEach(function(b){b.onclick=function(){detailTab=b.dataset.dtab;detailKey='';renderTask()}});
+    m.querySelectorAll('[data-hist]').forEach(function(b){b.onclick=function(e){e.stopPropagation();var p=b.dataset.hist;histOpen[p]=!histOpen[p];if(histOpen[p]&&!histCache[p])api('/api/history?file='+encodeURIComponent(p)).then(function(r){histCache[p]=r;detailKey='';renderTask()});detailKey='';renderTask()}});
+    m.querySelectorAll('.hist-panel [data-open]').forEach(function(a){a.onclick=function(e){e.preventDefault();selectedTask=a.dataset.open;setTab('tasks')}});
     m.querySelectorAll('[data-file]').forEach(function(d){d.onclick=function(){var p=d.dataset.file,f=files.find(function(x){return x.path===p});var cur=openFiles[p]!==undefined?openFiles[p]:f.rows.length<=400;openFiles[p]=!cur;detailKey='';renderTask()}});
     m.querySelectorAll('[data-jump]').forEach(function(a){a.onclick=function(e){e.preventDefault();var el=document.getElementById('f'+a.dataset.jump);if(el)el.scrollIntoView({behavior:'smooth',block:'start'})}});
   }
 }
 
-function role(id){var p=S.policy;if(p.mode==='lead'&&p.reviewers[0]===id)return ' <span class="sub">· lead</span>';if(p.mode==='council'&&p.reviewers.indexOf(id)>=0)return ' <span class="sub">· council</span>';return ''}
+function role(id){var p=S.policy;var fr=(S.focus||[]).find(function(x){return x.agent===id});if(fr)return ' <span class="sub">· '+esc(fr.area)+' reviewer</span>';if(p.mode==='lead'&&p.reviewers[0]===id)return ' <span class="sub">· lead</span>';if(p.mode==='council'&&p.reviewers.indexOf(id)>=0)return ' <span class="sub">· council</span>';return ''}
 function cssVar(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
 /* ---------- brain: the real vault, drawn like Obsidian's graph view ---------- */
 var V={nodes:[],links:[],byId:{},cam:{x:0,y:0,k:1},hover:null,drag:null,pan:null,moved:false,raf:null,alpha:0,data:null,loadedAt:0,hidden:{Daily:true},query:'',canvas:null,fit:true,open:null};

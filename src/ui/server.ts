@@ -1,4 +1,7 @@
 import { diskEditRecorder } from "../core/diskedits.js";
+import { focusReviewers, setFocus } from "../core/focus.js";
+import { fileHistory } from "../core/history.js";
+import { setReviewRules, type ChangeKind } from "../core/reviewrules.js";
 import { watchTranscripts } from "../core/transcripts.js";
 import { CLOSE_REASONS, closeTask } from "../core/close.js";
 import { readActivity } from "../core/activity.js";
@@ -13,7 +16,7 @@ import { snapshot, taskChanges, taskDiff, transcriptTail, watchProject, type Liv
 import { openInEditor } from "./open.js";
 import { PAGE } from "./page.js";
 import { gitFetch, gitGraph, gitToday } from "./gitgraph.js";
-import { retryPendingMerges, reviewTask, setChecks, setCouncil, setLead, startVerification } from "../core/review.js";
+import { retryPendingMerges, reviewTask, settleReviews, setChecks, setCouncil, setLead, startVerification } from "../core/review.js";
 import { setPermissionMode } from "../core/permissions.js";
 import { standInSweep } from "../core/standin.js";
 import { rescueStalledChats, resumeSentBack } from "../core/rescue.js";
@@ -135,6 +138,7 @@ export async function startUiServer(
     try { rescueStalledChats(root, options.self); } catch { /* same */ }
     try { resumeSentBack(root, options.self); } catch { /* same */ }
     try { retryPendingMerges(root); } catch { /* same */ }
+    try { settleReviews(root); } catch { /* same */ }
   };
   let lastSent = "";
   let vaultTimer: NodeJS.Timeout | undefined;
@@ -182,6 +186,9 @@ export async function startUiServer(
       if (url.pathname === "/api/context" && request.method === "GET") {
         const task = getTask(root, findTask(root, url.searchParams.get("task") ?? "").id);
         return json(response, { context: sharedContext(root, { taskId: task.id, objective: task.objective }) });
+      }
+      if (url.pathname === "/api/history" && request.method === "GET") {
+        return json(response, fileHistory(root, url.searchParams.get("file") ?? ""));
       }
       if (url.pathname === "/api/changes" && request.method === "GET") return json(response, await taskChanges(root, getTask(root, findTask(root, url.searchParams.get("task") ?? "").id)));
       if (url.pathname === "/api/connectors" && request.method === "GET") return json(response, detectConnectors(root, { all: url.searchParams.get("all") === "1" }));
@@ -257,13 +264,27 @@ export async function startUiServer(
         return json(response, { ok: true, reason });
       }
       if (request.method === "POST" && url.pathname === "/api/settings") {
-        const body = JSON.parse(await readBody(request)) as { worker?: string; checks?: string[]; permissions?: string };
+        const body = JSON.parse(await readBody(request)) as {
+          worker?: string; checks?: string[]; permissions?: string;
+          autoApprove?: string[]; protect?: string[]; focus?: { agent: string; area: string; paths?: string[] }[];
+        };
         if (body.worker) setDefaultWorker(root, body.worker);
         if (body.permissions === "all" || body.permissions === "ask") {
           const result = setPermissionMode(root, body.permissions);
           if (result.warning) return json(response, { ok: true, warning: result.warning });
         }
         if (body.checks) setChecks(root, body.checks.map((c) => c.trim()).filter(Boolean));
+        if (body.autoApprove || body.protect) {
+          setReviewRules(root, {
+            ...(body.autoApprove ? { autoApprove: body.autoApprove as ChangeKind[] } : {}),
+            ...(body.protect ? { protect: body.protect.map((p) => p.trim()).filter(Boolean) } : {}),
+          });
+        }
+        if (body.focus) {
+          // The list replaces the current focus reviewers.
+          for (const f of focusReviewers(root)) if (!body.focus.some((x) => x.agent === f.agent)) setFocus(root, f.agent, null);
+          for (const f of body.focus.filter((x) => x.agent && x.area?.trim())) setFocus(root, f.agent, f.area, (f.paths ?? []).map((p) => p.trim()).filter(Boolean));
+        }
         return json(response, { ok: true });
       }
       if (request.method === "POST" && url.pathname === "/api/review") {

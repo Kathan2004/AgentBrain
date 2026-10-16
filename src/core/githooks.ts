@@ -57,8 +57,9 @@ export function postCommit(cwd: string): void {
     const sha = git(cwd, ["rev-parse", "--short", "HEAD"]);
     const subject = git(cwd, ["log", "-1", "--pretty=%s"]);
     const files = git(cwd, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]).split("\n").filter(Boolean);
-    // A task with its own worktree only owns commits made in that worktree.
-    const owns = task && task.status === "running" && (owner || !task.worktree);
+    // The active task owns commits in the main checkout while it is open (claimed by an agent
+    // or not); a task with its own worktree only owns commits made in that worktree.
+    const owns = task && !["done", "failed"].includes(task.status) && (owner || !task.worktree);
     recordActivity(root, {
       agent: owns ? task.agent?.id ?? "developer" : "developer",
       task: owns ? task.id : undefined,
@@ -66,7 +67,8 @@ export function postCommit(cwd: string): void {
       text: `${sha} ${subject}`,
       files: files.slice(0, 50),
     });
-    if (!owns) return;
+    // Only a running task checkpoints: that would move one in review or handed off out of it.
+    if (!owns || task.status !== "running") return;
     writeCheckpoint(root, task.id, { reason: `commit ${sha}: ${subject}`, status: "checkpoint" });
   } catch {
     // A commit must never depend on AgentBrain being available or healthy.

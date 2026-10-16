@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTask } from "../src/core/actions.js";
+import { postCommit } from "../src/core/githooks.js";
 import { getTask, initStore, saveTask } from "../src/core/store.js";
 import { addWorktree, mergeWorktree } from "../src/core/worktree.js";
 import { taskChanges } from "../src/ui/model.js";
@@ -86,5 +87,24 @@ describe("taskChanges", () => {
     const changes = await taskChanges(repo, getTask(repo, task.id));
     expect(changes.commits.map((c) => c.subject)).toEqual(["Add hello"]);
     expect(changes.files.map((f) => f.path)).toEqual(["hello.ts"]);
+  });
+
+  it("shows the commits of a task worked on straight on main, even one no agent claimed", async () => {
+    const repo = tempRepo("agentbrain-changes-");
+    initStore(repo);
+    const task = createTask(repo, "Add a farewell");
+    fs.writeFileSync(path.join(repo, "unrelated.ts"), "x\n");
+    execFileSync("git", ["add", "unrelated.ts"], { cwd: repo });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Before the task"], { cwd: repo });
+    fs.writeFileSync(path.join(repo, "bye.ts"), "export const bye = 1;\n");
+    execFileSync("git", ["add", "bye.ts"], { cwd: repo });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add farewell"], { cwd: repo });
+    postCommit(repo);
+    const t = getTask(repo, task.id);
+    expect(t.status).toBe("idle");
+    const changes = await taskChanges(repo, t);
+    expect(changes.commits.map((c) => c.subject)).toEqual(["Add farewell"]);
+    expect(changes.files.map((f) => f.path)).toEqual(["bye.ts"]);
+    expect(changes.summary).toBe("Add farewell");
   });
 });

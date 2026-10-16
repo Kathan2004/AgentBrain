@@ -8,6 +8,7 @@ import { brainDir } from "./paths.js";
 import { compilePatterns, redact } from "./redact.js";
 import type { ReviewCheck, ReviewFlag, ReviewVote, TaskState } from "./state.js";
 import { getProject, getTask, listTasks, readJson, saveProject, saveTask, writeJson } from "./store.js";
+import { focusBrief, focusFor, focusReviewers, focusStatus, isFocusReviewer } from "./focus.js";
 import { autoApproval, describeChange } from "./reviewrules.js";
 import { mergeWorktree, syncWorktree, taskWorkdir } from "./worktree.js";
 import { gitBinary } from "./platform.js";
@@ -116,8 +117,9 @@ export function setChecks(root: string, checks: string[]): string[] {
   return checks;
 }
 
+/** Reviews results: the lead, a council member, or a focus reviewer. */
 export function isReviewer(root: string, agentId: string): boolean {
-  return reviewPolicy(root).reviewers.includes(agentId);
+  return reviewPolicy(root).reviewers.includes(agentId) || isFocusReviewer(root, agentId);
 }
 
 /* ---------- reputation (the stake) ---------- */
@@ -165,7 +167,9 @@ function adjust(root: string, agentId: string, change: Partial<Reputation> & { d
  */
 export function gateFinish(root: string, task: TaskState, previous: TaskState["status"], agentId: string | undefined): boolean {
   const policy = reviewPolicy(root);
-  if (policy.mode === "none" || !agentId) return false;
+  if (!agentId) return false;
+  // With no lead or council, focus reviewers still look at other agents' work.
+  if (policy.mode === "none" && !focusReviewers(root).some((f) => f.agent !== agentId)) return false;
   if (policy.mode === "lead" && agentId === policy.reviewers[0]) return false;
   if (task.status !== "done" && task.status !== "review") return false;
   task.status = "review";
@@ -298,6 +302,8 @@ export interface Tally {
   outcome: "approved" | "changes" | "pending";
   /** Why approval is blocked regardless of votes. */
   blocked?: string;
+  /** Focus reviewers still to vote, and those that asked for changes ("agent (area)"). */
+  focus?: { waiting: string[]; changes: string[]; skipped: string[] };
 }
 
 export function computeTally(root: string, task: TaskState): Tally {
@@ -316,14 +322,25 @@ export function computeTally(root: string, task: TaskState): Tally {
   const failed = (task.review?.checks ?? []).filter((c) => !c.ok);
   const pendingChecks = policy.checks.length > 0 && Boolean(task.review) && !task.review?.verifiedAt;
   const guarded = task.review?.change?.protected ?? [];
-  const blocked = failed.length ? `checks failed: ${failed.map((c) => c.command).join(", ")}` : pendingChecks ? "checks still running"
+  let blocked = failed.length ? `checks failed: ${failed.map((c) => c.command).join(", ")}` : pendingChecks ? "checks still running"
     : guarded.length ? `protected files need the developer: ${guarded.join(", ")}` : undefined;
   const quorum = policy.mode === "council" ? policy.quorum : 1;
   let outcome: Tally["outcome"] = "pending";
   if (total > 0 && changes / total > 1 - quorum + 1e-9) outcome = "changes";
   else if (total > 0 && approve / total >= quorum - 1e-9 && !blocked) outcome = "approved";
   else if (failed.length && total > 0 && approve + changes >= total) outcome = "changes";
-  return { eligible, approve, changes, total, quorum, tolerates: policy.mode === "council" ? faultTolerance(eligible.length, quorum) : 0, outcome, ...(blocked ? { blocked } : {}) };
+  // Nobody decides (no lead or council): the focus reviewers alone stand between the result and main.
+  else if (policy.mode === "none" && total === 0 && !blocked) outcome = "approved";
+  const watch = focusStatus(root, task);
+  const label = (f: { agent: string; area: string }) => `${f.agent} (${f.area})`;
+  const focus = { waiting: watch.waiting.map(label), changes: watch.changes.map(label), skipped: watch.skipped.map(label) };
+  if (focus.changes.length) outcome = "changes";
+  else if (focus.waiting.length && outcome === "approved") {
+    outcome = "pending";
+    blocked ??= `waiting for the focus review of ${focus.waiting.join(", ")}`;
+  }
+  return { eligible, approve, changes, total, quorum, tolerates: policy.mode === "council" ? faultTolerance(eligible.length, quorum) : 0, outcome, ...(blocked ? { blocked } : {}),
+    ...(focus.waiting.length || focus.changes.length || focus.skipped.length ? { focus } : {}) };
 }
 
 export function pendingReviews(root: string): TaskState[] {
@@ -337,9 +354,9 @@ export function pendingReviews(root: string): TaskState[] {
 
 /** Results this agent still has to vote on. */
 export function awaitingVote(root: string, agentId: string): TaskState[] {
-  const reviewer = isReviewer(root, agentId);
+  const reviewer = reviewPolicy(root).reviewers.includes(agentId);
   return pendingReviews(root).filter((t) => !t.review?.pendingMerge &&
-    (reviewer || t.review?.standIn?.agent === agentId) &&
+    (reviewer || t.review?.standIn?.agent === agentId || focusFor(root, t).some((f) => f.agent === agentId)) &&
     t.review?.worker !== agentId && !(t.review?.votes ?? []).some((v) => v.agent === agentId));
 }
 
@@ -400,7 +417,7 @@ function tally(root: string, taskId: string): ReviewResult {
   const t = computeTally(root, task);
   if (t.outcome === "pending") {
     // Low-risk changes the review rules allow land without waiting for a reviewer.
-    const rule = autoApproval(root, task);
+    const rule = t.focus?.waiting.length ? null : autoApproval(root, task);
     if (!rule) return { task, tally: t };
     task.review!.autoApproved = rule;
     saveTask(root, task);
@@ -481,7 +498,7 @@ function decide(
   // Reviewers who voted against the outcome are flagged; repeated dissent shows in their reputation.
   const flags = [...(review.flags ?? [])];
   if (decidedBy === "consensus" && reviewPolicy(root).mode === "council") {
-    for (const v of review.votes ?? []) {
+    for (const v of (review.votes ?? []).filter((v) => reviewPolicy(root).reviewers.includes(v.agent))) {
       if (v.verdict === outcome) adjust(root, v.agent, { delta: 0.1, agreed: 1 });
       else {
         adjust(root, v.agent, { delta: -0.2, dissented: 1 });
@@ -576,6 +593,14 @@ export function reviewSummary(root: string, task: TaskState, viewer?: string): s
       ? `Votes: ${votes.map((v) => `${v.agent} ${v.verdict === "approved" ? "approve" : "changes"}${v.notes ? ` (${v.notes})` : ""}`).join("; ")}`
       : `Votes: ${votes.length} cast, sealed until you vote. Judge the work yourself.`);
   }
+  if (t.focus) {
+    const parts = [
+      ...t.focus.changes.map((f) => `${f} asked for changes`),
+      ...t.focus.waiting.map((f) => `${f} still to review`),
+      ...t.focus.skipped.map((f) => `${f} didn't review in time`),
+    ];
+    lines.push(`Focus reviews: ${parts.join("; ")}`);
+  }
   if (t.eligible.length > 1) lines.push(`Reviewers: ${t.eligible.join(", ")}; quorum ${Math.round(t.quorum * 100)}% of reputation weight; survives ${t.tolerates} corrupted reviewer(s).`);
   if (task.worktree) lines.push(`Full diff: git -C ${JSON.stringify(workdir)} diff ${base}...HEAD`);
   return lines.join("\n");
@@ -584,6 +609,17 @@ export function reviewSummary(root: string, task: TaskState, viewer?: string): s
 /** Text for a reviewer's system prompt, or null when this agent doesn't review. */
 export function reviewerNotice(root: string, agentId: string): string | null {
   const policy = reviewPolicy(root);
+  const focus = focusReviewers(root).find((f) => f.agent === agentId);
+  if (focus && !policy.reviewers.includes(agentId)) {
+    const waiting = awaitingVote(root, agentId);
+    const head = `You are this project's ${focus.area} reviewer${focus.paths ? ` for ${focus.paths.join(", ")}` : ""}: ` +
+      `every result by other agents gets your ${focus.area} review, and only that.`;
+    if (!waiting.length) return `${head} Nothing is waiting for you right now.`;
+    return `${head}\n${waiting.length} result(s) waiting for your ${focus.area} review:\n` +
+      waiting.map((t) => `- ${t.id} by ${t.review?.worker ?? t.agent?.id ?? "unknown"}: ${t.objective}`).join("\n") +
+      `\nFor each: read the packet (agentbrain_brief with its task_id) and the diff. ${focusBrief(focus)} ` +
+      "Then call agentbrain_review with verdict approve, or changes plus concrete notes.";
+  }
   if (!policy.reviewers.includes(agentId)) {
     const standing = awaitingVote(root, agentId);
     if (!standing.length) return null;
@@ -617,4 +653,21 @@ export function retryPendingMerges(root: string): string[] {
     if (!result.pendingMerge && result.task.status === "done") merged.push(task.id);
   }
   return merged;
+}
+
+/**
+ * Decides results whose outcome changed with time alone: a focus reviewer
+ * that didn't review in time no longer holds a result up. Runs with the
+ * control room's sweeps; returns the ids it decided.
+ */
+export function settleReviews(root: string): string[] {
+  const settled: string[] = [];
+  for (const task of pendingReviews(root)) {
+    if (task.review?.pendingMerge || !focusFor(root, task).length) continue;
+    try {
+      const result = tally(root, task.id);
+      if (result.task.status !== "review") settled.push(task.id);
+    } catch { /* one bad task shouldn't stop the others */ }
+  }
+  return settled;
 }

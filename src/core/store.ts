@@ -44,6 +44,8 @@ export interface ProjectState {
   outOfQuota?: Record<string, { at: string; until?: string }>;
   /** Review rules: kinds of change that land without a reviewer, and paths only the developer approves. */
   review?: { autoApprove?: ("docs" | "comments" | "tests" | "code")[]; protect?: string[] };
+  /** Single-focus reviewers: agent id → the one concern it reviews every result for, optionally only under some paths. */
+  focus?: Record<string, { area: string; paths?: string[] }>;
 }
 
 export function writeJson(file: string, value: unknown): void {

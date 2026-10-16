@@ -27,6 +27,7 @@ export const DEFAULT_RULES: ReviewRules = { autoApprove: ["docs", "comments"], p
 export interface ChangeSummary {
   kind: ChangeKind;
   files: number;
+  paths?: string[];
   /** Changed files under protected paths. */
   protected?: string[];
 }
@@ -100,7 +101,7 @@ export function describeChange(root: string, task: TaskState): ChangeSummary | u
   if (!files.length) return undefined;
   const kind = kindOf(files, (file) => commentsOnly(workdir, base, file));
   const guarded = protectedFiles(root, files.map((f) => f.path));
-  return { kind, files: files.length, ...(guarded.length ? { protected: guarded } : {}) };
+  return { kind, files: files.length, paths: files.slice(0, 500).map((f) => f.path), ...(guarded.length ? { protected: guarded } : {}) };
 }
 
 /** Why the rules let this result land without a reviewer, or null. */

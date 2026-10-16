@@ -44,6 +44,7 @@ import type { AgentRef } from "../core/state.js";
 import { describeActivity, taskActivity } from "../core/stall.js";
 import { addWorktree, mergeWorktree, pruneWorktrees, removeWorktree, syncWorktree, taskWorkdir } from "../core/worktree.js";
 import { fileHistory, formatHistory } from "../core/history.js";
+import { FOCUS_WAIT_MINUTES, focusReviewers, setFocus } from "../core/focus.js";
 import { reviewRules, setReviewRules, type ChangeKind, type ReviewRules } from "../core/reviewrules.js";
 import { taskTimeline } from "../core/timeline.js";
 import { pruneTask } from "../core/prune.js";
@@ -84,6 +85,8 @@ Control plane
   agentbrain review rules [--auto docs,comments] [--protect ".github/workflows/,src/auth/"]
                                           Kinds of change that land without a reviewer (docs, comments,
                                           tests, code; --auto none for none), and paths only you approve
+  agentbrain review focus [<agent> "<concern>" [--paths <prefixes>] | <agent> --clear]
+                                          Agents that review every result for one concern (security, tests…)
 
 Console
   agentbrain                              Open the console: type a task, an agent takes it, you review the result
@@ -248,6 +251,7 @@ function parseCli() {
         clear: { type: "boolean" },
         auto: { type: "string" },
         protect: { type: "string" },
+        paths: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -1111,8 +1115,24 @@ function limits(agent?: string): void {
   }
 }
 
-function review(taskId?: string): void {
+function review(taskId?: string, rest: string[] = []): void {
   const cwd = root();
+  if (taskId === "focus") {
+    const [agent, ...words] = rest;
+    if (agent) {
+      const id = MENTIONS[agent.toLowerCase()] ?? agent;
+      const area = words.join(" ");
+      if (!flags.clear && !area) throw new Error('Usage: agentbrain review focus <agent> "<what it reviews for>" [--paths src/auth/,src/api/]   or   <agent> --clear');
+      const paths = (flags.paths ?? "").split(",").map((p) => p.trim()).filter(Boolean);
+      setFocus(cwd, id, flags.clear ? null : area, paths);
+      console.log(flags.clear ? `✓ ${id} is no longer a focus reviewer.` : `✓ ${id} reviews every result${paths.length ? ` that touches ${paths.join(", ")}` : ""} for ${area}, and only that.`);
+    }
+    const all = focusReviewers(cwd);
+    if (!all.length) console.log('No focus reviewers. Add one: agentbrain review focus codex "security"');
+    for (const f of all) console.log(`${f.agent}: ${f.area}${f.paths ? ` (only ${f.paths.join(", ")})` : ""}`);
+    if (all.length) console.log(`A focus reviewer can send a result back over its concern; approval waits for it up to ${FOCUS_WAIT_MINUTES} minutes.`);
+    return;
+  }
   if (taskId === "rules") {
     const list = (value: string) => value.split(",").map((x) => x.trim()).filter((x) => x && x !== "none");
     const change: Partial<ReviewRules> = {};
@@ -1339,7 +1359,7 @@ async function main(): Promise<void> {
   } else if (command === "lead") {
     lead(subcommand);
   } else if (command === "review") {
-    review(subcommand);
+    review(subcommand, rest);
   } else if (command === "council") {
     council([subcommand, ...rest].filter(Boolean));
   } else if (command === "checks") {
