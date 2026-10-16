@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { handleAgentHook, type ClaudeHookPayload } from "./claudehooks.js";
 import { CURSOR_HOOKS, cursorHooksInstalled, fromCursor, installCursorHooks, uninstallCursorHooks } from "./cursorhooks.js";
 import { thoughtFrom } from "./thoughts.js";
@@ -250,6 +251,13 @@ export function hookCommandFor(platform: string, command: string, args: string[]
     for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
       const candidate = path.join(dir, "agentbrain");
       try { if (fs.existsSync(candidate)) { script = fs.realpathSync(candidate); break; } } catch { /* keep looking */ }
+    }
+    // Not on PATH (run through npx, or straight from a checkout): the AgentBrain that is running now,
+    // since a bare "agentbrain" won't resolve from an app started outside a shell.
+    if (!script) {
+      const here = path.dirname(fileURLToPath(import.meta.url));
+      script = [path.join(here, "../cli/main.js"), path.join(here, "../../dist/cli/main.js")].find((f) => fs.existsSync(f)) ?? null;
+      if (script) script = fs.realpathSync(script);
     }
   }
   if (script && /\.(c|m)?js$/.test(script)) return `${q(process.execPath)} ${q(script)} hook ${platform}`;
