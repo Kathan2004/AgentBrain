@@ -89,7 +89,10 @@ describe("usage limits with a reset date", () => {
     const { limitResetsAt } = await import("../src/core/delegate.js");
     const hit = new Date("2026-10-10T07:47:45Z");
     expect(limitResetsAt("You've hit your usage limit. Upgrade to Plus to continue using Codex, or try again at Nov 8th, 2026 9:42 PM.", hit)?.getFullYear()).toBe(2026);
-    expect(limitResetsAt("You've hit your session limit · resets 12am (Asia/Calcutta)", hit)).toBeNull();
+    // Claude Code names a clock time: the next one after the limit was hit, in its time zone.
+    expect(limitResetsAt("You've hit your session limit · resets 12am (Asia/Calcutta)", hit)?.toISOString()).toBe("2026-10-10T18:30:00.000Z");
+    expect(limitResetsAt("You've hit your session limit · resets 2:50am (Asia/Calcutta)", new Date("2026-10-16T18:56:00Z"))?.toISOString()).toBe("2026-10-16T21:20:00.000Z");
+    expect(limitResetsAt("resets 9pm (UTC)", new Date("2026-10-10T22:00:00Z"))?.toISOString()).toBe("2026-10-11T21:00:00.000Z");
     expect(limitResetsAt("try again at Jan 1st, 2020 1:00 AM", hit)).toBeNull();
   });
 });

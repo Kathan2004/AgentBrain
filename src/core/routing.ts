@@ -38,6 +38,41 @@ const FAILURE = /exited with code [1-9]|crash|timed out|failed to start|stopped 
 /** How long a usage limit is assumed to last when the agent didn't say. */
 export const LIMIT_WINDOW_HOURS = 5;
 
+/** The wall-clock time `h:m` in `timeZone` on the day `at` falls on there. */
+function clockIn(at: Date, h: number, m: number, timeZone?: string): Date {
+  const parts = (d: Date) => {
+    const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric" })
+      .formatToParts(d).map((x) => [x.type, Number(x.value)]));
+    return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  };
+  const day = new Date(parts(at));
+  const guess = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), h, m);
+  return new Date(guess - (parts(new Date(guess)) - guess));
+}
+
+/**
+ * When a usage limit lifts, from the message the agent gave: "try again at
+ * Nov 8th, 2026 9:42 PM" (Codex) or "resets 2:50am (Asia/Calcutta)" (Claude
+ * Code: the next such time after the limit was hit). Null when it names none.
+ */
+export function limitResetsAt(reason: string, hitAt: Date): Date | null {
+  const text = /try again (?:at|on|after) ([^)\n]+?)\.?$/im.exec(reason)?.[1];
+  if (text) {
+    const when = new Date(text.replace(/(\d+)(st|nd|rd|th)\b/, "$1"));
+    return Number.isNaN(when.getTime()) || when <= hitAt ? null : when;
+  }
+  const clock = /resets? (?:at )?(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?/i.exec(reason);
+  if (!clock) return null;
+  const hour = (Number(clock[1]) % 12) + (clock[3].toLowerCase() === "pm" ? 12 : 0);
+  const minute = Number(clock[2] ?? 0);
+  if (hour > 23 || minute > 59) return null;
+  let zone: string | undefined = clock[4];
+  try { new Intl.DateTimeFormat("en-US", { timeZone: zone }); } catch { zone = undefined; }
+  let when = clockIn(hitAt, hour, minute, zone);
+  if (when <= hitAt) when = clockIn(new Date(hitAt.getTime() + 24 * 3_600_000), hour, minute, zone);
+  return when;
+}
+
 /** Per-agent outcomes across every task in the project. */
 export function agentRecords(root: string): Map<string, AgentRecord> {
   const records = new Map<string, AgentRecord>();
@@ -122,7 +157,8 @@ export function routeTask(root: string, taskId: string, now = new Date()): Route
     }
 
     const limit = record?.lastLimit;
-    if (limit && now.getTime() - limit.at.getTime() < LIMIT_WINDOW_HOURS * 3_600_000) {
+    const lifts = limit ? limitResetsAt(limit.reason, limit.at) : null;
+    if (limit && (lifts ? now < lifts : now.getTime() - limit.at.getTime() < LIMIT_WINDOW_HOURS * 3_600_000)) {
       score -= 100;
       reasons.push(`hit a usage limit ${ago(limit.at, now)} ("${limit.reason.slice(0, 60)}"); may still be limited`);
     }

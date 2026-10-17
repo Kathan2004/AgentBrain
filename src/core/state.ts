@@ -47,6 +47,8 @@ export interface TaskState {
   };
   /** Set while the task waits for review: who finished it, votes, AgentBrain's own checks, flags. */
   review?: ReviewState;
+  /** An automated change gated like agent work: who made it, and the ref, commit or command it came from. */
+  gated?: { by: string; ref?: string; sha: string; command?: string; at: string };
   /** Decisions on earlier submissions, oldest first. */
   reviews?: ReviewVerdict[];
   /** The task this one was split from (set when an agent delegates part of its work). */

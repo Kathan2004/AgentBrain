@@ -146,6 +146,50 @@ markers in just those files, and it goes back to its agent to resolve them.
 Before changing code another agent wrote, agents ask who changed it, in which
 task and why (`agentbrain_history`); you can too: `agentbrain history src/auth/login.ts`.
 
+### One platform, a strong lead and cheaper models
+
+You don't need several AI tools to split the work. Give one platform model
+tiers and its own id becomes the lead (planning, review, the hard cases) while
+cheaper models on the same platform build:
+
+```bash
+agentbrain models claude-code --lead opus sonnet=sonnet haiku=haiku
+agentbrain models codex --lead gpt-5-codex mini=gpt-5-codex-mini
+agentbrain delegate "Add tests for the parser" --agent claude-code.haiku
+```
+
+Each tier is a worker of its own (`claude-code.haiku`), with its own track
+record, reputation and limits, so routing learns which model handles which
+work. The planner is told which models it can hand pieces to, and gives each
+piece to the cheapest one that can do it well. A result sent back twice moves
+up a tier by itself, and the lead model takes it last.
+
+### Bots and scripts go through the same gate
+
+A Dependabot or Renovate branch, or whatever a codemod or script changes, is
+reviewed like agent work: AgentBrain's checks, the review rules, focus
+reviewers and the lead or council, then per-file landing. The bot is the
+worker, with a record of its own.
+
+```bash
+agentbrain gate origin/dependabot/npm_and_yarn/lodash-4.17.21
+agentbrain gate exec "npx jscodeshift -t rename-api.js src/" --as codemod
+agentbrain gate fetch               # gate every new bot branch now
+agentbrain gate watch dependabot/ renovate/   # ...and every 10 minutes from the control room
+```
+
+### Audit trail
+
+Everything that landed, with who or what wrote it (agent, model or bot), what
+the developer asked for, which checks ran, who approved it and how (lead,
+council, review rules or the developer), what was sent back first, the flags
+raised and the reasons recorded. For a file, which of those wrote each line.
+
+```bash
+agentbrain audit --since 2026-10-01 --out audit.md   # or --json
+agentbrain audit src/auth/login.ts
+```
+
 ### Agents talking to each other
 
 Agents working on the same project at the same time can coordinate through
@@ -674,6 +718,9 @@ agentbrain review [task-id]       # inspect or decide pending reviews
 agentbrain review rules           # what lands without a reviewer, what only you approve
 agentbrain review focus           # agents that review every result for one concern
 agentbrain history <file>         # who changed a file, in which task and why
+agentbrain models                 # model tiers: a strong lead, cheaper workers on one platform
+agentbrain gate <branch>          # review a bot's branch or a script's changes like agent work
+agentbrain audit [file]           # who or what wrote each landed change, approved by whom and why
 agentbrain doctor                 # check setup and print fixes for anything missing
 agentbrain vault                  # regenerate the Obsidian Markdown vault
 agentbrain mcp                    # run the MCP server (normally started by an agent)

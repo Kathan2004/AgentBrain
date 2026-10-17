@@ -1,6 +1,9 @@
 import { diskEditRecorder } from "../core/diskedits.js";
 import { focusReviewers, setFocus } from "../core/focus.js";
+import { auditFile, auditTrail, formatAudit, formatFileAudit } from "../core/audit.js";
+import { setModels, TIER_PLATFORMS } from "../core/models.js";
 import { fileHistory } from "../core/history.js";
+import { gateSweep } from "../core/gate.js";
 import { setReviewRules, type ChangeKind } from "../core/reviewrules.js";
 import { watchTranscripts } from "../core/transcripts.js";
 import { CLOSE_REASONS, closeTask } from "../core/close.js";
@@ -139,6 +142,7 @@ export async function startUiServer(
     try { resumeSentBack(root, options.self); } catch { /* same */ }
     try { retryPendingMerges(root); } catch { /* same */ }
     try { settleReviews(root); } catch { /* same */ }
+    try { gateSweep(root); } catch { /* same: a fetch can fail offline */ }
   };
   let lastSent = "";
   let vaultTimer: NodeJS.Timeout | undefined;
@@ -187,6 +191,10 @@ export async function startUiServer(
         const task = getTask(root, findTask(root, url.searchParams.get("task") ?? "").id);
         return json(response, { context: sharedContext(root, { taskId: task.id, objective: task.objective }) });
       }
+      if (url.pathname === "/api/audit" && request.method === "GET") {
+        const file = url.searchParams.get("file");
+        return json(response, { text: file ? formatFileAudit(root, file, auditFile(root, file)) : formatAudit(auditTrail(root)) });
+      }
       if (url.pathname === "/api/history" && request.method === "GET") {
         return json(response, fileHistory(root, url.searchParams.get("file") ?? ""));
       }
@@ -229,7 +237,7 @@ export async function startUiServer(
       if (request.method === "POST" && url.pathname === "/api/chat") {
         const body = JSON.parse(await readBody(request)) as { prompt?: string; worker?: string; history?: { role?: string; text?: string }[] };
         if (!body.prompt?.trim()) throw new Error("Say something to chat about.");
-        const agent = printAgent(body.worker ?? "");
+        const agent = printAgent(body.worker ?? "", root);
         const commitsToday = await gitToday(root);
         const prompt = `${chatBrief(root, body.prompt, commitsToday)}\n\n${chatPrompt(body.prompt.trim(), body.history)}`;
         if (!String(request.headers.accept ?? "").includes("application/x-ndjson")) {
@@ -267,7 +275,10 @@ export async function startUiServer(
         const body = JSON.parse(await readBody(request)) as {
           worker?: string; checks?: string[]; permissions?: string;
           autoApprove?: string[]; protect?: string[]; focus?: { agent: string; area: string; paths?: string[] }[];
+          models?: Record<string, { lead?: string; workers: { name: string; model: string }[] }>;
         };
+        // Validate every platform's tiers before saving any of them.
+        if (body.models) for (const platform of Object.keys(body.models)) if (!(TIER_PLATFORMS as readonly string[]).includes(platform)) throw new Error(`Model tiers work with ${TIER_PLATFORMS.join(" and ")}.`);
         if (body.worker) setDefaultWorker(root, body.worker);
         if (body.permissions === "all" || body.permissions === "ask") {
           const result = setPermissionMode(root, body.permissions);
@@ -285,6 +296,7 @@ export async function startUiServer(
           for (const f of focusReviewers(root)) if (!body.focus.some((x) => x.agent === f.agent)) setFocus(root, f.agent, null);
           for (const f of body.focus.filter((x) => x.agent && x.area?.trim())) setFocus(root, f.agent, f.area, (f.paths ?? []).map((p) => p.trim()).filter(Boolean));
         }
+        if (body.models) for (const [platform, m] of Object.entries(body.models)) setModels(root, platform, { ...(m.lead ? { lead: m.lead } : {}), workers: m.workers ?? [] });
         return json(response, { ok: true });
       }
       if (request.method === "POST" && url.pathname === "/api/review") {

@@ -9,11 +9,12 @@ import { createTask } from "./actions.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { brainDir } from "./paths.js";
 import { readReputation } from "./review.js";
-import { agentRecords, LIMIT_WINDOW_HOURS } from "./routing.js";
+import { agentRecords, LIMIT_WINDOW_HOURS, limitResetsAt } from "./routing.js";
 import { limitReason, quotaReason } from "./limits.js";
 import type { TaskState } from "./state.js";
 import { getProject, getTask, listTasks, saveProject, saveTask } from "./store.js";
 import { addWorktree } from "./worktree.js";
+import { allModels, ESCALATE_AFTER, escalation } from "./models.js";
 import { localModel, localModelRoom, ollamaBinary, ollamaModels } from "./ollama.js";
 
 /**
@@ -87,7 +88,11 @@ function signedIn(id: string, command: string): boolean {
   return ok;
 }
 
-export function listWorkers(): Worker[] {
+/**
+ * Every agent that can take work. With `root`, a platform with model tiers
+ * (agentbrain models) also offers each tier as a worker of its own.
+ */
+export function listWorkers(root?: string): Worker[] {
   const workers: Worker[] = [];
   const vscode = builtinAdapter("vscode");
   const code = Boolean(vscode?.available());
@@ -138,6 +143,17 @@ export function listWorkers(): Worker[] {
     });
   }
 
+  if (root) {
+    for (const [platform, models] of Object.entries(allModels(root))) {
+      const base = workers.find((w) => w.id === platform);
+      if (!base) continue;
+      if (models.lead) base.name = `${base.name} (${models.lead})`;
+      for (const t of models.workers) {
+        workers.push({ ...base, id: `${platform}.${t.name}`, name: `${base.name.replace(/ \(.*\)$/, "")} · ${t.name} (${t.model})` });
+      }
+    }
+  }
+
   for (const def of ACP_AGENTS) {
     if (workers.some((w) => w.id === def.id && w.installed)) continue;
     const found = findTool(def.command);
@@ -165,8 +181,8 @@ export function listWorkers(): Worker[] {
   return workers;
 }
 
-export function workerName(id: string): string {
-  return listWorkers().find((w) => w.id === id)?.name ?? id;
+export function workerName(id: string, root?: string): string {
+  return listWorkers(root).find((w) => w.id === id)?.name ?? id;
 }
 
 /** Explicit "@agent" at the start of a prompt picks the worker. */
@@ -198,12 +214,7 @@ export interface WorkerChoice {
  * null when it doesn't say (then the usual window applies). Only dates after
  * the limit was hit count.
  */
-export function limitResetsAt(reason: string, hitAt: Date): Date | null {
-  const text = /try again (?:at|on|after) ([^)\n]+?)\.?$/im.exec(reason)?.[1];
-  if (!text) return null;
-  const when = new Date(text.replace(/(\d+)(st|nd|rd|th)\b/, "$1"));
-  return Number.isNaN(when.getTime()) || when <= hitAt ? null : when;
-}
+export { limitResetsAt };
 
 export function rankWorkers(root: string, now = new Date()): WorkerChoice[] {
   const project = getProject(root);
@@ -213,13 +224,17 @@ export function rankWorkers(root: string, now = new Date()): WorkerChoice[] {
   const prefer = project.agents?.prefer ?? [];
   const avoid = new Set(project.agents?.avoid ?? []);
 
-  return listWorkers().map((worker) => {
+  const tiered = allModels(root);
+  return listWorkers(root).map((worker) => {
     let score = 0;
     const reasons: string[] = [];
     if (!worker.available) {
       return { worker, score: -1e9, reasons: [worker.note ?? "not available"] };
     }
-    const limited = limitReason(root, worker.id, now) ?? quotaReason(root, worker.id, now);
+    // A tier shares its platform's account: the platform being out of quota takes its tiers with it.
+    const platform = worker.id.split(".")[0];
+    const limited = limitReason(root, worker.id, now) ?? quotaReason(root, worker.id, now) ??
+      (platform !== worker.id ? limitReason(root, platform, now) ?? quotaReason(root, platform, now) : null);
     if (limited) {
       worker.available = false;
       worker.note = limited;
@@ -262,6 +277,11 @@ export function rankWorkers(root: string, now = new Date()): WorkerChoice[] {
     if (worker.how === "print" || worker.how === "headless") score += 2;
     // Free and unlimited, but a smaller model: the hosted agents go first while they have quota.
     if (worker.id === "ollama") { score -= 8; reasons.push("local model: no quota, slower and less capable"); }
+    // With model tiers, the platform itself is the lead model: kept for planning, review and escalations.
+    const tiers = tiered[worker.id]?.workers ?? [];
+    if (tiers.length) { score -= 12; reasons.push("lead model: kept for planning, review and escalations"); }
+    const tierIndex = platform !== worker.id ? (tiered[platform]?.workers ?? []).findIndex((t) => `${platform}.${t.name}` === worker.id) : -1;
+    if (tierIndex >= 0) { score += 3 - tierIndex; reasons.push(tierIndex === 0 ? "strongest worker model" : "cheaper worker model"); }
     if (worker.how === "pull") { score -= 20; reasons.push("waits until you open an agent on this repo: Claude app, Cursor, VS Code extensions"); }
     return { worker, score, reasons };
   }).sort((a, b) => b.score - a.score || a.worker.id.localeCompare(b.worker.id));
@@ -274,9 +294,10 @@ export function setDefaultWorker(root: string, id: string): string {
     saveProject(root, project);
     return "auto";
   }
-  const worker = listWorkers().find((w) => w.id === id || w.name.toLowerCase() === id.toLowerCase()) ??
-    listWorkers().find((w) => w.id === MENTIONS[id.toLowerCase()]);
-  if (!worker) throw new Error(`Unknown worker "${id}". Workers: auto, ${listWorkers().map((w) => w.id).join(", ")}`);
+  const workers = listWorkers(root);
+  const worker = workers.find((w) => w.id === id || w.name.toLowerCase() === id.toLowerCase()) ??
+    workers.find((w) => w.id === MENTIONS[id.toLowerCase()]);
+  if (!worker) throw new Error(`Unknown worker "${id}". Workers: auto, ${workers.map((w) => w.id).join(", ")}`);
   if (!worker.available) throw new Error(`${worker.name} can't take work: ${worker.note}.`);
   project.worker = worker.id;
   saveProject(root, project);
@@ -394,7 +415,7 @@ export function deliverToChat(root: string, message: { from: string; to: string;
  */
 export function planGoal(root: string, goal: string, self: { command: string; args: string[] }, planner?: string): DelegateResult {
   const ready = rankWorkers(root).filter((c) => c.worker.available && c.worker.how === "print");
-  const choice = planner ? ready.find((c) => c.worker.id === planner) : ready.find((c) => c.worker.id === "claude-code") ?? ready[0];
+  const choice = planner ? ready.find((c) => c.worker.id === planner) : ready.find((c) => c.worker.id === "claude-code") ?? ready.find((c) => !c.worker.id.includes(".")) ?? ready[0];
   if (!choice) throw new Error("Planning needs Claude Code or Codex signed in on this machine (it reads the code and delegates the pieces).");
   const task = createTask(root, goal);
   const log = path.join(brainDir(root), "agents", `plan-${task.id}.log`);
@@ -433,12 +454,17 @@ export function autoContinue(
   const failedHere = new Set(handoffs.map((e) => e.agent!));
   if (!options.sentBack) failedHere.add(stopped);
   const ready = rankWorkers(root).filter((c) => c.worker.available && !failedHere.has(c.worker.id) && c.worker.how !== "pull");
+  // A cheaper model whose results keep coming back hands over to the next stronger one on its platform.
+  const stronger = options.prefer ? escalation(root, task, options.prefer) : !options.sentBack ? escalation(root, task, stopped) : null;
   // The agent that did the work knows the code: it goes first when it can.
-  const next = ready.find((c) => c.worker.id === options.prefer) ?? ready[0];
+  const next = (stronger ? ready.find((c) => c.worker.id === stronger) : undefined) ?? ready.find((c) => c.worker.id === options.prefer) ?? ready[0];
   const what = options.sentBack ? `${stopped} sent it back (${reason.slice(0, 100)})` : `${stopped} stopped (${reason.slice(0, 100)})`;
   if (!next) {
     recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot: ${what} and no ${options.sentBack ? "" : "other "}agent is ready; the task waits` });
     return null;
+  }
+  if (stronger && next.worker.id === stronger) {
+    recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Escalated: ${options.prefer ?? stopped}'s results came back ${ESCALATE_AFTER} times; ${stronger} takes it` });
   }
   recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot: ${what}; handing the task to ${next.worker.name}` });
   if (options.sentBack) return delegate(root, { taskId, worker: next.worker.id, requestedBy: "agentbrain", why: `autopilot: sent back by ${stopped}` }, self);

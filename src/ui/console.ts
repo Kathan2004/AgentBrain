@@ -1549,7 +1549,7 @@ export async function runConsole(root: string, options: ConsoleOptions): Promise
         const selected = choice === "auto" ? ready()[0]?.worker : ready().find((c) => c.worker.id === choice)?.worker;
         if (!selected) throw new Error("No selected model is ready. Use Shift+Tab or /worker to choose one.");
         if (selected.how !== "print") throw new Error(`${selected.name} is a chat connector. Select Claude Code, Codex or the local model for root Chat mode.`);
-        const agent = printAgent(selected.id);
+        const agent = printAgent(selected.id, root);
         const prompt = [...chatHistory, `Developer: ${line}`].join("\n");
         print(["", `${agentTag(selected.id, selected.name)}  ${style.dim("Chat · project root")}`]);
         // Pieces arrive token by token from a local model: print whole lines as they complete.

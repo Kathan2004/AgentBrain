@@ -330,7 +330,7 @@ export function computeTally(root: string, task: TaskState): Tally {
   else if (total > 0 && approve / total >= quorum - 1e-9 && !blocked) outcome = "approved";
   else if (failed.length && total > 0 && approve + changes >= total) outcome = "changes";
   // Nobody decides (no lead or council): the focus reviewers alone stand between the result and main.
-  else if (policy.mode === "none" && total === 0 && !blocked) outcome = "approved";
+  else if (policy.mode === "none" && total === 0 && !blocked && focusFor(root, task).length) outcome = "approved";
   const watch = focusStatus(root, task);
   const label = (f: { agent: string; area: string }) => `${f.agent} (${f.area})`;
   const focus = { waiting: watch.waiting.map(label), changes: watch.changes.map(label), skipped: watch.skipped.map(label) };
@@ -385,8 +385,13 @@ export function reviewTask(
   task.review ??= { worker: task.agent?.id ?? "unknown", requestedAt: new Date().toISOString(), votes: [], checks: [], flags: [] };
   const notes = options.notes?.trim() ? redact(options.notes.trim(), compilePatterns(getProject(root).redactPatterns)) : undefined;
   if (options.verdict === "changes" && !notes) throw new Error("Say what needs to change (notes).");
-  const developer = !isReviewer(root, options.reviewer) && task.review.standIn?.agent !== options.reviewer;
+  // Only the developer overrides. An agent decides only as a reviewer or stand-in, and never on its own work
+  // (a model tier isn't its lead: claude-code.sonnet can't approve as claude-code).
+  const developer = options.reviewer === "developer";
   if (!developer && options.reviewer === task.review.worker) throw new Error("You can't review your own work.");
+  if (!developer && !isReviewer(root, options.reviewer) && task.review.standIn?.agent !== options.reviewer) {
+    throw new Error(`${options.reviewer} isn't a reviewer of this result; ${reviewPolicy(root).reviewers.join(", ") || "the developer"} decides.`);
+  }
 
   if (developer) return decide(root, task, options.verdict, `${options.reviewer} (override)`, notes);
 

@@ -219,7 +219,9 @@ export function handleAgentHook(payload: ClaudeHookPayload, fallbackCwd: string,
     let activity: AgentSessionState["activity"] = existing?.activity ?? "idle";
     let endedAt: string | undefined;
     let output = "";
-    const isLead = claude && isReviewer(root, AGENT);
+    // A run AgentBrain started says who it is: a model tier (claude-code.sonnet) is a worker, not the lead.
+    const runAs = process.env.AGENTBRAIN_AGENT || AGENT;
+    const isLead = claude && runAs === AGENT && isReviewer(root, AGENT);
 
     if (event === "PostToolUse" || event === "Stop" || event === "Thought") {
       // The reason behind what Claude does next, in its own words, once per new explanation.

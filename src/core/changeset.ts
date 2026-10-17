@@ -43,6 +43,8 @@ export interface ChangesetRecord {
   id: string;
   task: string;
   agent?: string;
+  /** The model the agent ran with, when it was a model tier or a lead with a model set. */
+  model?: string;
   base: string;
   tip: string;
   commit: string;

@@ -5,6 +5,7 @@ import path from "node:path";
 import { bringUpToDate, changedFiles, landChanges, recordChangeset, startingPoint } from "./changeset.js";
 import { worktreesDir } from "./paths.js";
 import type { TaskState } from "./state.js";
+import { modelOf } from "./models.js";
 import { applyToWorkdir } from "./permissions.js";
 import { getTask, listTasks, saveTask } from "./store.js";
 import { gitBinary } from "./platform.js";
@@ -155,8 +156,10 @@ export function mergeWorktree(root: string, taskId: string): MergeResult {
   after.merged = { branch, commit: tip, at: new Date().toISOString(), base, ...(landed.commit ? { landed: landed.commit } : {}), files: landed.files.map((f) => f.path) };
   saveTask(root, after);
   if (landed.commit) {
+    const agent = task.review?.worker ?? task.agent?.id;
+    const model = agent ? modelOf(root, agent) : undefined;
     recordChangeset(root, {
-      id: `cs-${Date.now()}`, task: task.id, ...(task.agent?.id ? { agent: task.agent.id } : {}), base, tip, commit: landed.commit,
+      id: `cs-${Date.now()}`, task: task.id, ...(agent ? { agent } : {}), ...(model ? { model } : {}), base, tip, commit: landed.commit,
       at: after.merged.at, files: landed.files.map((f) => ({ path: f.path, status: f.status })), ...(task.review?.change ? { kind: task.review.change.kind } : {}),
     });
   }

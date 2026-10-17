@@ -46,6 +46,10 @@ export interface ProjectState {
   review?: { autoApprove?: ("docs" | "comments" | "tests" | "code")[]; protect?: string[] };
   /** Single-focus reviewers: agent id → the one concern it reviews every result for, optionally only under some paths. */
   focus?: Record<string, { area: string; paths?: string[] }>;
+  /** Model tiers per platform: the lead model the platform's own id runs, and cheaper worker models (strongest first). */
+  models?: Record<string, { lead?: string; workers?: { name: string; model: string }[] }>;
+  /** Bot branches the control room fetches and gates every 10 minutes (agentbrain gate watch). */
+  gate?: { remote?: string; match: string[] };
 }
 
 export function writeJson(file: string, value: unknown): void {

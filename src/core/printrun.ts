@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { buildPrompt, closeSession, recordSession, takeOver, updateTask, writeCheckpoint } from "./actions.js";
 import { focusBrief, focusFor } from "./focus.js";
+import { resolveWorker, tierGuide } from "./models.js";
 import type { TaskState } from "./state.js";
 import { reviewPolicy, reviewSummary } from "./review.js";
 import { releaseStandIn } from "./standin.js";
@@ -31,7 +32,12 @@ export interface PrintAgent {
   command: string;
   model?: string;
   env?: Record<string, string>;
+  /** The worker id it runs as, when that is a model tier of the platform (claude-code.haiku). */
+  worker?: string;
 }
+
+/** Who a run is in AgentBrain: the tier it runs as, else the platform. */
+const identity = (agent: PrintAgent) => agent.worker ?? agent.id;
 
 /** Claude Code's CLI drives both Claude and the local model. */
 const claudeCli = (id: string) => id === "claude-code" || id === "ollama";
@@ -43,9 +49,21 @@ const claudeCli = (id: string) => id === "claude-code" || id === "ollama";
  */
 const LOCAL_FLAGS = ["--bare", "--tools", "Bash", "Read", "Edit", "Write", "Glob", "Grep", "--strict-mcp-config", "--disable-slash-commands"];
 
-/** How to run a background-capable agent by id (claude or local accepted), or why it can't run. */
-export function printAgent(name: string): PrintAgent {
-  const id = name === "claude" ? "claude-code" : name === "local" ? "ollama" : name;
+/**
+ * How to run a background-capable agent by id (claude or local accepted), or why it can't run.
+ * With `root`, a model tier (claude-code.haiku) runs the platform with that model, and the
+ * platform itself runs its lead model, when the project set them (agentbrain models).
+ */
+export function printAgent(name: string, root?: string): PrintAgent {
+  const asked = name === "claude" ? "claude-code" : name === "local" ? "ollama" : name;
+  if (asked.includes(".")) {
+    const resolved = root ? resolveWorker(root, asked) : null;
+    if (!resolved?.tier) throw new Error(`Unknown model tier "${name}". See agentbrain models.`);
+    return { ...printAgent(resolved.platform), model: resolved.tier.model, worker: asked };
+  }
+  const lead = root ? resolveWorker(root, asked)?.model : undefined;
+  if (lead && (asked === "claude-code" || asked === "codex")) return { ...printAgent(asked), model: lead };
+  const id = asked;
   if (id !== "claude-code" && id !== "codex" && id !== "ollama") throw new Error(`${name} can't run in the background: use claude-code, codex or ollama.`);
   const command = id === "codex" ? codexBinary() : claudeBinary();
   if (!command) throw new Error(`${id === "ollama" ? "Claude Code (which drives the local model)" : id} is not installed.`);
@@ -209,7 +227,7 @@ You were started by AgentBrain with no developer at the keyboard; nobody will an
 
 function args(agent: PrintAgent, mcpFile: string, workdir: string, plan = false, allowAll = false, review = false): string[] {
   if (claudeCli(agent.id)) return [...claudeArgs(mcpFile, plan, allowAll, review), ...(agent.model ? ["--model", agent.model] : []), ...(agent.id === "ollama" ? LOCAL_FLAGS : [])];
-  const model = codexModel();
+  const model = agent.model ?? codexModel();
   const sandbox = plan || review ? ["-s", "read-only"] : allowAll ? ["--dangerously-bypass-approvals-and-sandbox"] : ["-s", "workspace-write"];
   return ["exec", "--json", ...sandbox, "-C", workdir, "--skip-git-repo-check", ...(model ? ["-m", model] : []), "-"];
 }
@@ -351,7 +369,7 @@ export async function runPrint(root: string, taskId: string, agent: PrintAgent, 
   // A planner reads the main checkout; builders get their own worktree.
   if (!options.plan && !getTask(root, taskId).worktree && fs.existsSync(path.join(root, ".git"))) addWorktree(root, taskId);
   const workdir = taskWorkdir(root, getTask(root, taskId));
-  const me = { id: agent.id, sessionId: `${agent.id === "codex" ? "exec" : "print"}-${Date.now()}` };
+  const me = { id: identity(agent), sessionId: `${agent.id === "codex" ? "exec" : "print"}-${Date.now()}` };
   takeOver(root, taskId, me);
 
   const control = sessionControl(root, me.id, me.sessionId);
@@ -367,7 +385,7 @@ export async function runPrint(root: string, taskId: string, agent: PrintAgent, 
   }));
   const cli = [options.cli.command, ...options.cli.args].map((x) => (x.includes(" ") ? JSON.stringify(x) : x)).join(" ");
   const prompt = options.plan
-    ? `${buildPrompt(root, taskId, cli)}\n${PLAN}\n\nUse parent_task_id "${taskId}" for every piece you delegate.\n`
+    ? `${buildPrompt(root, taskId, cli)}\n${PLAN}\n\n${tierGuide(root) ? `${tierGuide(root)}\n\n` : ""}Use parent_task_id "${taskId}" for every piece you delegate.\n`
     : `${buildPrompt(root, taskId, cli)}\n${HOW}\n`;
 
   const run = await drive(root, taskId, agent, me, workdir, args(agent, mcpFile, workdir, options.plan, permissionMode(root) === "all"), prompt, options.timeoutMinutes, control, log);
@@ -379,7 +397,7 @@ export async function runPrint(root: string, taskId: string, agent: PrintAgent, 
   // However it ended, the next agent (or the reviewer) can pick the task up.
   // Sandboxed agents (codex exec) can edit files but not write Git's data outside their
   // folder, so a clean run's uncommitted work is committed here, in the developer's name.
-  if (!options.plan && code === 0 && finished0(root, taskId, me.sessionId)) commitLeftovers(workdir, `${getTask(root, taskId).objective.slice(0, 72)}\n\nWork by ${agent.id}, committed by AgentBrain.`);
+  if (!options.plan && code === 0 && finished0(root, taskId, me.sessionId)) commitLeftovers(workdir, `${getTask(root, taskId).objective.slice(0, 72)}\n\nWork by ${identity(agent)}, committed by AgentBrain.`);
 
   // Agents often finish without saying so: a clean exit with work on the branch goes to review.
   const finished = getTask(root, taskId);
@@ -387,13 +405,13 @@ export async function runPrint(root: string, taskId: string, agent: PrintAgent, 
     updateTask(root, taskId, { status: "review", agent: me, next: "Review the result" });
   }
   const task = getTask(root, taskId);
-  const reason = `${agent.id} run ended: ${stopReason}`;
+  const reason = `${identity(agent)} run ended: ${stopReason}`;
   if (task.status === "running" && task.agent?.sessionId === me.sessionId) writeCheckpoint(root, taskId, { agent: me, reason, status: "handoff" });
   else closeSession(root, me, reason);
   log(`ended: ${stopReason}; task is ${getTask(root, taskId).status}`);
   // Nobody has to be watching: a run that stopped early is handed to the next agent.
   if (!options.plan && stopReason !== "stopped by the developer" && getTask(root, taskId).status === "handoff") {
-    try { autoContinue(root, taskId, agent.id, stopReason, options.cli); } catch { /* the task stays handed off */ }
+    try { autoContinue(root, taskId, identity(agent), stopReason, options.cli); } catch { /* the task stays handed off */ }
   }
   return { status: getTask(root, taskId).status, stopReason };
 }
@@ -405,7 +423,7 @@ export async function runPrint(root: string, taskId: string, agent: PrintAgent, 
  */
 async function runReview(root: string, taskId: string, agent: PrintAgent, options: PrintOptions): Promise<{ status: string; stopReason: string }> {
   const workdir = taskWorkdir(root, getTask(root, taskId));
-  const me = { id: agent.id, sessionId: `review-${Date.now()}` };
+  const me = { id: identity(agent), sessionId: `review-${Date.now()}` };
   recordSession(root, me, taskId);
   const control = sessionControl(root, me.id, me.sessionId);
   fs.mkdirSync(path.dirname(control.transcript), { recursive: true });
@@ -418,7 +436,7 @@ async function runReview(root: string, taskId: string, agent: PrintAgent, option
   recordActivity(root, { agent: me.id, session: me.sessionId, task: taskId, kind: "review", text: `Reviewing ${getTask(root, taskId).review?.worker ?? "the"}'s result` });
   const run = await drive(root, taskId, agent, me, workdir, args(agent, mcpFile, workdir, false, false, true), `${reviewJob(root, taskId, me.id)}\n`, options.timeoutMinutes ?? 20, control, log);
   const stopReason = run.stopReason || (run.code === 0 ? "finished" : `exited with code ${run.code}: ${run.lastText.slice(0, 200)}`);
-  closeSession(root, me, `${agent.id} review ended: ${stopReason}`);
+  closeSession(root, me, `${identity(agent)} review ended: ${stopReason}`);
   log(`ended: ${stopReason}`);
   releaseStandIn(root, taskId, me.id, stopReason);
   return { status: getTask(root, taskId).status, stopReason };

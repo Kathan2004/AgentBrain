@@ -40,11 +40,14 @@ import { installPostCommitHook, postCommit, uninstallPostCommitHook } from "../c
 import { brainDir, findRoot } from "../core/paths.js";
 import { RULES_TARGETS, writeRules } from "../core/rules.js";
 import { findSession, getProject, getTask, initStore, listSessions, listTasks, openActiveTaskId, saveProject, sessionAlive } from "../core/store.js";
-import type { AgentRef } from "../core/state.js";
+import type { AgentRef, TaskState } from "../core/state.js";
 import { describeActivity, taskActivity } from "../core/stall.js";
 import { addWorktree, mergeWorktree, pruneWorktrees, removeWorktree, syncWorktree, taskWorkdir } from "../core/worktree.js";
+import { auditFile, auditTrail, formatAudit, formatFileAudit } from "../core/audit.js";
 import { fileHistory, formatHistory } from "../core/history.js";
 import { FOCUS_WAIT_MINUTES, focusReviewers, setFocus } from "../core/focus.js";
+import { allModels, ESCALATE_AFTER, platformModels, setModels } from "../core/models.js";
+import { DEFAULT_BOT_BRANCHES, gateCommand, gateIncoming, gateRef, setGateWatch } from "../core/gate.js";
 import { reviewRules, setReviewRules, type ChangeKind, type ReviewRules } from "../core/reviewrules.js";
 import { taskTimeline } from "../core/timeline.js";
 import { pruneTask } from "../core/prune.js";
@@ -78,6 +81,9 @@ Control plane
   agentbrain inbox                        Messages for you (or for --agent <id>)
   agentbrain context [task-id]            Exactly what every agent is given for the task (same for every tool)
   agentbrain history <file>               Who changed a file, in which task and why (results, edits, commits)
+  agentbrain audit [--since <date>] [--json] [--out <file>]  |  audit <file>
+                                          Who or what wrote each landed change (agent, model, bot), what
+                                          was asked, checks, who approved it and why; or each line of a file
   agentbrain recall "<query>"             Search the project's shared memory (the Obsidian vault in .agentbrain/vault)
   agentbrain review [task-id]             Show results waiting for review: claims, diff, checks, flags, votes
   agentbrain review <task-id> --approve | --changes "<notes>"
@@ -85,6 +91,15 @@ Control plane
   agentbrain review rules [--auto docs,comments] [--protect ".github/workflows/,src/auth/"]
                                           Kinds of change that land without a reviewer (docs, comments,
                                           tests, code; --auto none for none), and paths only you approve
+  agentbrain gate <branch|commit> [--as <bot>]  |  gate exec "<command>" [--as <name>]
+                                          Review a bot's branch, or what a codemod or script changes,
+                                          like agent work (checks, rules, reviewers, per-file landing)
+  agentbrain gate fetch [prefixes]  |  gate watch [prefixes|off]
+                                          Gate every new bot branch (dependabot/, renovate/) now, or
+                                          every 10 minutes from the control room
+  agentbrain models [<platform> --lead <model> <name>=<model>...]
+                                          One platform, several models: a strong lead plans and reviews,
+                                          cheaper models build, escalating when results come back
   agentbrain review focus [<agent> "<concern>" [--paths <prefixes>] | <agent> --clear]
                                           Agents that review every result for one concern (security, tests…)
 
@@ -215,6 +230,7 @@ function parseCli() {
         cli: { type: "string" },
         root: { type: "string" },
         out: { type: "string" },
+        since: { type: "string" },
         keep: { type: "string" },
         all: { type: "boolean" },
         "dry-run": { type: "boolean" },
@@ -252,6 +268,9 @@ function parseCli() {
         auto: { type: "string" },
         protect: { type: "string" },
         paths: { type: "string" },
+        lead: { type: "string" },
+        as: { type: "string" },
+        remote: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -509,8 +528,8 @@ async function run(agentName: string | undefined, taskArg: string | undefined): 
   if (flags.print) {
     // `run claude-code|codex [task] --print`: the agent CLI with no window (used by delegation).
     const cwd = root();
-    const agent = printAgent(agentName ?? "");
-    const id = agent.id;
+    const agent = printAgent(agentName ?? "", cwd);
+    const id = agent.worker ?? agent.id;
     const taskId = resolveTaskId(cwd, taskArg, undefined, process.cwd());
     const result = await runPrint(cwd, taskId, agent, {
       cli: selfCommand(),
@@ -1074,7 +1093,7 @@ function quota(name?: string): void {
     return;
   }
   const id = MENTIONS[name.toLowerCase()] ?? name;
-  if (!listWorkers().some((w) => w.id === id)) throw new Error(`Unknown agent "${name}". Agents: ${listWorkers().map((w) => w.id).join(", ")}`);
+  if (!listWorkers(cwd).some((w) => w.id === id)) throw new Error(`Unknown agent "${name}". Agents: ${listWorkers(cwd).map((w) => w.id).join(", ")}`);
   if (flags.clear) {
     clearOutOfQuota(cwd, id);
     console.log(`✓ ${id} is available again.`);
@@ -1113,6 +1132,68 @@ function limits(agent?: string): void {
       new Date(task.delegatedTo.at).toDateString() === new Date().toDateString()).length;
     console.log(`${id}: parallel=${values.maxParallel ?? "unlimited"}, minutes=${values.maxRunMinutes ?? "unlimited"}, daily=${values.dailyTasks ?? "unlimited"} (running ${running}, delegated today ${delegated})`);
   }
+}
+
+/**
+ * `agentbrain gate <ref> | exec "<command>" | fetch [prefixes] | watch [prefixes|off]`:
+ * automated changes (bot branches, codemods, scripts) reviewed like agent work.
+ */
+function gate(what?: string, rest: string[] = []): void {
+  const cwd = root();
+  const show = (t: TaskState) => console.log(`${t.status === "review" ? "✓" : t.status === "blocked" ? "✗" : "·"} ${t.id} ${t.objective} — ${t.status}${t.status === "blocked" ? `: ${t.failures.at(-1)}` : ""}`);
+  const prefixes = (list: string[]) => (list.length ? list.flatMap((x) => x.split(",")).map((x) => x.trim()).filter(Boolean) : undefined);
+  if (!what) throw new Error('Usage: agentbrain gate <branch|commit> [--as <bot>]  |  gate exec "<command>" [--as <name>]  |  gate fetch [prefixes]  |  gate watch [prefixes|off]');
+  if (what === "exec") {
+    const command = rest.join(" ");
+    if (!command) throw new Error('Usage: agentbrain gate exec "<command>" [--as <name>]');
+    return show(gateCommand(cwd, command, flags.as ?? "script"));
+  }
+  if (what === "fetch") {
+    const gated = gateIncoming(cwd, { ...(flags.remote ? { remote: flags.remote } : {}), ...(prefixes(rest) ? { match: prefixes(rest) } : {}) });
+    if (!gated.length) console.log("No new bot branches to gate.");
+    return gated.forEach(show);
+  }
+  if (what === "watch") {
+    if (rest[0] === "off") {
+      setGateWatch(cwd, null);
+      return console.log("✓ The control room no longer looks for bot branches.");
+    }
+    const match = prefixes(rest) ?? getProject(cwd).gate?.match ?? DEFAULT_BOT_BRANCHES;
+    setGateWatch(cwd, { ...(flags.remote ? { remote: flags.remote } : {}), match });
+    return console.log(`✓ Every 10 minutes the control room fetches ${flags.remote ?? "origin"} and gates new branches under ${match.join(", ")}.`);
+  }
+  show(gateRef(cwd, what, flags.as));
+}
+
+/** `agentbrain models [<platform> [--lead <model>] [<name>=<model>...] | <platform> --clear]`: model tiers on one platform. */
+function models(platform?: string, specs: string[] = []): void {
+  const cwd = root();
+  if (platform) {
+    const id = MENTIONS[platform.toLowerCase()] ?? platform;
+    if (flags.clear) setModels(cwd, id, null);
+    else {
+      const current = platformModels(cwd, id);
+      const workers = specs.length ? specs.map((spec) => {
+        const at = spec.indexOf("=");
+        if (at <= 0) throw new Error(`"${spec}": give each worker model as <name>=<model>, strongest first, e.g. sonnet=sonnet haiku=haiku`);
+        return { name: spec.slice(0, at).toLowerCase(), model: spec.slice(at + 1) };
+      }) : current?.workers ?? [];
+      if (!flags.lead && !specs.length) throw new Error(`Usage: agentbrain models ${id} [--lead <model>] <name>=<model>...   (strongest first)   or   agentbrain models ${id} --clear`);
+      setModels(cwd, id, { lead: flags.lead ?? current?.lead, workers });
+    }
+  }
+  const all = allModels(cwd);
+  if (!Object.keys(all).length) {
+    console.log("No model tiers. One platform, a strong lead and cheaper workers:");
+    console.log("  agentbrain models claude-code --lead opus sonnet=sonnet haiku=haiku");
+    console.log("  agentbrain models codex --lead gpt-5-codex mini=gpt-5-codex-mini");
+    return;
+  }
+  for (const [p, m] of Object.entries(all)) {
+    console.log(`${p}: lead ${m.lead ?? "(its default model)"}: plans, reviews, takes escalations`);
+    for (const t of m.workers) console.log(`  ${p}.${t.name}: ${t.model}`);
+  }
+  console.log(`Work goes to the worker models; a result sent back ${ESCALATE_AFTER} times moves up to the next stronger one.`);
 }
 
 function review(taskId?: string, rest: string[] = []): void {
@@ -1376,10 +1457,30 @@ async function main(): Promise<void> {
     const cwd = root();
     const id = resolveTaskId(cwd, subcommand, undefined, process.cwd());
     console.log(buildPrompt(cwd, id, cliCommand()));
+  } else if (command === "gate") {
+    gate(subcommand, rest);
+  } else if (command === "models") {
+    models(subcommand, rest);
   } else if (command === "history") {
     if (!subcommand) throw new Error("Usage: agentbrain history <file>");
     const cwd = root();
     console.log(formatHistory(fileHistory(cwd, path.resolve(process.cwd(), subcommand))));
+  } else if (command === "audit") {
+    const cwd = root();
+    let text: string;
+    if (subcommand) {
+      const ranges = auditFile(cwd, path.resolve(process.cwd(), subcommand));
+      text = flags.json ? JSON.stringify(ranges, null, 2) : formatFileAudit(cwd, path.resolve(process.cwd(), subcommand), ranges);
+    } else {
+      const since = flags.since ? new Date(flags.since) : undefined;
+      if (since && Number.isNaN(since.getTime())) throw new Error(`--since "${flags.since}" isn't a date (use YYYY-MM-DD).`);
+      const entries = auditTrail(cwd, since ? { since: since.toISOString() } : {});
+      text = flags.json ? JSON.stringify(entries, null, 2) : formatAudit(entries, since ? `AgentBrain audit trail since ${flags.since}` : undefined);
+    }
+    if (flags.out) {
+      fs.writeFileSync(path.resolve(process.cwd(), flags.out), `${text}\n`);
+      console.log(`Wrote ${flags.out}.`);
+    } else console.log(text);
   } else if (command === "recall") {
     const query = [subcommand, ...rest].filter(Boolean).join(" ");
     if (!query) throw new Error('Usage: agentbrain recall "<what you are looking for>"');

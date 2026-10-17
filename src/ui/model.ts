@@ -1,5 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { focusReviewers, type FocusReviewer } from "../core/focus.js";
+import { allModels, type PlatformModels } from "../core/models.js";
 import { reviewRules, type ReviewRules } from "../core/reviewrules.js";
 import { promisify } from "node:util";
 import fs from "node:fs";
@@ -93,6 +94,8 @@ export interface Snapshot {
   rules: ReviewRules;
   /** Agents that review every result for one concern. */
   focus: FocusReviewer[];
+  /** Model tiers per platform: the lead model and cheaper worker models. */
+  models: Record<string, PlatformModels>;
   reputation: Record<string, Reputation>;
   /** Agents the developer can pick as reviewers: built-in ones plus any seen in this repo. */
   knownAgents: string[];
@@ -225,6 +228,7 @@ export function snapshot(root: string, options: { includeDone?: boolean } = {}):
     reputation: readReputation(root),
     rules: reviewRules(root),
     focus: focusReviewers(root),
+    models: allModels(root),
     knownAgents: [...known].sort(),
     workers: rankWorkers(root).map((c) => ({ ...c.worker, reasons: c.reasons })),
     ...(project.worker ? { worker: project.worker } : {}),

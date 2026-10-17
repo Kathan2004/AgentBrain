@@ -18,6 +18,8 @@ export default defineConfig({
     testTimeout: 90_000,
     maxWorkers: 4,
     // Only stubs on PATH count: not Claude Code bundled in the Claude app, Codex in Codex.app.
-    env: { AGENTBRAIN_ONLY_PATH: "1", PATH },
+    // Clear AgentBrain's own run-time env: when this suite runs inside a session AgentBrain
+    // started, these would mute hooks and re-tag their output as a tiered worker's.
+    env: { AGENTBRAIN_ONLY_PATH: "1", PATH, AGENTBRAIN_SESSION: "", AGENTBRAIN_AGENT: "", AGENTBRAIN_TASK: "" },
   },
 });
