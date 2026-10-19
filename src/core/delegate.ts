@@ -216,6 +216,25 @@ export interface WorkerChoice {
  */
 export { limitResetsAt };
 
+/**
+ * The usage limit in force for a worker: its own, or one any model on the
+ * same platform hit (claude-code, claude-code.sonnet and claude-code.haiku
+ * share one account). The latest such limit that hasn't lifted yet, if any.
+ */
+export function accountLimit(records: Map<string, { lastLimit?: { at: Date; reason: string } }>, workerId: string, now = new Date()): { by: string; reason: string } | null {
+  const platform = workerId.split(".")[0];
+  let found: { by: string; reason: string; at: Date } | null = null;
+  for (const [id, record] of records) {
+    if (id !== platform && !id.startsWith(`${platform}.`)) continue;
+    const limit = record.lastLimit;
+    if (!limit) continue;
+    const until = limitResetsAt(limit.reason, limit.at);
+    const active = until ? now < until : now.getTime() - limit.at.getTime() < LIMIT_WINDOW_HOURS * 3_600_000;
+    if (active && (!found || limit.at > found.at || (limit.at.getTime() === found.at.getTime() && id === workerId))) found = { by: id, reason: limit.reason, at: limit.at };
+  }
+  return found && { by: found.by, reason: found.reason };
+}
+
 export function rankWorkers(root: string, now = new Date()): WorkerChoice[] {
   const project = getProject(root);
   const records = agentRecords(root);
@@ -265,11 +284,13 @@ export function rankWorkers(root: string, now = new Date()): WorkerChoice[] {
     if (rep && rep.score !== 1) { score += (rep.score - 1) * 10; reasons.push(`reputation ${rep.score.toFixed(2)}`); }
 
     const record = records.get(worker.id);
-    const until = record?.lastLimit ? limitResetsAt(record.lastLimit.reason, record.lastLimit.at) : null;
-    if (record?.lastLimit && (until ? now < until : now.getTime() - record.lastLimit.at.getTime() < LIMIT_WINDOW_HOURS * 3_600_000)) {
+    const limit = accountLimit(records, worker.id, now);
+    if (limit) {
       // Out of quota: handing it work would only fail again (and autopilot would bounce it).
-      const resets = /resets? ([^)\n.]+)/i.exec(record.lastLimit.reason)?.[1] ?? /try again (?:at|on|after) ([^)\n]+?)\.?$/i.exec(record.lastLimit.reason)?.[1];
-      return { worker: { ...worker, available: false, note: `hit its usage limit${resets ? `; resets ${resets}` : ""}` }, score: -1e9, reasons: [`hit its usage limit${resets ? `, resets ${resets}` : ""}`] };
+      // A platform's models share one account, so a tier's limit is the lead's and every other tier's.
+      const resets = /resets? ([^)\n.]+)/i.exec(limit.reason)?.[1] ?? /try again (?:at|on|after) ([^)\n]+?)\.?$/i.exec(limit.reason)?.[1];
+      const what = limit.by === worker.id ? "hit its usage limit" : `shares an account with ${limit.by}, which hit its usage limit`;
+      return { worker: { ...worker, available: false, note: `${what}${resets ? `; resets ${resets}` : ""}` }, score: -1e9, reasons: [`${what}${resets ? `, resets ${resets}` : ""}`] };
     }
     if (record?.failed) { score -= record.failed * 3; reasons.push(`${record.failed} crashed or failed run(s)`); }
     // Background runs don't need anyone at the keyboard; a chat needs VS Code open;

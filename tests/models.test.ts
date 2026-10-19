@@ -399,3 +399,25 @@ describe("models", () => {
     });
   });
 });
+
+describe("accountLimit: a platform's models share one account", () => {
+  const hit = new Date("2026-10-16T18:56:00Z");
+  const reason = "You've hit your session limit · resets 2:50am (Asia/Calcutta)";
+  const records = new Map([["claude-code.haiku", { lastLimit: { at: hit, reason } }], ["codex", {}]]);
+
+  it("a tier's limit holds the lead and the other tiers until it lifts", async () => {
+    const { accountLimit } = await import("../src/core/delegate.js");
+    const during = new Date("2026-10-16T20:00:00Z");
+    for (const id of ["claude-code.haiku", "claude-code.sonnet", "claude-code"]) {
+      expect(accountLimit(records, id, during)).toEqual({ by: "claude-code.haiku", reason });
+    }
+    expect(accountLimit(records, "codex", during)).toBeNull();
+    expect(accountLimit(records, "claude-code.sonnet", new Date("2026-10-16T21:21:00Z"))).toBeNull();
+  });
+
+  it("doesn't mistake a platform whose id merely starts the same", async () => {
+    const { accountLimit } = await import("../src/core/delegate.js");
+    const other = new Map([["claude-code-x", { lastLimit: { at: hit, reason } }]]);
+    expect(accountLimit(other, "claude-code", new Date("2026-10-16T20:00:00Z"))).toBeNull();
+  });
+});

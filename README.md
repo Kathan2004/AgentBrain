@@ -162,7 +162,9 @@ Each tier is a worker of its own (`claude-code.haiku`), with its own track
 record, reputation and limits, so routing learns which model handles which
 work. The planner is told which models it can hand pieces to, and gives each
 piece to the cheapest one that can do it well. A result sent back twice moves
-up a tier by itself, and the lead model takes it last.
+up a tier by itself, and the lead model takes it last. A platform's models share one
+account, so a usage limit any of them hits holds them all until it lifts, and
+work goes to another platform meanwhile.
 
 ### Bots and scripts go through the same gate
 
