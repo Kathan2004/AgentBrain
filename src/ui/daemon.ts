@@ -12,6 +12,7 @@ export interface UiState {
   pid: number;
   url: string;
   startedAt: string;
+  firstOpened?: string;
 }
 
 export function uiStateFile(root: string): string {
@@ -33,7 +34,7 @@ function alive(pid: number): boolean {
  */
 export function writeUiState(root: string, url: string): void {
   const file = uiStateFile(root);
-  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, url, startedAt: new Date().toISOString() } satisfies UiState), { mode: 0o600 });
+  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, url, startedAt: new Date().toISOString(), firstOpened: firstOpened(root) ?? new Date().toISOString() } satisfies UiState), { mode: 0o600 });
 }
 
 export function runningUi(root: string): UiState | null {
@@ -84,4 +85,20 @@ export function previousToken(root: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** When the control room first ran in this repo, whether or not it is running now. */
+export function firstOpened(root: string): string | undefined {
+  try {
+    return (JSON.parse(fs.readFileSync(uiStateFile(root), "utf8")) as UiState).firstOpened;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether to open the dashboard by itself: only the first time, in an interactive terminal, outside CI. */
+export function shouldAutoOpen(root?: string, env: NodeJS.ProcessEnv = process.env, tty = Boolean(process.stdout.isTTY)): boolean {
+  if (root && firstOpened(root)) return false;
+  if (env.AGENTBRAIN_NO_OPEN || env.CI) return false;
+  return tty;
 }

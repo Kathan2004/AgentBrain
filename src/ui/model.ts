@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { focusReviewers, type FocusReviewer } from "../core/focus.js";
-import { allModels, type PlatformModels } from "../core/models.js";
+import { allModels, modelOf, type PlatformModels } from "../core/models.js";
 import { reviewRules, type ReviewRules } from "../core/reviewrules.js";
 import { promisify } from "node:util";
 import fs from "node:fs";
@@ -63,6 +63,8 @@ export interface LiveTask {
   warning: string | null;
   /** The headless session working on this task right now, if any. */
   liveSession?: LiveSession;
+  /** The agent's model, when it is a tier worker (e.g. "haiku"). */
+  model?: string;
   /** Set while the task waits for the lead agent. */
   review?: TaskState["review"];
   reviews: NonNullable<TaskState["reviews"]>;
@@ -100,7 +102,7 @@ export interface Snapshot {
   /** Agents the developer can pick as reviewers: built-in ones plus any seen in this repo. */
   knownAgents: string[];
   /** Who prompts can be delegated to, best first for the next task, with reasons. */
-  workers: (Worker & { reasons: string[] })[];
+  workers: (Worker & { reasons: string[]; model?: string })[];
   /** A pinned worker; otherwise AgentBrain picks per task. */
   worker?: string;
 }
@@ -185,6 +187,7 @@ export function snapshot(root: string, options: { includeDone?: boolean } = {}):
         objective: task.objective,
         status: task.status,
         agent: task.agent?.id,
+        ...(task.agent?.id && modelOf(root, task.agent.id) ? { model: modelOf(root, task.agent.id) } : {}),
         updatedAt: task.updatedAt,
         active: task.id === active,
         workdir,
@@ -230,7 +233,7 @@ export function snapshot(root: string, options: { includeDone?: boolean } = {}):
     focus: focusReviewers(root),
     models: allModels(root),
     knownAgents: [...known].sort(),
-    workers: rankWorkers(root).map((c) => ({ ...c.worker, reasons: c.reasons })),
+    workers: rankWorkers(root).map((c) => ({ ...c.worker, ...(modelOf(root, c.worker.id) ? { model: modelOf(root, c.worker.id) } : {}), reasons: c.reasons })),
     ...(project.worker ? { worker: project.worker } : {}),
     permissions: project.permissions === "all" ? "all" : "ask",
   };

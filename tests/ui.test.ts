@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { startUiServer } from "../src/ui/server.js";
 import { createTask } from "../src/core/actions.js";
+import { setModels } from "../src/core/models.js";
 import { initStore, saveSession } from "../src/core/store.js";
 import { sessionControl } from "../src/core/headless.js";
 import { addToQueue } from "../src/core/queue.js";
@@ -78,6 +79,25 @@ describe("local UI server", () => {
       expect(html).toContain("Connectors");
       expect(html).toContain("/api/connectors");
       expect(html).toContain('data-open="\'+esc(t.id)+\'"');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("lists a tier worker, with its model, in the snapshot", async () => {
+    const repo = tempRepo("agentbrain-ui-");
+    initStore(repo);
+    setModels(repo, "claude-code", { lead: "opus", workers: [{ name: "haiku", model: "haiku" }] });
+    const server = await startUiServer(repo, { port: 0 });
+    try {
+      const url = new URL(server.url);
+      const base = `http://127.0.0.1:${url.port}`;
+      const token = url.hash.slice("#token=".length);
+      const snapshot = await (await request(base, "/api/snapshot", { headers: { "x-agentbrain-token": token } })).json() as { workers: { id: string; name: string; model?: string; available: boolean }[] };
+      const tier = snapshot.workers.find((w) => w.id === "claude-code.haiku");
+      expect(tier).toMatchObject({ id: "claude-code.haiku", model: "haiku" });
+      expect(typeof tier?.name).toBe("string");
+      expect(typeof tier?.available).toBe("boolean");
     } finally {
       await server.close();
     }

@@ -5,6 +5,7 @@ import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { connectAgents } from "../src/core/connect.js";
+import { setModels } from "../src/core/models.js";
 import { AgentBrainMcpServer, agentIdFromClient } from "../src/mcp/server.js";
 import { CLI, ab, activeTask, readJson, tempRepo } from "./helpers.js";
 
@@ -244,6 +245,17 @@ describe("MCP server", () => {
     expect(brief).toContain('TASK IN PROGRESS: task-');
     expect(brief).toContain("Implement OAuth login");
     expect(brief).toContain("next action: Implement refresh-token rotation");
+    await client.close();
+  });
+
+  it("lists model tiers as delegate workers once configured", async () => {
+    const repo = project();
+    setModels(repo, "claude-code", { workers: [{ name: "haiku", model: "haiku" }] });
+    const client = connect({ root: repo });
+    await client.initialize("Visual Studio Code");
+    const tools = (await client.request("tools/list")).result.tools;
+    const delegate = tools.find((t: any) => t.name === "agentbrain_delegate").description;
+    expect(delegate).toContain("claude-code.haiku");
     await client.close();
   });
 

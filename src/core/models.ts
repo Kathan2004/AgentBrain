@@ -108,7 +108,7 @@ export function tierGuide(root: string): string {
   const lines: string[] = [];
   for (const [platform, m] of Object.entries(allModels(root))) {
     if (!m.workers.length) continue;
-    lines.push(`- ${platform} runs ${m.lead ?? "its default model"} (you, the lead: planning, review and the hardest pieces).`,
+    lines.push(`- ${platform} runs ${m.lead ?? "its default model"} (the lead: planning, review and the hardest pieces).`,
       ...m.workers.map((t, i) => `- ${platform}.${t.name} runs ${t.model}${i === 0 ? " (strongest worker)" : i === m.workers.length - 1 ? " (cheapest: small, mechanical, well-specified pieces)" : ""}.`));
   }
   if (!lines.length) return "";

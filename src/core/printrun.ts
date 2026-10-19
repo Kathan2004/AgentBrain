@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { buildPrompt, closeSession, recordSession, takeOver, updateTask, writeCheckpoint } from "./actions.js";
 import { focusBrief, focusFor } from "./focus.js";
-import { resolveWorker, tierGuide } from "./models.js";
+import { resolveWorker } from "./models.js";
 import type { TaskState } from "./state.js";
 import { reviewPolicy, reviewSummary } from "./review.js";
 import { releaseStandIn } from "./standin.js";
@@ -385,7 +385,7 @@ export async function runPrint(root: string, taskId: string, agent: PrintAgent, 
   }));
   const cli = [options.cli.command, ...options.cli.args].map((x) => (x.includes(" ") ? JSON.stringify(x) : x)).join(" ");
   const prompt = options.plan
-    ? `${buildPrompt(root, taskId, cli)}\n${PLAN}\n\n${tierGuide(root) ? `${tierGuide(root)}\n\n` : ""}Use parent_task_id "${taskId}" for every piece you delegate.\n`
+    ? `${buildPrompt(root, taskId, cli)}\n${PLAN}\n\nUse parent_task_id "${taskId}" for every piece you delegate.\n`
     : `${buildPrompt(root, taskId, cli)}\n${HOW}\n`;
 
   const run = await drive(root, taskId, agent, me, workdir, args(agent, mcpFile, workdir, options.plan, permissionMode(root) === "all"), prompt, options.timeoutMinutes, control, log);

@@ -29,7 +29,8 @@ import { findRoot } from "../core/paths.js";
 import { awaitingVote, reviewerNotice, reviewSummary, reviewTask } from "../core/review.js";
 import { routeTask } from "../core/routing.js";
 import { sendMessage, takeUnread, unreadFor } from "../core/messages.js";
-import { delegate } from "../core/delegate.js";
+import { delegate, listWorkers } from "../core/delegate.js";
+import { modelOf } from "../core/models.js";
 import { recall, remember } from "../core/vault.js";
 import { changesSince, liveTeam, relevantMemory, sharedContext } from "../core/context.js";
 import { getSession, listSessions, saveSession } from "../core/store.js";
@@ -170,14 +171,14 @@ const TOOLS: ToolDef[] = [
     name: "agentbrain_delegate",
     description:
       "Hand part of your work to another agent working in parallel. AgentBrain creates the subtask (linked to " +
-      "your task), gives it its own Git worktree, picks the best-placed ready agent (or the one you name: " +
-      "claude-code, codex, vscode, gemini, any), runs the project's checks on the result and sends it through review. " +
-      "You get a message when it is ready. Use it to split large tasks into independent pieces.",
+      "your task), gives it its own Git worktree, picks the best-placed ready agent (or the one you name), runs " +
+      "the project's checks on the result and sends it through review. You get a message when it is ready. Use " +
+      "it to split large tasks into independent pieces.",
     inputSchema: {
       type: "object",
       properties: {
         objective: { type: "string", description: "What the other agent should do, self-contained" },
-        worker: { type: "string" },
+        worker: { type: "string", description: "Worker id; with model tiers, the cheapest that can do the piece (claude-code.haiku for mechanical work)" },
         parent_task_id: { type: "string" },
       },
       required: ["objective"],
@@ -503,15 +504,18 @@ export class AgentBrainMcpServer {
     const withInbox = unread
       ? withReviews.map((tool) => tool.name === "agentbrain_message" ? { ...tool, description: `${tool.description} YOU HAVE ${unread} UNREAD MESSAGE(S): call any AgentBrain tool (e.g. agentbrain_brief) to read them.` } : tool)
       : withReviews;
+    const root = this.root ?? undefined;
+    const workerIds = listWorkers(root).map((w) => (w.id.includes(".") ? `${w.id} (${modelOf(root!, w.id)})` : w.id)).join(", ");
+    const withWorkers = withInbox.map((tool) => tool.name === "agentbrain_delegate" ? { ...tool, description: `${tool.description} Workers: ${workerIds}.` } : tool);
     const task = this.pendingTask();
-    if (!task) return withInbox;
+    if (!task) return withWorkers;
     const live =
       ` TASK IN PROGRESS: ${task.id} "${task.objective}" (${task.status}` +
       (task.agent ? `, last worked on by ${task.agent.id}` : "") +
       `)${task.nextAction ? `; next action: ${task.nextAction}` : ""}. ` +
       "When the developer says continue/resume/keep going, call this first, even mid-conversation: the task may " +
       "have changed since earlier messages (other agents work on it too), and this is the source of truth.";
-    return withInbox.map((tool) => (tool.name === "agentbrain_brief" ? { ...tool, description: tool.description + live } : tool));
+    return withWorkers.map((tool) => (tool.name === "agentbrain_brief" ? { ...tool, description: tool.description + live } : tool));
   }
 
   private async resolveRootFromClient(): Promise<void> {

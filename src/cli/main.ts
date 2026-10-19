@@ -54,7 +54,7 @@ import { pruneTask } from "../core/prune.js";
 import { exportTask } from "../core/export.js";
 import { recall, writeVault } from "../core/vault.js";
 import { startUiServer } from "../ui/server.js";
-import { openBrowser, previousToken, runningUi, startUiDaemon, stopUiDaemon, writeUiState } from "../ui/daemon.js";
+import { openBrowser, previousToken, runningUi, shouldAutoOpen, startUiDaemon, stopUiDaemon, writeUiState } from "../ui/daemon.js";
 import { claudeHooksInstalled, handleClaudeHook, installClaudeHooks, uninstallClaudeHooks } from "../core/claudehooks.js";
 import { computeTally, faultTolerance, getLead, pendingReviews, readReputation, reviewPolicy, reviewSummary, reviewTask, setChecks, setCouncil, setLead, verifyTask } from "../core/review.js";
 import { defaultNotificationSender, watchNotifications } from "../core/notify.js";
@@ -1262,25 +1262,43 @@ async function claudeHook(): Promise<void> {
   if (output) process.stdout.write(output);
 }
 
+/** The first time AgentBrain runs in a repo, start the control room and open it once. */
+async function openOnFirstRun(cwd: string): Promise<{ url: string } | null> {
+  if (flags["no-open"] || !shouldAutoOpen(cwd)) return null;
+  try {
+    const self = selfCommand();
+    const ui = await startUiDaemon(cwd, self.command, self.args);
+    openBrowser(ui.url);
+    return ui;
+  } catch {
+    return null; // The console and init work without it.
+  }
+}
+
 async function main(): Promise<void> {
   const [command, subcommand, ...rest] = positionals;
   if (flags.help) usage(0);
   // Bare `agentbrain` in a terminal opens the console: type a task, an agent takes it.
   if (!command) {
     if (!process.stdout.isTTY || !process.stdin.isTTY) usage(1);
-    await runConsole(projectRoot(), { self: selfCommand(), config: configCommand() });
+    const cwd = projectRoot();
+    await openOnFirstRun(cwd);
+    await runConsole(cwd, { self: selfCommand(), config: configCommand() });
     return;
   }
 
   if (command === "init") {
-    initStore(process.cwd());
+    const cwd = process.cwd();
+    initStore(cwd);
     if (flags.worktrees) {
-      const project = getProject(process.cwd());
+      const project = getProject(cwd);
       project.worktreeByDefault = true;
-      saveProject(process.cwd(), project);
+      saveProject(cwd, project);
     }
     console.log(`✓ AgentBrain initialized${flags.worktrees ? " (every new task gets its own worktree)" : ""}`);
-    console.log(`  ${brainDir(process.cwd())}`);
+    console.log(`  ${brainDir(cwd)}`);
+    const ui = await openOnFirstRun(cwd);
+    if (ui) console.log(`\n✓ Control room: ${ui.url}`);
     console.log('\nNext: agentbrain task create "<objective>"   then   agentbrain rules');
   } else if (command === "status") {
     status();

@@ -1,4 +1,5 @@
 import { readActivity, type ActivityEvent } from "./activity.js";
+import { tierGuide } from "./models.js";
 import { reviewPolicy } from "./review.js";
 import { getProject, listTasks } from "./store.js";
 import { recall } from "./vault.js";
@@ -71,6 +72,7 @@ export function sharedContext(root: string, options: { taskId?: string; objectiv
     liveTeam(root, options.agentId, options.taskId),
     projectMemory(root),
     options.objective ? relevantMemory(root, options.objective) : "",
+    tierGuide(root),
   ].filter(Boolean).join("\n\n");
 }
 

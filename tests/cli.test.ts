@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { firstOpened, runningUi, shouldAutoOpen, uiStateFile } from "../src/ui/daemon.js";
+import { initStore } from "../src/core/store.js";
 
 const CLI = path.resolve("dist/cli/main.js");
 const schema = JSON.parse(fs.readFileSync("schemas/checkpoint.schema.json", "utf8"));
@@ -93,5 +95,25 @@ describe("agent A → handoff → agent B", () => {
   it("rejects unknown statuses and unsafe ids", () => {
     expect(() => run(repo, "task", "update", "--status", "nope")).toThrow();
     expect(() => run(repo, "handoff", "../../etc")).toThrow();
+  });
+});
+
+describe("shouldAutoOpen", () => {
+  it("opens in an interactive terminal outside CI, unless told not to", () => {
+    expect(shouldAutoOpen(undefined, {}, true)).toBe(true);
+    expect(shouldAutoOpen(undefined, { CI: "1" }, true)).toBe(false);
+    expect(shouldAutoOpen(undefined, { AGENTBRAIN_NO_OPEN: "1" }, true)).toBe(false);
+    expect(shouldAutoOpen(undefined, {}, false)).toBe(false);
+  });
+
+  it("opens only the first time, even after the control room stopped", () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "agentbrain-firstopen-"));
+    initStore(repo);
+    expect(shouldAutoOpen(repo, {}, true)).toBe(true);
+    // A control room that ran once and has exited (its pid is long gone).
+    fs.writeFileSync(uiStateFile(repo), JSON.stringify({ pid: 999999, url: "http://127.0.0.1:1", startedAt: "2026-10-01T00:00:00Z", firstOpened: "2026-10-01T00:00:00Z" }));
+    expect(runningUi(repo)).toBeNull();
+    expect(firstOpened(repo)).toBe("2026-10-01T00:00:00Z");
+    expect(shouldAutoOpen(repo, {}, true)).toBe(false);
   });
 });
