@@ -24,3 +24,15 @@ describe("control room page", () => {
     expect(PAGE).toContain(`data-file="'+esc(f.path)+'" role="button" tabindex="0"`);
   });
 });
+
+describe("the live rail and narrow layouts", () => {
+  it("lists recent work one entry per task, so one busy task can't fill it", () => {
+    expect(PAGE).toContain("byTask[e.task]");
+    expect(PAGE).toContain("S.tasks.slice().sort(");
+  });
+
+  it("keeps the nav in one row and the task tabs on one line when narrow", () => {
+    expect(PAGE).toContain(".navs{display:flex");
+    expect(PAGE).toContain(".prtabs>*{white-space:nowrap");
+  });
+});

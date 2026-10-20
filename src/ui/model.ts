@@ -226,7 +226,7 @@ export function snapshot(root: string, options: { includeDone?: boolean } = {}):
     queue,
     sessions,
     ...(project.lead ? { lead: project.lead } : {}),
-    activity: readActivity(root, 300),
+    activity: readActivity(root, 600),
     policy: { ...policy, tolerates: policy.mode === "council" ? faultTolerance(policy.reviewers.length, policy.quorum) : 0 },
     reputation: readReputation(root),
     rules: reviewRules(root),
