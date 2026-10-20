@@ -26,6 +26,14 @@ export interface PlatformModels {
   lead?: string;
   /** Worker models, strongest first. */
   workers: Tier[];
+  /**
+   * Which of the platform's models are in use: absent means all of them (the
+   * default: work goes to the worker models, the lead plans, reviews and takes
+   * escalations). A list of tier names and/or "lead" limits it; one entry means
+   * only that model, for everything. Without "lead", the strongest model listed
+   * stands in for it.
+   */
+  use?: string[];
 }
 
 /** Times one tier's results may be sent back on a task before the next attempt escalates. */
@@ -33,14 +41,41 @@ export const ESCALATE_AFTER = 2;
 
 const NAME = /^[a-z0-9][a-z0-9-]*$/;
 
+type Stored = { lead?: string; workers?: Tier[]; use?: string[] };
+const shape = (m: Stored): PlatformModels => ({ ...(m.lead ? { lead: m.lead } : {}), workers: m.workers ?? [], ...(Array.isArray(m.use) && m.use.length ? { use: m.use } : {}) });
+
+/** A platform's models as configured (the settings view). */
 export function platformModels(root: string, platform: string): PlatformModels | null {
   const m = getProject(root).models?.[platform];
-  return m ? { ...(m.lead ? { lead: m.lead } : {}), workers: m.workers ?? [] } : null;
+  return m ? shape(m) : null;
 }
 
 export function allModels(root: string): Record<string, PlatformModels> {
   const out: Record<string, PlatformModels> = {};
-  for (const [platform, m] of Object.entries(getProject(root).models ?? {})) out[platform] = { ...(m.lead ? { lead: m.lead } : {}), workers: m.workers ?? [] };
+  for (const [platform, m] of Object.entries(getProject(root).models ?? {})) out[platform] = shape(m);
+  return out;
+}
+
+/** The worker models a platform delegates to right now: none when it's set to use one model only. */
+function activeTiers(m: PlatformModels | null): Tier[] {
+  if (!m) return [];
+  if (!m.use) return m.workers;
+  const on = m.workers.filter((t) => m.use!.includes(t.name));
+  // Without the lead, the strongest model in use is the platform itself, not one of its workers.
+  return m.use.includes("lead") ? on : on.slice(1);
+}
+
+/** The model the platform's own id runs: the lead, or the strongest model in use when the lead isn't. */
+function platformModel(m: PlatformModels | null): string | undefined {
+  if (!m) return undefined;
+  if (!m.use || m.use.includes("lead")) return m.lead;
+  return m.workers.find((t) => m.use!.includes(t.name))?.model ?? m.lead;
+}
+
+/** Platforms with worker models in use, as routing sees them. */
+export function activeModels(root: string): Record<string, PlatformModels> {
+  const out: Record<string, PlatformModels> = {};
+  for (const [platform, m] of Object.entries(allModels(root))) out[platform] = { ...m, workers: activeTiers(m) };
   return out;
 }
 
@@ -57,7 +92,13 @@ export function setModels(root: string, platform: string, models: PlatformModels
       if (!t.model.trim()) throw new Error(`Tier "${t.name}" needs a model.`);
       seen.add(t.name);
     }
-    all[platform] = { ...(models.lead?.trim() ? { lead: models.lead.trim() } : {}), workers: models.workers.map((t) => ({ name: t.name, model: t.model.trim() })) };
+    const names = [...new Set(models.use ?? [])].filter((n) => n !== "auto");
+    for (const n of names) if (n !== "lead" && !models.workers.some((t) => t.name === n)) throw new Error(`"${n}" isn't one of ${platform}'s models (lead or a tier name).`);
+    // Every model selected is the same as no limit.
+    // Every model chosen (the lead counts as chosen when none is set) is the same as no limit.
+    const everything = (names.includes("lead") || !models.lead?.trim()) && models.workers.every((t) => names.includes(t.name));
+    const use = names.length && !everything ? names : undefined;
+    all[platform] = { ...(models.lead?.trim() ? { lead: models.lead.trim() } : {}), workers: models.workers.map((t) => ({ name: t.name, model: t.model.trim() })), ...(use ? { use } : {}) };
   }
   if (Object.keys(all).length) project.models = all;
   else delete project.models;
@@ -70,20 +111,31 @@ export function resolveWorker(root: string, id: string): { platform: string; tie
   const dot = id.indexOf(".");
   const platform = dot < 0 ? id : id.slice(0, dot);
   const models = platformModels(root, platform);
-  if (dot < 0) return { platform, ...(models?.lead ? { model: models.lead } : {}) };
-  const tier = models?.workers.find((t) => t.name === id.slice(dot + 1));
+  if (dot < 0) {
+    // Set to one worker model: the platform itself runs it, for everything.
+    const model = platformModel(models);
+    return { platform, ...(model ? { model } : {}) };
+  }
+  const tier = activeTiers(models).find((t) => t.name === id.slice(dot + 1));
   return tier ? { platform, tier, model: tier.model } : null;
 }
 
 /** Every worker id a platform offers: its tiers, strongest first, then the platform itself (the lead). */
 export function ladder(root: string, platform: string): string[] {
-  const models = platformModels(root, platform);
-  return [...(models?.workers ?? []).map((t) => `${platform}.${t.name}`), platform];
+  return [...activeTiers(platformModels(root, platform)).map((t) => `${platform}.${t.name}`), platform];
 }
 
 /** The model a worker id runs with, for display and the audit trail. */
 export function modelOf(root: string, id: string): string | undefined {
   return resolveWorker(root, id)?.model;
+}
+
+/**
+ * Who builds a new task given to `platform`: with worker models in use, the
+ * first ready one (strongest first); otherwise the platform itself.
+ */
+export function builderFor(root: string, platform: string, ready: (id: string) => boolean): string {
+  return ladder(root, platform).slice(0, -1).find(ready) ?? platform;
 }
 
 /**
@@ -106,7 +158,7 @@ export function escalation(root: string, task: TaskState, worker: string): strin
 /** What the planner is told about the models it can hand pieces to. */
 export function tierGuide(root: string): string {
   const lines: string[] = [];
-  for (const [platform, m] of Object.entries(allModels(root))) {
+  for (const [platform, m] of Object.entries(activeModels(root))) {
     if (!m.workers.length) continue;
     lines.push(`- ${platform} runs ${m.lead ?? "its default model"} (the lead: planning, review and the hardest pieces).`,
       ...m.workers.map((t, i) => `- ${platform}.${t.name} runs ${t.model}${i === 0 ? " (strongest worker)" : i === m.workers.length - 1 ? " (cheapest: small, mechanical, well-specified pieces)" : ""}.`));

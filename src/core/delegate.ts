@@ -14,7 +14,7 @@ import { limitReason, quotaReason } from "./limits.js";
 import type { TaskState } from "./state.js";
 import { getProject, getTask, listTasks, saveProject, saveTask } from "./store.js";
 import { addWorktree } from "./worktree.js";
-import { allModels, ESCALATE_AFTER, escalation } from "./models.js";
+import { activeModels, builderFor, ESCALATE_AFTER, escalation } from "./models.js";
 import { localModel, localModelRoom, ollamaBinary, ollamaModels } from "./ollama.js";
 
 /**
@@ -144,7 +144,7 @@ export function listWorkers(root?: string): Worker[] {
   }
 
   if (root) {
-    for (const [platform, models] of Object.entries(allModels(root))) {
+    for (const [platform, models] of Object.entries(activeModels(root))) {
       const base = workers.find((w) => w.id === platform);
       if (!base) continue;
       if (models.lead) base.name = `${base.name} (${models.lead})`;
@@ -243,7 +243,7 @@ export function rankWorkers(root: string, now = new Date()): WorkerChoice[] {
   const prefer = project.agents?.prefer ?? [];
   const avoid = new Set(project.agents?.avoid ?? []);
 
-  const tiered = allModels(root);
+  const tiered = activeModels(root);
   return listWorkers(root).map((worker) => {
     let score = 0;
     const reasons: string[] = [];
@@ -357,8 +357,12 @@ export function delegate(
 ): DelegateResult {
   const mention: { worker?: string; prompt?: string } = input.prompt ? parseMention(input.prompt) : {};
   // An @mention in the prompt beats the selected agent.
-  const wanted = mention.worker ?? input.worker;
   const ranked = rankWorkers(root);
+  // A new task given to a platform with worker models goes to one of them: the platform (the lead) hands its work down.
+  const named = mention.worker ?? input.worker;
+  const wanted = named && !input.taskId && !named.includes(".")
+    ? builderFor(root, named, (id) => ranked.some((c) => c.worker.id === id && c.worker.available))
+    : named;
   let choice: WorkerChoice | undefined;
   if (wanted) {
     choice = ranked.find((c) => c.worker.id === wanted);

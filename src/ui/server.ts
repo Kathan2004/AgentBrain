@@ -9,6 +9,7 @@ import { watchTranscripts } from "../core/transcripts.js";
 import { CLOSE_REASONS, closeTask } from "../core/close.js";
 import { readActivity } from "../core/activity.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import path from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { requestStop, sendToSession } from "../core/headless.js";
 import { updateTask } from "../core/actions.js";
@@ -52,6 +53,11 @@ function html(response: ServerResponse): void {
   response.end(PAGE);
 }
 
+function outsideRoot(root: string, file: string): boolean {
+  const rel = path.relative(root, path.resolve(root, file));
+  return rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel);
+}
+
 function readBody(request: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -92,12 +98,18 @@ export async function startUiServer(
   let actualPort = options.port ?? 4747;
   const origin = () => `http://127.0.0.1:${actualPort}`;
   const allowedHost = (host: string | undefined) => host === `127.0.0.1:${actualPort}` || host === `localhost:${actualPort}`;
+  const tokenBuf = Buffer.from(token);
   const authorized = (request: IncomingMessage, url: URL): boolean => {
     const headerToken = request.headers["x-agentbrain-token"];
     const queryToken = url.pathname === "/api/events" ? url.searchParams.get("token") : null;
     const given = typeof headerToken === "string" ? headerToken : queryToken;
-    return allowedHost(request.headers.host) && typeof given === "string" && given.length === token.length &&
-      timingSafeEqual(Buffer.from(given), Buffer.from(token));
+    if (!allowedHost(request.headers.host) || typeof given !== "string") return false;
+    // Compare byte length, not string length: a multi-byte character can keep
+    // the string length equal while its UTF-8 encoding differs, which would
+    // otherwise make timingSafeEqual throw (and crash the server) instead of
+    // just failing the check.
+    const givenBuf = Buffer.from(given);
+    return givenBuf.length === tokenBuf.length && timingSafeEqual(givenBuf, tokenBuf);
   };
   // Results submitted by agents connected through an older AgentBrain (or set to review by
   // hand) never had their checks started: the control room starts them, once per submission.
@@ -193,10 +205,16 @@ export async function startUiServer(
       }
       if (url.pathname === "/api/audit" && request.method === "GET") {
         const file = url.searchParams.get("file");
-        return json(response, { text: file ? formatFileAudit(root, file, auditFile(root, file)) : formatAudit(auditTrail(root)) });
+        if (file) {
+          if (outsideRoot(root, file)) return json(response, { error: "Path outside repository" }, 400);
+          return json(response, { text: formatFileAudit(root, file, auditFile(root, file)) });
+        }
+        return json(response, { text: formatAudit(auditTrail(root)) });
       }
       if (url.pathname === "/api/history" && request.method === "GET") {
-        return json(response, fileHistory(root, url.searchParams.get("file") ?? ""));
+        const file = url.searchParams.get("file");
+        if (file && outsideRoot(root, file)) return json(response, { error: "Path outside repository" }, 400);
+        return json(response, fileHistory(root, file ?? ""));
       }
       if (url.pathname === "/api/changes" && request.method === "GET") return json(response, await taskChanges(root, getTask(root, findTask(root, url.searchParams.get("task") ?? "").id)));
       if (url.pathname === "/api/connectors" && request.method === "GET") return json(response, detectConnectors(root, { all: url.searchParams.get("all") === "1" }));
@@ -275,7 +293,7 @@ export async function startUiServer(
         const body = JSON.parse(await readBody(request)) as {
           worker?: string; checks?: string[]; permissions?: string;
           autoApprove?: string[]; protect?: string[]; focus?: { agent: string; area: string; paths?: string[] }[];
-          models?: Record<string, { lead?: string; workers: { name: string; model: string }[] }>;
+          models?: Record<string, { lead?: string; workers: { name: string; model: string }[]; use?: string[] }>;
         };
         // Validate every platform's tiers before saving any of them.
         if (body.models) for (const platform of Object.keys(body.models)) if (!(TIER_PLATFORMS as readonly string[]).includes(platform)) throw new Error(`Model tiers work with ${TIER_PLATFORMS.join(" and ")}.`);
@@ -296,7 +314,7 @@ export async function startUiServer(
           for (const f of focusReviewers(root)) if (!body.focus.some((x) => x.agent === f.agent)) setFocus(root, f.agent, null);
           for (const f of body.focus.filter((x) => x.agent && x.area?.trim())) setFocus(root, f.agent, f.area, (f.paths ?? []).map((p) => p.trim()).filter(Boolean));
         }
-        if (body.models) for (const [platform, m] of Object.entries(body.models)) setModels(root, platform, { ...(m.lead ? { lead: m.lead } : {}), workers: m.workers ?? [] });
+        if (body.models) for (const [platform, m] of Object.entries(body.models)) setModels(root, platform, { ...(m.lead ? { lead: m.lead } : {}), workers: m.workers ?? [], ...(m.use?.length ? { use: m.use } : {}) });
         return json(response, { ok: true });
       }
       if (request.method === "POST" && url.pathname === "/api/review") {

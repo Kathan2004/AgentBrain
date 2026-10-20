@@ -97,7 +97,7 @@ Control plane
   agentbrain gate fetch [prefixes]  |  gate watch [prefixes|off]
                                           Gate every new bot branch (dependabot/, renovate/) now, or
                                           every 10 minutes from the control room
-  agentbrain models [<platform> --lead <model> <name>=<model>...]
+  agentbrain models [<platform> --lead <model> <name>=<model>... [--use all|lead,sonnet]]
                                           One platform, several models: a strong lead plans and reviews,
                                           cheaper models build, escalating when results come back
   agentbrain review focus [<agent> "<concern>" [--paths <prefixes>] | <agent> --clear]
@@ -269,6 +269,7 @@ function parseCli() {
         protect: { type: "string" },
         paths: { type: "string" },
         lead: { type: "string" },
+        use: { type: "string" },
         as: { type: "string" },
         remote: { type: "string" },
         help: { type: "boolean", short: "h" },
@@ -1178,8 +1179,10 @@ function models(platform?: string, specs: string[] = []): void {
         if (at <= 0) throw new Error(`"${spec}": give each worker model as <name>=<model>, strongest first, e.g. sonnet=sonnet haiku=haiku`);
         return { name: spec.slice(0, at).toLowerCase(), model: spec.slice(at + 1) };
       }) : current?.workers ?? [];
-      if (!flags.lead && !specs.length) throw new Error(`Usage: agentbrain models ${id} [--lead <model>] <name>=<model>...   (strongest first)   or   agentbrain models ${id} --clear`);
-      setModels(cwd, id, { lead: flags.lead ?? current?.lead, workers });
+      if (!flags.lead && !specs.length && !flags.use) throw new Error(`Usage: agentbrain models ${id} [--lead <model>] <name>=<model>...   (strongest first)   [--use all|lead,sonnet,...]   or   agentbrain models ${id} --clear`);
+      // --use all lifts the limit; a list keeps only those models (lead and/or tier names).
+      const use = flags.use === undefined ? current?.use : flags.use === "all" ? undefined : flags.use.split(",").map((n) => n.trim().toLowerCase()).filter(Boolean);
+      setModels(cwd, id, { lead: flags.lead ?? current?.lead, workers, ...(use ? { use } : {}) });
     }
   }
   const all = allModels(cwd);
@@ -1190,8 +1193,10 @@ function models(platform?: string, specs: string[] = []): void {
     return;
   }
   for (const [p, m] of Object.entries(all)) {
-    console.log(`${p}: lead ${m.lead ?? "(its default model)"}: plans, reviews, takes escalations`);
-    for (const t of m.workers) console.log(`  ${p}.${t.name}: ${t.model}`);
+    const on = (n: string) => !m.use || m.use.includes(n);
+    console.log(`${p}: lead ${m.lead ?? "(its default model)"}: plans, reviews, takes escalations${on("lead") ? "" : " (not in use)"}`);
+    for (const t of m.workers) console.log(`  ${p}.${t.name}: ${t.model}${on(t.name) ? "" : " (not in use)"}`);
+    if (m.use) console.log(`  Using only: ${m.use.join(", ")}   (agentbrain models ${p} --use all to use every model)`);
   }
   console.log(`Work goes to the worker models; a result sent back ${ESCALATE_AFTER} times moves up to the next stronger one.`);
 }

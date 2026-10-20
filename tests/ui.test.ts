@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { startUiServer } from "../src/ui/server.js";
 import { createTask } from "../src/core/actions.js";
@@ -50,6 +51,12 @@ describe("local UI server", () => {
       const token = url.hash.slice("#token=".length);
       expect((await request(base, "/api/snapshot")).status).toBe(403);
       expect(await requestWithHost(url.port, `example.com:${url.port}`, token)).toBe(403);
+      // A token header whose JS string length matches but whose UTF-8 byte length
+      // doesn't (a multi-byte character) must be rejected, not crash the server.
+      const sameLengthDifferentBytes = `${"a".repeat(token.length - 1)}é`;
+      expect(sameLengthDifferentBytes.length).toBe(token.length);
+      expect((await request(base, "/api/snapshot", { headers: { "x-agentbrain-token": sameLengthDifferentBytes } })).status).toBe(403);
+      expect((await request(base, "/api/snapshot", { headers: { "x-agentbrain-token": token } })).status).toBe(200);
       const snapshot = await (await request(base, "/api/snapshot", { headers: { "x-agentbrain-token": token } })).json() as { tasks: { id: string }[]; queue: { id: string; objective: string; status: string }[] };
       expect(snapshot.tasks.map((item) => item.id)).toContain(task.id);
       expect(snapshot.queue).toEqual([{ id: queued.id, objective: "Queued dashboard follow-up", status: "idle" }]);
@@ -121,6 +128,34 @@ describe("local UI server", () => {
     } finally {
       await server.close();
       await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+  });
+
+  it("rejects file paths outside the repository", async () => {
+    const repo = tempRepo("agentbrain-ui-");
+    initStore(repo);
+    const testFile = path.join(repo, "test.txt");
+    fs.writeFileSync(testFile, "test content");
+    execFileSync("git", ["init"], { cwd: repo });
+    execFileSync("git", ["add", "test.txt"], { cwd: repo });
+    execFileSync("git", ["commit", "-m", "test"], { cwd: repo, env: { ...process.env, GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@test.com", GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@test.com" } });
+    const server = await startUiServer(repo, { port: 0 });
+    try {
+      const url = new URL(server.url);
+      const base = `http://127.0.0.1:${url.port}`;
+      const token = url.hash.slice("#token=".length);
+      expect((await request(base, "/api/audit?file=../../etc/passwd", { headers: { "x-agentbrain-token": token } })).status).toBe(400);
+      expect((await request(base, "/api/audit?file=/etc/passwd", { headers: { "x-agentbrain-token": token } })).status).toBe(400);
+      expect((await request(base, "/api/audit?file=a/../../etc/passwd", { headers: { "x-agentbrain-token": token } })).status).toBe(400);
+      expect((await request(base, "/api/history?file=../../etc/passwd", { headers: { "x-agentbrain-token": token } })).status).toBe(400);
+      expect((await request(base, "/api/history?file=/etc/passwd", { headers: { "x-agentbrain-token": token } })).status).toBe(400);
+      expect((await request(base, "/api/history?file=a/../../etc/passwd", { headers: { "x-agentbrain-token": token } })).status).toBe(400);
+      const auditResp = await request(base, "/api/audit?file=test.txt", { headers: { "x-agentbrain-token": token } });
+      expect(auditResp.status).toBe(200);
+      const historyResp = await request(base, "/api/history?file=test.txt", { headers: { "x-agentbrain-token": token } });
+      expect(historyResp.status).toBe(200);
+    } finally {
+      await server.close();
     }
   });
 });

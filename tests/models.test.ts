@@ -421,3 +421,57 @@ describe("accountLimit: a platform's models share one account", () => {
     expect(accountLimit(other, "claude-code", new Date("2026-10-16T20:00:00Z"))).toBeNull();
   });
 });
+
+describe("choosing which models a platform uses", () => {
+  const tiers = { lead: "opus", workers: [{ name: "sonnet", model: "sonnet" }, { name: "haiku", model: "haiku" }] };
+  function repoWith(use?: string[]) {
+    const repo = tempRepo("agentbrain-use-");
+    initStore(repo);
+    setModels(repo, "claude-code", { ...tiers, ...(use ? { use } : {}) });
+    return repo;
+  }
+
+  it("uses every model by default", () => {
+    const repo = repoWith();
+    expect(ladder(repo, "claude-code")).toEqual(["claude-code.sonnet", "claude-code.haiku", "claude-code"]);
+    expect(resolveWorker(repo, "claude-code")?.model).toBe("opus");
+  });
+
+  it("one model only: the platform runs it for everything, with no workers", () => {
+    const repo = repoWith(["haiku"]);
+    expect(ladder(repo, "claude-code")).toEqual(["claude-code"]);
+    expect(resolveWorker(repo, "claude-code")?.model).toBe("haiku");
+    expect(resolveWorker(repo, "claude-code.sonnet")).toBeNull();
+    const lead = repoWith(["lead"]);
+    expect(ladder(lead, "claude-code")).toEqual(["claude-code"]);
+    expect(resolveWorker(lead, "claude-code")?.model).toBe("opus");
+  });
+
+  it("several models: without the lead, the strongest chosen leads", () => {
+    const repo = repoWith(["sonnet", "haiku"]);
+    expect(resolveWorker(repo, "claude-code")?.model).toBe("sonnet");
+    expect(ladder(repo, "claude-code")).toEqual(["claude-code.haiku", "claude-code"]);
+    const withLead = repoWith(["lead", "haiku"]);
+    expect(resolveWorker(withLead, "claude-code")?.model).toBe("opus");
+    expect(ladder(withLead, "claude-code")).toEqual(["claude-code.haiku", "claude-code"]);
+  });
+
+  it("all of them chosen is the same as no limit, and unknown names are refused", () => {
+    expect(platformModels(repoWith(["lead", "sonnet", "haiku"]), "claude-code")?.use).toBeUndefined();
+    expect(() => repoWith(["gpt"])).toThrow(/isn't one of/);
+    // No lead model set: every worker chosen is still everything.
+    const repo = tempRepo("agentbrain-use-");
+    initStore(repo);
+    setModels(repo, "claude-code", { workers: tiers.workers, use: ["sonnet", "haiku"] });
+    expect(platformModels(repo, "claude-code")?.use).toBeUndefined();
+  });
+
+  it("a new task for the platform goes to its strongest ready worker model", async () => {
+    const { builderFor } = await import("../src/core/models.js");
+    const repo = repoWith();
+    expect(builderFor(repo, "claude-code", () => true)).toBe("claude-code.sonnet");
+    expect(builderFor(repo, "claude-code", (id) => id !== "claude-code.sonnet")).toBe("claude-code.haiku");
+    expect(builderFor(repo, "claude-code", (id) => id === "claude-code")).toBe("claude-code");
+    expect(builderFor(repoWith(["lead"]), "claude-code", () => true)).toBe("claude-code");
+  });
+});
