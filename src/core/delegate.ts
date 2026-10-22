@@ -381,7 +381,7 @@ export function delegate(
   }
   const { worker } = choice;
   const others = ranked.filter((c) => c !== choice && c.worker.available).length;
-  const why = input.why ? input.why : wanted ? "you asked for it" : others ? choice.reasons.join(", ") : `the only agent ready (${choice.reasons.join(", ")})`;
+  const why = input.why ? input.why : named && wanted !== named ? `you gave it to ${choice.worker.name.split(" · ")[0]}, which handed it to its ${busyWith(root, wanted!) ? "strongest" : "free"} ${wanted!.slice(named.length + 1)} model` : wanted ? "you asked for it" : others ? choice.reasons.join(", ") : `the only agent ready (${choice.reasons.join(", ")})`;
 
   let task = input.taskId ? getTask(root, input.taskId) : createTask(root, mention.prompt ?? "", { activate: !input.parent });
   if (!input.taskId && (input.parent || input.requestedBy)) {

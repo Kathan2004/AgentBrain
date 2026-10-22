@@ -4,10 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readActivity, recordActivity } from "./activity.js";
 import { commitsSince } from "./git.js";
+import { requestStop } from "./headless.js";
 import { brainDir } from "./paths.js";
 import { compilePatterns, redact } from "./redact.js";
 import type { ReviewCheck, ReviewFlag, ReviewVote, TaskState } from "./state.js";
-import { getProject, getTask, listTasks, readJson, saveProject, saveTask, writeJson } from "./store.js";
+import { getProject, getTask, listSessions, listTasks, readJson, saveProject, saveTask, writeJson } from "./store.js";
 import { focusBrief, focusFor, focusReviewers, focusStatus, isFocusReviewer } from "./focus.js";
 import { autoApproval, describeChange } from "./reviewrules.js";
 import { mergeWorktree, syncWorktree, taskWorkdir } from "./worktree.js";
@@ -378,7 +379,7 @@ export interface ReviewResult {
 export function reviewTask(
   root: string,
   taskId: string,
-  options: { verdict: "approved" | "changes"; reviewer: string; notes?: string },
+  options: { verdict: "approved" | "changes"; reviewer: string; notes?: string; callerSession?: string },
 ): ReviewResult {
   const task = getTask(root, taskId);
   if (task.status !== "review") throw new Error(`${task.id} is ${task.status}, not waiting for review.`);
@@ -393,7 +394,7 @@ export function reviewTask(
     throw new Error(`${options.reviewer} isn't a reviewer of this result; ${reviewPolicy(root).reviewers.join(", ") || "the developer"} decides.`);
   }
 
-  if (developer) return decide(root, task, options.verdict, `${options.reviewer} (override)`, notes);
+  if (developer) return decide(root, task, options.verdict, `${options.reviewer} (override)`, notes, undefined, options.callerSession);
 
   const vote: ReviewVote = { agent: options.reviewer, verdict: options.verdict, ...(notes ? { notes } : {}), at: new Date().toISOString() };
   task.review.votes = [...(task.review.votes ?? []).filter((v) => v.agent !== options.reviewer), vote];
@@ -412,11 +413,11 @@ export function reviewTask(
       ? `Voted ${options.verdict === "approved" ? "approve" : "changes"} on ${task.review.worker}'s work (sealed until the others vote)`
       : `Reviewed ${task.review.worker}'s work: ${options.verdict === "approved" ? "approve" : "changes"}`,
   });
-  return tally(root, task.id);
+  return tally(root, task.id, options.callerSession);
 }
 
 /** Applies the decision once the votes reach it. */
-function tally(root: string, taskId: string): ReviewResult {
+function tally(root: string, taskId: string, callerSession?: string): ReviewResult {
   const task = getTask(root, taskId);
   if (task.status !== "review") return { task };
   const t = computeTally(root, task);
@@ -427,14 +428,25 @@ function tally(root: string, taskId: string): ReviewResult {
     task.review!.autoApproved = rule;
     saveTask(root, task);
     recordActivity(root, { agent: "agentbrain", task: task.id, kind: "review", text: `Approved by the review rules: ${rule}, checks pass, nothing flagged` });
-    return { ...decide(root, task, "approved", `rules (${rule})`, undefined, t), tally: t };
+    return { ...decide(root, task, "approved", `rules (${rule})`, undefined, t, callerSession), tally: t };
   }
   const notes = (task.review?.votes ?? [])
     .filter((v) => v.verdict === "changes" && v.notes)
     .map((v) => (reviewPolicy(root).mode === "council" ? `${v.notes} (${v.agent})` : v.notes!))
     .join("\n") || (t.blocked ? `Make the checks pass: ${t.blocked.replace(/^checks failed: /, "")}` : undefined);
-  const result = decide(root, task, t.outcome, "consensus", notes, t);
+  const result = decide(root, task, t.outcome, "consensus", notes, t, callerSession);
   return { ...result, tally: t };
+}
+
+/** Session id prefixes `printrun.ts` and `standin.ts` give review runs (lead, stand-in, focus). */
+const REVIEW_SESSION_PREFIXES = ["review-", "standin-", "focus-"];
+
+/** Stops this task's live background review runs once a result is decided; `exceptSession` is the run casting the deciding vote. */
+function stopReviewSessions(root: string, taskId: string, exceptSession?: string): void {
+  const sessions = listSessions(root).filter((s) =>
+    s.taskId === taskId && !s.endedAt && s.sessionId !== exceptSession && REVIEW_SESSION_PREFIXES.some((p) => s.sessionId.startsWith(p)));
+  for (const s of sessions) requestStop(root, s.agentId, s.sessionId);
+  if (sessions.length) recordActivity(root, { agent: "agentbrain", task: taskId, kind: "review", text: `Stopped ${sessions.length} review run(s): the result is decided` });
 }
 
 function decide(
@@ -444,6 +456,7 @@ function decide(
   decidedBy: string,
   notes: string | undefined,
   t?: Tally,
+  callerSession?: string,
 ): ReviewResult {
   const review = task.review!;
   let merged: number | undefined;
@@ -484,6 +497,7 @@ function decide(
         delete again.review;
         saveTask(root, again, "agentbrain");
         recordActivity(root, { agent: "agentbrain", task: current.id, kind: "review", text: `Approved, but main changed the same lines (${result.conflicts.join(", ")}); brought up to date and sent back to resolve just those` });
+        stopReviewSessions(root, current.id, callerSession);
         return { task: again, conflicts: result.conflicts, tally: t };
       }
       merged = result.merged;
@@ -540,6 +554,7 @@ function decide(
       ? `Approved ${review.worker}'s work ${how}${merged ? `, merged ${merged} commit(s)` : ""}`
       : `Sent ${review.worker}'s work back ${how}: ${(notes ?? "").split("\n")[0]}`,
   });
+  stopReviewSessions(root, current.id, callerSession);
   return { task: current, outcome, merged, tally: t };
 }
 

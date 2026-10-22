@@ -3,9 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTask, updateTask } from "../src/core/actions.js";
+import { readActivity } from "../src/core/activity.js";
+import { sessionControl } from "../src/core/headless.js";
 import { awaitingVote, computeTally, reviewerNotice, reviewTask, setLead } from "../src/core/review.js";
 import { releaseStandIn, standInReason, standInSweep } from "../src/core/standin.js";
-import { getTask, initStore, saveTask } from "../src/core/store.js";
+import { getTask, initStore, saveSession, saveTask } from "../src/core/store.js";
 import { addWorktree } from "../src/core/worktree.js";
 import { tempRepo } from "./helpers.js";
 
@@ -134,6 +136,19 @@ describe("results that changed nothing", () => {
     saveTask(repo, task);
     expect(askLead(repo, id, { command: "true", args: [] })).toBe(false);
     expect(standInReason(repo, getTask(repo, id), new Date(Date.now() + 60 * 60_000))).toBeNull();
+  });
+});
+
+describe("review runs stop once a result is decided", () => {
+  it("stops a live background review session for the task, but not the one casting the deciding vote", () => {
+    const { repo, id } = submitted("claude-code", "vscode");
+    saveSession(repo, { schemaVersion: "0.1", agentId: "claude-code", sessionId: "review-1", taskId: id, startedAt: new Date().toISOString() });
+    saveSession(repo, { schemaVersion: "0.1", agentId: "claude-code", sessionId: "review-2", taskId: id, startedAt: new Date().toISOString() });
+    const result = reviewTask(repo, id, { verdict: "approved", reviewer: "claude-code", callerSession: "review-2" });
+    expect(result.outcome).toBe("approved");
+    expect(fs.existsSync(sessionControl(repo, "claude-code", "review-1").stop)).toBe(true);
+    expect(fs.existsSync(sessionControl(repo, "claude-code", "review-2").stop)).toBe(false);
+    expect(readActivity(repo).some((e) => e.text === "Stopped 1 review run(s): the result is decided")).toBe(true);
   });
 });
 

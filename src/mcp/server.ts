@@ -776,7 +776,7 @@ export class AgentBrainMcpServer {
         if (!reviewerNotice(root, this.agent.id)) throw new UserError("Only reviewers (the lead or council members) can review. The developer sets them with agentbrain lead / agentbrain council.");
         const verdict = args.verdict === "approve" ? "approved" : args.verdict === "changes" ? "changes" : null;
         if (!verdict) throw new UserError('verdict must be "approve" or "changes".');
-        const result = reviewTask(root, String(args.task_id ?? ""), { verdict, reviewer: this.agent.id, notes: args.notes });
+        const result = reviewTask(root, String(args.task_id ?? ""), { verdict, reviewer: this.agent.id, notes: args.notes, callerSession: this.agent.sessionId });
         const left = awaitingVote(root, this.agent.id).length;
         const more = left ? ` ${left} more result(s) waiting for your review.` : " Nothing else is waiting for your review.";
         if (result.conflicts) {
