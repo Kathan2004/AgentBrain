@@ -147,6 +147,100 @@ describe("task worktrees", () => {
     expect(fs.readFileSync(path.join(wtB, "README.md"), "utf8")).toMatch(/<<<<<<< main\nfrom main\n=======\nfrom task\n>>>>>>> /);
   });
 
+  it("uses a single commit subject as the landed commit title", () => {
+    const repo = tempRepo("agentbrain-wt-");
+    ab(repo, ["init"]);
+    const a = createTask(repo, "Long objective that should be ignored", true);
+    const wt = taskJson(repo, a).worktree.path;
+    fs.writeFileSync(path.join(wt, "feature.ts"), "x\n");
+    execFileSync("git", ["add", "-A"], { cwd: wt });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "Add important feature"], { cwd: wt });
+    ab(repo, ["worktree", "merge", a]);
+    const msg = execFileSync("git", ["log", "-1", "--format=%B"], { cwd: repo, encoding: "utf8" });
+    expect(msg).toContain("Add important feature");
+    expect(msg).not.toContain("Long objective");
+  });
+
+  it("joins multiple commit subjects when they fit in 72 chars", () => {
+    const repo = tempRepo("agentbrain-wt-");
+    ab(repo, ["init"]);
+    const a = createTask(repo, "Long objective that should be ignored", true);
+    const wt = taskJson(repo, a).worktree.path;
+    for (const msg of ["Add form", "Add validation"]) {
+      fs.writeFileSync(path.join(wt, `${msg}.ts`), "x\n");
+      execFileSync("git", ["add", "-A"], { cwd: wt });
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", msg], { cwd: wt });
+    }
+    ab(repo, ["worktree", "merge", a]);
+    const msg = execFileSync("git", ["log", "-1", "--format=%B"], { cwd: repo, encoding: "utf8" });
+    expect(msg).toContain("Add form; Add validation");
+    expect(msg).not.toContain("Long objective");
+  });
+
+  it("falls back to objective when multiple subjects exceed 72 chars", () => {
+    const repo = tempRepo("agentbrain-wt-");
+    ab(repo, ["init"]);
+    const a = createTask(repo, "This is the objective that should be used as fallback", true);
+    const wt = taskJson(repo, a).worktree.path;
+    for (const msg of ["Add a very long commit message here", "Add another very long commit message"]) {
+      fs.writeFileSync(path.join(wt, `${msg}.ts`), "x\n");
+      execFileSync("git", ["add", "-A"], { cwd: wt });
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", msg], { cwd: wt });
+    }
+    ab(repo, ["worktree", "merge", a]);
+    const msg = execFileSync("git", ["log", "-1", "--format=%B"], { cwd: repo, encoding: "utf8" });
+    expect(msg).toContain("This is the objective that should be used as fallback");
+  });
+
+  it("adds commit subjects as bullet points in the body for multiple commits", () => {
+    const repo = tempRepo("agentbrain-wt-");
+    ab(repo, ["init"]);
+    const a = createTask(repo, "Build feature", true);
+    const wt = taskJson(repo, a).worktree.path;
+    for (const msg of ["Add form", "Add validation"]) {
+      fs.writeFileSync(path.join(wt, `${msg}.ts`), "x\n");
+      execFileSync("git", ["add", "-A"], { cwd: wt });
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", msg], { cwd: wt });
+    }
+    ab(repo, ["worktree", "merge", a]);
+    const msg = execFileSync("git", ["log", "-1", "--format=%B"], { cwd: repo, encoding: "utf8" });
+    expect(msg).toContain("- Add form");
+    expect(msg).toContain("- Add validation");
+  });
+
+  it("keeps file paths in the objective's first sentence", () => {
+    const repo = tempRepo("agentbrain-wt-");
+    ab(repo, ["init"]);
+    const a = createTask(repo, "Write tests/models.test.ts for src/core/models.ts. Use the helpers.", true);
+    const wt = taskJson(repo, a).worktree.path;
+    for (const msg of ["Add a very long commit message here", "Add another very long commit message"]) {
+      fs.writeFileSync(path.join(wt, `${msg}.ts`), "x\n");
+      execFileSync("git", ["add", "-A"], { cwd: wt });
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", msg], { cwd: wt });
+    }
+    ab(repo, ["worktree", "merge", a]);
+    const title = execFileSync("git", ["log", "-1", "--format=%s"], { cwd: repo, encoding: "utf8" }).trim();
+    expect(title).toBe("Write tests/models.test.ts for src/core/models.ts.");
+  });
+
+  it("cuts a long single subject at a word boundary and strips AI credit", () => {
+    const repo = tempRepo("agentbrain-wt-");
+    ab(repo, ["init"]);
+    const a = createTask(repo, "Objective that should be ignored", true);
+    const wt = taskJson(repo, a).worktree.path;
+    const subject = "Teach the landed commit title to prefer branch subjects over the task objective wording";
+    fs.writeFileSync(path.join(wt, "feature.ts"), "x\n");
+    execFileSync("git", ["add", "-A"], { cwd: wt });
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", `${subject}\nCo-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>`], { cwd: wt });
+    ab(repo, ["worktree", "merge", a]);
+    const msg = execFileSync("git", ["log", "-1", "--format=%B"], { cwd: repo, encoding: "utf8" });
+    const title = msg.split("\n")[0];
+    expect(title).toBe("Teach the landed commit title to prefer branch subjects over the task");
+    expect(title.length).toBeLessThanOrEqual(72);
+    expect(msg).not.toContain("Co-Authored-By");
+    expect(msg).not.toContain("Objective");
+  });
+
   it("lists the task's commits in the brief", () => {
     const repo = tempRepo("agentbrain-wt-");
     ab(repo, ["init"]);

@@ -384,6 +384,7 @@ export function delegate(
   const why = input.why ? input.why : named && wanted !== named ? `you gave it to ${choice.worker.name.split(" · ")[0]}, which handed it to its ${busyWith(root, wanted!) ? "strongest" : "free"} ${wanted!.slice(named.length + 1)} model` : wanted ? "you asked for it" : others ? choice.reasons.join(", ") : `the only agent ready (${choice.reasons.join(", ")})`;
 
   let task = input.taskId ? getTask(root, input.taskId) : createTask(root, mention.prompt ?? "", { activate: !input.parent });
+  if (task.waitingSince) { delete task.waitingSince; saveTask(root, task); }
   if (!input.taskId && (input.parent || input.requestedBy)) {
     const request = input.requestedBy ? developerRequest(root, input.requestedBy) : undefined;
     task = { ...task, ...(input.parent ? { parent: input.parent } : {}), ...(input.requestedBy ? { requestedBy: input.requestedBy } : {}), ...(request ? { request } : {}) };
@@ -491,6 +492,10 @@ export function autoContinue(
   const what = options.sentBack ? `${stopped} sent it back (${reason.slice(0, 100)})` : `${stopped} stopped (${reason.slice(0, 100)})`;
   if (!next) {
     recordActivity(root, { agent: "agentbrain", task: taskId, kind: "handoff", text: `Autopilot: ${what} and no ${options.sentBack ? "" : "other "}agent is ready; the task waits` });
+    // Remembered on the task, so the control room retries it once an agent is free (retryWaiting).
+    const waiting = getTask(root, taskId);
+    waiting.waitingSince = new Date().toISOString();
+    saveTask(root, waiting);
     return null;
   }
   if (stronger && next.worker.id === stronger) {

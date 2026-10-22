@@ -61,6 +61,10 @@ export interface TaskState {
   delegatedTo?: { worker: string; at: string };
   /** When autopilot handed on a sent-back task: the `at` of the send-back event, so it happens once per send-back. */
   sentBackResumed?: string;
+  /** When autopilot last retried a waiting task (retryWaiting): at most once every 5 minutes. */
+  retriedAt?: string;
+  /** Set when autopilot found no ready agent for this task: it waits until retryWaiting hands it on. */
+  waitingSince?: string;
   /** The task's own Git worktree, when it has one (`agentbrain worktree add`). */
   worktree?: { path: string; branch: string; base: string };
 }

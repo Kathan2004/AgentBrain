@@ -1,5 +1,6 @@
 import { readActivity, recordActivity } from "./activity.js";
 import { updateTask } from "./actions.js";
+import { isClosed } from "./close.js";
 import { autoContinue, rankWorkers } from "./delegate.js";
 import { taskActivity } from "./stall.js";
 import { CONFLICT_PREFIX, isReviewer } from "./review.js";
@@ -73,4 +74,38 @@ export function resumeSentBack(root: string, self: { command: string; args: stri
     } catch { /* the task stays handed off for the next agent */ }
   }
   return resumed;
+}
+
+/** A handoff task autopilot gave up on because nothing was ready: at least this old before trying again. */
+export const RETRY_WAITING_MINUTES = 2;
+/** At most one retry attempt per task in this window, win or lose. */
+export const RETRY_COOLDOWN_MINUTES = 5;
+
+/** When autopilot gave up on this task for want of a ready agent, or null (kept on the task, so a busy activity log can't hide it). */
+function waitingSince(task: TaskState): string | null {
+  return task.status === "handoff" && task.waitingSince ? task.waitingSince : null;
+}
+
+/**
+ * Autopilot for tasks it already gave up on: when `autoContinue` found no
+ * ready agent, nothing retried it, so a task could stay in handoff long after
+ * a usage limit lifted. Once an agent becomes available again, try once more
+ * (at most every 5 minutes per task); never for tasks the developer closed.
+ */
+export function retryWaiting(root: string, self: { command: string; args: string[] }, now = new Date()): string[] {
+  const retried: string[] = [];
+  for (const task of listTasks(root)) {
+    if (isClosed(task)) continue;
+    const since = waitingSince(task);
+    if (!since || now.getTime() - Date.parse(since) < RETRY_WAITING_MINUTES * 60_000) continue;
+    if (task.retriedAt && now.getTime() - Date.parse(task.retriedAt) < RETRY_COOLDOWN_MINUTES * 60_000) continue;
+    if (!rankWorkers(root, now).some((c) => c.worker.available && c.worker.how !== "pull")) continue;
+    const fresh = getTask(root, task.id);
+    fresh.retriedAt = now.toISOString();
+    saveTask(root, fresh);
+    try {
+      if (autoContinue(root, task.id, task.agent?.id ?? "agentbrain", "an agent is available again", self)) retried.push(task.id);
+    } catch { /* the task stays handed off for the next sweep */ }
+  }
+  return retried;
 }

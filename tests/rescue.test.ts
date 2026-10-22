@@ -1,11 +1,12 @@
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { recordActivity } from "../src/core/activity.js";
 import { createTask, takeOver, updateTask } from "../src/core/actions.js";
 import { autoContinue } from "../src/core/delegate.js";
-import { rescueStalledChats, resumeSentBack } from "../src/core/rescue.js";
+import { rescueStalledChats, resumeSentBack, retryWaiting } from "../src/core/rescue.js";
 import { CONFLICT_PREFIX, reviewTask, setLead } from "../src/core/review.js";
 import { getTask, initStore, saveTask } from "../src/core/store.js";
-import { tempRepo } from "./helpers.js";
+import { stubAgent, tempRepo } from "./helpers.js";
 
 // Which agents are installed differs per machine: record the hand-over instead of starting one.
 vi.mock("../src/core/delegate.js", async (original) => ({
@@ -88,5 +89,73 @@ describe("sent-back autopilot", () => {
     expect(getTask(repo, task.id).status).toBe("handoff");
     expect(resumeSentBack(repo, self)).toEqual([]);
     expect(autoContinue).not.toHaveBeenCalled();
+  });
+});
+
+describe("retry waiting autopilot", () => {
+  function waiting() {
+    const repo = tempRepo("agentbrain-rescue-");
+    initStore(repo);
+    const task = createTask(repo, "Add a greeting");
+    updateTask(repo, task.id, { status: "handoff", agent: { id: "claude-code", sessionId: "c1" } });
+    recordActivity(repo, { agent: "agentbrain", task: task.id, kind: "handoff", text: "Autopilot: claude-code stopped (usage limit) and no agent is ready; the task waits" });
+    // What autoContinue leaves on the task when it gives up.
+    const t = getTask(repo, task.id);
+    t.waitingSince = new Date().toISOString();
+    saveTask(repo, t);
+    return { repo, id: task.id };
+  }
+
+  it("still retries a task whose waiting line has scrolled out of a busy activity log", () => {
+    const { repo, id } = waiting();
+    for (let i = 0; i < 700; i++) recordActivity(repo, { agent: "claude-code", task: id, kind: "command", text: `$ ls ${i}` });
+    withAgentOnPath(repo, () => {
+      expect(retryWaiting(repo, self, new Date(Date.now() + 3 * 60_000))).toEqual([id]);
+    });
+  });
+
+  it("leaves a handed-off task alone when autopilot never gave up on it", () => {
+    const repo = tempRepo("agentbrain-rescue-");
+    initStore(repo);
+    const task = createTask(repo, "Add a greeting");
+    updateTask(repo, task.id, { status: "handoff", agent: { id: "claude-code", sessionId: "c1" } });
+    withAgentOnPath(repo, () => {
+      expect(retryWaiting(repo, self, new Date(Date.now() + 3 * 60_000))).toEqual([]);
+    });
+  });
+
+  // An available non-"pull" worker, without depending on what's signed in on the test machine.
+  function withAgentOnPath<T>(repo: string, run: () => T): T {
+    const bin = `${repo}-bin`;
+    stubAgent(bin, "gemini", "exit 0");
+    const before = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${before}`;
+    try {
+      return run();
+    } finally {
+      process.env.PATH = before;
+    }
+  }
+
+  it("retries a waiting task once an agent is available", () => {
+    const { repo, id } = waiting();
+    withAgentOnPath(repo, () => {
+      const later = new Date(Date.now() + 3 * 60_000);
+      expect(retryWaiting(repo, self, later)).toEqual([id]);
+      expect(autoContinue).toHaveBeenCalledWith(repo, id, "claude-code", "an agent is available again", self);
+    });
+  });
+
+  it("does not retry twice within 5 minutes", () => {
+    const { repo, id } = waiting();
+    withAgentOnPath(repo, () => {
+      const first = new Date(Date.now() + 3 * 60_000);
+      expect(retryWaiting(repo, self, first)).toEqual([id]);
+      expect(autoContinue).toHaveBeenCalledTimes(1);
+
+      const soonAfter = new Date(first.getTime() + 2 * 60_000);
+      expect(retryWaiting(repo, self, soonAfter)).toEqual([]);
+      expect(autoContinue).toHaveBeenCalledTimes(1);
+    });
   });
 });

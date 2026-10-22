@@ -10,6 +10,50 @@ import { applyToWorkdir } from "./permissions.js";
 import { getTask, listTasks, saveTask } from "./store.js";
 import { gitBinary } from "./platform.js";
 
+function getCommitSubjects(cwd: string, base: string, tip: string): string[] {
+  try {
+    const output = execFileSync(gitBinary(), ["log", `${base}..${tip}`, "--format=%s", "--reverse"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    return output ? output.split("\n") : [];
+  } catch {
+    return [];
+  }
+}
+
+function cutAtWord(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  let result = "";
+  for (const word of text.split(" ")) {
+    const candidate = result ? result + " " + word : word;
+    if (candidate.length > maxLen) break;
+    result = candidate;
+  }
+  return result || text.slice(0, maxLen);
+}
+
+function cutAtSentence(text: string, maxLen: number): string {
+  const match = /^(.+?[.!?])(\s|$)/.exec(text);
+  return cutAtWord(match ? match[1] : text, maxLen);
+}
+
+/** Drops AI-credit trailers (and anything after them) that a squashed subject may carry. */
+function stripCredit(text: string): string {
+  return text.replace(/\s*(Co-Authored-By:|🤖|Generated with)[\s\S]*$/i, "").trim();
+}
+
+function generateLandedTitle(objective: string, subjects: string[]): string {
+  const maxLen = 72;
+  if (subjects.length === 1) return cutAtWord(subjects[0], maxLen);
+  if (subjects.length > 1) {
+    const joined = subjects.join("; ");
+    if (joined.length <= maxLen) return joined;
+  }
+  return cutAtSentence(stripCredit(objective.split("\n")[0]), maxLen);
+}
+
 /**
  * One Git worktree per task, so agents working on different tasks at the same
  * time never edit the same checkout. Worktrees live in
@@ -141,12 +185,18 @@ export function mergeWorktree(root: string, taskId: string): MergeResult {
   }
 
   const merged = Number(git(root, ["rev-list", "--count", `${base}..${tip}`]));
-  const title = task.objective.split("\n")[0];
+  const subjects = getCommitSubjects(root, base, tip).map(stripCredit).filter(Boolean);
+  const title = generateLandedTitle(task.objective, subjects);
+  let message = `${title}\n\nLanded from ${branch}.\n`;
+  if (subjects.length > 1) {
+    message += `\n${subjects.map((s) => `- ${s}`).join("\n")}\n`;
+  }
+  message += `\nAgentBrain-Task: ${task.id}\n`;
   const landed = landChanges(root, {
     base,
     tip,
     label: task.id,
-    message: `${title.length > 72 ? `${title.slice(0, 71)}…` : title}\n\nLanded from ${branch}.\n\nAgentBrain-Task: ${task.id}\n`,
+    message,
   });
   if (landed.conflicts.length) return { task, merged, conflicts: landed.conflicts, skipped: landed.skipped.map((s) => s.path) };
 

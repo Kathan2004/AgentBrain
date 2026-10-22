@@ -25,7 +25,7 @@ import { gitFetch, gitGraph, gitToday } from "./gitgraph.js";
 import { retryPendingMerges, reviewTask, settleReviews, setChecks, setCouncil, setLead, startVerification } from "../core/review.js";
 import { setPermissionMode } from "../core/permissions.js";
 import { standInSweep } from "../core/standin.js";
-import { rescueStalledChats, resumeSentBack } from "../core/rescue.js";
+import { rescueStalledChats, resumeSentBack, retryWaiting } from "../core/rescue.js";
 import { chatBrief, sharedContext } from "../core/context.js";
 import { claudeBinary, codexBinary, delegate, setDefaultWorker } from "../core/delegate.js";
 import { printAgent, runChat } from "../core/printrun.js";
@@ -154,6 +154,7 @@ export async function startUiServer(
     try { standInSweep(root, options.self); } catch { /* never break the dashboard */ }
     try { rescueStalledChats(root, options.self); } catch { /* same */ }
     try { resumeSentBack(root, options.self); } catch { /* same */ }
+    try { retryWaiting(root, options.self); } catch { /* same */ }
     try { retryPendingMerges(root); } catch { /* same */ }
     try { settleReviews(root); } catch { /* same */ }
     try { gateSweep(root); } catch { /* same: a fetch can fail offline */ }
