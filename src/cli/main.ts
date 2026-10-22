@@ -9,7 +9,7 @@ import { ACP_AGENTS, BUILTIN_AGENTS, acpAgent, builtinAdapter, customAdapter } f
 import { TOOL_KINDS, type ToolKind } from "../adapters/acp.js";
 import { requestStop, runHeadless, sendToSession, sessionControl } from "../core/headless.js";
 import { routeTask } from "../core/routing.js";
-import { addToQueue, readQueue, removeFromQueue, shiftQueue, waitUntilSettled } from "../core/queue.js";
+import { addToQueue, readQueue, removeFromQueue, shiftQueue, SETTLED, waitUntilSettled } from "../core/queue.js";
 import { HOOK_ADAPTERS, handlePlatformHook, installHooksFor, uninstallAllHooks } from "../core/agenthooks.js";
 import { runTui } from "../ui/tui.js";
 import { runConsole } from "../ui/console.js";
@@ -177,6 +177,10 @@ Switching agents
   agentbrain resume [task-id] [--agent <id>]
                                           Print the continuation brief; --agent takes over the task
   agentbrain log [task-id]                 Show the task timeline
+  agentbrain wait <task-id>... [--until review|done] [--timeout <minutes>]
+                                          Block until every task settles (review, done, failed, blocked
+                                          or handoff by default; --until done waits for done only);
+                                          exits 2 if --timeout minutes pass first (default 60)
   agentbrain prune [task-id] [--keep N] [--all] [--dry-run]
                                           Remove old checkpoint history
   agentbrain agents                       Show supported agents and recorded sessions
@@ -417,6 +421,34 @@ function resume(id?: string): void {
       `  • In ${who}'s chat (with AgentBrain connected), type: continue ${taskId}\n` +
       `  • Or paste the brief above into ${who}'s chat.\n` +
       `  • To claim it for an agent from here: agentbrain resume ${taskId} --agent ${inCursor ? "cursor" : "<agent>"}`);
+  }
+}
+
+async function wait(ids: string[]): Promise<void> {
+  if (!ids.length) throw new Error('Usage: agentbrain wait <task-id>... [--until review|done] [--timeout <minutes>]');
+  const until = flags.until ?? "review";
+  if (until !== "review" && until !== "done") throw new Error('--until must be "review" or "done".');
+  const wanted = until === "done" ? ["done"] : SETTLED;
+  const timeoutMinutes = flags.timeout === undefined ? 60 : positiveNumber("timeout", flags.timeout);
+  const cwd = root();
+  for (const id of ids) getTask(cwd, id); // must exist
+
+  const deadline = Date.now() + timeoutMinutes * 60_000;
+  const pending = new Set(ids);
+  for (;;) {
+    for (const id of [...pending]) {
+      const task = getTask(cwd, id);
+      if (wanted.includes(task.status)) {
+        console.log(`${task.id}\t${task.status}\t${task.agent?.id ?? "-"}`);
+        pending.delete(id);
+      }
+    }
+    if (!pending.size) return;
+    if (Date.now() >= deadline) {
+      console.error(`✗ Timed out after ${timeoutMinutes} minute(s): ${[...pending].join(", ")} still not settled.`);
+      process.exit(2);
+    }
+    await new Promise((r) => setTimeout(r, 5000));
   }
 }
 
@@ -811,7 +843,9 @@ async function ui(): Promise<void> {
   if (port !== undefined && (port < 0 || port > 65535)) throw new Error("--port must be between 0 and 65535.");
   const cwd = root();
   const running = runningUi(cwd);
-  if (running) {
+  // AGENTBRAIN_UI_RESTART: this process is replacing the one in ui.json, which is
+  // still alive mid-shutdown, so the usual "already running" check must step aside.
+  if (running && !process.env.AGENTBRAIN_UI_RESTART) {
     console.log(`The control room is already running: ${running.url}`);
     return;
   }
@@ -1338,6 +1372,8 @@ async function main(): Promise<void> {
     resume(subcommand);
   } else if (command === "log") {
     log(subcommand);
+  } else if (command === "wait") {
+    await wait([subcommand, ...rest].filter((x): x is string => Boolean(x)));
   } else if (command === "export") {
     exportMarkdown(subcommand);
   } else if (command === "prune") {

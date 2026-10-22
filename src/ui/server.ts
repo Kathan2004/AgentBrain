@@ -7,8 +7,9 @@ import { gateSweep } from "../core/gate.js";
 import { setReviewRules, type ChangeKind } from "../core/reviewrules.js";
 import { watchTranscripts } from "../core/transcripts.js";
 import { CLOSE_REASONS, closeTask } from "../core/close.js";
-import { readActivity } from "../core/activity.js";
+import { readActivity, recordActivity } from "../core/activity.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { requestStop, sendToSession } from "../core/headless.js";
@@ -17,6 +18,7 @@ import { taskTimeline } from "../core/timeline.js";
 import { findSession, getProject, getTask, listTasks } from "../core/store.js";
 import { readNote, vaultGraph, writeVault } from "../core/vault.js";
 import { snapshot, taskChanges, taskDiff, transcriptTail, watchProject, type LiveTask } from "./model.js";
+import { codeRebuilt, restartUiDaemon } from "./daemon.js";
 import { openInEditor } from "./open.js";
 import { PAGE } from "./page.js";
 import { gitFetch, gitGraph, gitToday } from "./gitgraph.js";
@@ -367,14 +369,50 @@ export async function startUiServer(
       resolve();
     });
   });
+  let codeWatchTimer: NodeJS.Timeout | undefined;
+  const shutdown = async () => {
+    if (codeWatchTimer) clearInterval(codeWatchTimer);
+    stopWatching();
+    diskEdits.stop();
+    stopTranscripts();
+    for (const client of clients) client.end();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  };
+  // A rebuild (e.g. `npm run build`) leaves this daemon running the old dist/cli/main.js,
+  // so it silently stops running checks and resuming sent-back work. Watch the entry
+  // script's mtime; once it changes and settles (size stable across two polls), hand off
+  // to a fresh daemon on the same port and token, then exit.
+  if (options.self) {
+    const entryScript = process.argv[1];
+    const self = options.self;
+    try {
+      const startMtimeMs = fs.statSync(entryScript).mtimeMs;
+      let lastStat: { mtimeMs: number; size: number } | undefined;
+      codeWatchTimer = setInterval(() => {
+        let stat: fs.Stats;
+        try { stat = fs.statSync(entryScript); } catch { return; }
+        const current = { mtimeMs: stat.mtimeMs, size: stat.size };
+        if (!codeRebuilt(startMtimeMs, lastStat, current)) { lastStat = current; return; }
+        clearInterval(codeWatchTimer);
+        void (async () => {
+          try {
+            await shutdown();
+            await restartUiDaemon(root, self.command, self.args, actualPort);
+            recordActivity(root, { agent: "agentbrain", kind: "status", text: "Control room restarted on new code" });
+          } catch (error) {
+            // This process has already shut down: say so, rather than vanish.
+            recordActivity(root, { agent: "agentbrain", kind: "status", text: `The control room stopped and couldn't restart on the new code (${error instanceof Error ? error.message : String(error)}); run agentbrain on` });
+          }
+          process.exit(0);
+        })();
+      }, 10_000);
+      codeWatchTimer.unref();
+    } catch {
+      // The entry script can't be statted (e.g. under a test runner): nothing to watch.
+    }
+  }
   return {
     url: `${origin()}/#token=${token}`,
-    close: async () => {
-      stopWatching();
-      diskEdits.stop();
-      stopTranscripts();
-      for (const client of clients) client.end();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    },
+    close: shutdown,
   };
 }

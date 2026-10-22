@@ -132,10 +132,12 @@ export function modelOf(root: string, id: string): string | undefined {
 
 /**
  * Who builds a new task given to `platform`: with worker models in use, the
- * first ready one (strongest first); otherwise the platform itself.
+ * strongest ready one that is free, else the strongest ready one; otherwise the platform itself.
  */
-export function builderFor(root: string, platform: string, ready: (id: string) => boolean): string {
-  return ladder(root, platform).slice(0, -1).find(ready) ?? platform;
+export function builderFor(root: string, platform: string, ready: (id: string) => boolean, free: (id: string) => boolean = () => true): string {
+  const tiers = ladder(root, platform).slice(0, -1).filter(ready);
+  // A free worker model before a busy stronger one: parallel tasks spread across the models.
+  return tiers.find(free) ?? tiers[0] ?? platform;
 }
 
 /**

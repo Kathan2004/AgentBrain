@@ -64,6 +64,42 @@ export async function startUiDaemon(root: string, command: string, args: string[
   throw new Error(`The control room did not start; see ${path.join(brainDir(root), "ui.log")}`);
 }
 
+/**
+ * True once the entry script's mtime has moved away from the mtime the daemon started
+ * with, and its size has stopped changing across two consecutive polls (a rebuild still
+ * writing the file reports a growing or shrinking size, not a stable one).
+ */
+export function codeRebuilt(startMtimeMs: number, previous: { mtimeMs: number; size: number } | undefined, current: { mtimeMs: number; size: number }): boolean {
+  if (current.mtimeMs === startMtimeMs) return false;
+  return previous !== undefined && previous.mtimeMs === current.mtimeMs && previous.size === current.size;
+}
+
+/**
+ * Spawns a fresh `agentbrain ui` on the given port, detached, the same way startUiDaemon
+ * does, and waits for it to write its pid to ui.json. Used when this process is replacing
+ * itself after a rebuild, so the spawned process is told (via AGENTBRAIN_UI_RESTART) to skip
+ * the "already running" check: the process it is replacing is still alive, mid-shutdown.
+ */
+export async function restartUiDaemon(root: string, command: string, args: string[], port: number, timeoutMs = 15_000): Promise<UiState> {
+  const log = fs.openSync(path.join(brainDir(root), "ui.log"), "a");
+  const child = spawn(command, [...args, "ui", "--port", String(port)], {
+    cwd: root,
+    detached: true,
+    stdio: ["ignore", log, log],
+    env: { ...process.env, AGENTBRAIN_UI_RESTART: "1" },
+  });
+  child.unref();
+  fs.closeSync(log);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = runningUi(root);
+    if (state && state.pid === child.pid) return state;
+    if (child.exitCode !== null) break;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  throw new Error(`The control room did not restart; see ${path.join(brainDir(root), "ui.log")}`);
+}
+
 export async function stopUiDaemon(root: string): Promise<boolean> {
   const state = runningUi(root);
   if (!state) return false;

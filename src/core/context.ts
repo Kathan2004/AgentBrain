@@ -54,13 +54,14 @@ export function projectMemory(root: string): string {
 }
 
 /** Notes from the vault that bear on this objective (lessons, decisions, kept memory). */
-export function relevantMemory(root: string, objective: string, limit = 4): string {
+export function relevantMemory(root: string, objective: string, limit = 3): string {
   try {
     // Lessons and the index notes are already in the shared context; task notes and logs are noise here.
     const skip = (note: string) => /^(Tasks|Daily)\//.test(note) || /(^|\/)index$/.test(note) || ["Brain", "Lessons", "Onboarding"].includes(note);
     const hits = recall(root, objective, limit + 8).filter((h) => !skip(h.note)).slice(0, limit);
     if (!hits.length) return "";
-    return `## From the project's memory, relevant to this task\n${hits.map((h) => `### ${h.note}\n${short(h.excerpt, 400)}`).join("\n")}\n(Search more with agentbrain_recall.)`;
+    const text = `## From the project's memory, relevant to this task\n${hits.map((h) => `### ${h.note}\n${short(h.excerpt, 400)}`).join("\n")}\n(Search more with agentbrain_recall.)`;
+    return short(text, 1500);
   } catch {
     return "";
   }
@@ -68,11 +69,13 @@ export function relevantMemory(root: string, objective: string, limit = 4): stri
 
 /** Everything an agent should know before working on `taskId`, the same for every agent. */
 export function sharedContext(root: string, options: { taskId?: string; objective?: string; agentId?: string } = {}): string {
+  // Tier workers (ids with a dot, e.g. claude-code.haiku) only execute; delegation is the platform/lead's job.
+  const isLeadOrPlatform = !options.agentId || !options.agentId.includes(".");
   return [
     liveTeam(root, options.agentId, options.taskId),
     projectMemory(root),
     options.objective ? relevantMemory(root, options.objective) : "",
-    tierGuide(root),
+    isLeadOrPlatform ? tierGuide(root) : "",
   ].filter(Boolean).join("\n\n");
 }
 

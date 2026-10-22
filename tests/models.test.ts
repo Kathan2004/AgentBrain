@@ -475,3 +475,15 @@ describe("choosing which models a platform uses", () => {
     expect(builderFor(repoWith(["lead"]), "claude-code", () => true)).toBe("claude-code");
   });
 });
+
+describe("spreading parallel tasks across worker models", () => {
+  it("prefers a free model over a busy stronger one", async () => {
+    const { builderFor } = await import("../src/core/models.js");
+    const repo = tempRepo("agentbrain-spread-");
+    initStore(repo);
+    setModels(repo, "claude-code", { lead: "opus", workers: [{ name: "sonnet", model: "sonnet" }, { name: "haiku", model: "haiku" }] });
+    expect(builderFor(repo, "claude-code", () => true, (id) => id !== "claude-code.sonnet")).toBe("claude-code.haiku");
+    // Everyone busy: the strongest ready one still takes it.
+    expect(builderFor(repo, "claude-code", () => true, () => false)).toBe("claude-code.sonnet");
+  });
+});

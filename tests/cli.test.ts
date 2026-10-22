@@ -98,6 +98,37 @@ describe("agent A → handoff → agent B", () => {
   });
 });
 
+describe("agentbrain wait", () => {
+  it("returns at once for a task already in review", () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "agentbrain-wait-"));
+    run(repo, "init");
+    run(repo, "task", "create", "Already settled");
+    const project = readJson(path.join(repo, ".agentbrain/project.json"));
+    const taskId = project.activeTaskId as string;
+    run(repo, "task", "update", "--status", "review");
+
+    const out = run(repo, "wait", taskId);
+    expect(out).toContain(taskId);
+    expect(out).toContain("review");
+  });
+
+  it("exits 2 on timeout while a task has not settled", () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "agentbrain-wait-timeout-"));
+    run(repo, "init");
+    run(repo, "task", "create", "Not settled");
+    const project = readJson(path.join(repo, ".agentbrain/project.json"));
+    const taskId = project.activeTaskId as string;
+
+    let status: number | null = null;
+    try {
+      run(repo, "wait", taskId, "--timeout", "0.01");
+    } catch (error) {
+      status = (error as { status: number | null }).status;
+    }
+    expect(status).toBe(2);
+  });
+});
+
 describe("shouldAutoOpen", () => {
   it("opens in an interactive terminal outside CI, unless told not to", () => {
     expect(shouldAutoOpen(undefined, {}, true)).toBe(true);

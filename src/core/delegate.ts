@@ -350,6 +350,11 @@ export function developerRequest(root: string, agentId: string, now = Date.now()
   return asked.at(-1)?.text;
 }
 
+/** Tasks a worker is running now. */
+function busyWith(root: string, id: string): number {
+  return listTasks(root).filter((t) => t.status === "running" && t.agent?.id === id).length;
+}
+
 export function delegate(
   root: string,
   input: { prompt?: string; taskId?: string; worker?: string; parent?: string; requestedBy?: string; why?: string },
@@ -361,7 +366,7 @@ export function delegate(
   // A new task given to a platform with worker models goes to one of them: the platform (the lead) hands its work down.
   const named = mention.worker ?? input.worker;
   const wanted = named && !input.taskId && !named.includes(".")
-    ? builderFor(root, named, (id) => ranked.some((c) => c.worker.id === id && c.worker.available))
+    ? builderFor(root, named, (id) => ranked.some((c) => c.worker.id === id && c.worker.available), (id) => busyWith(root, id) === 0)
     : named;
   let choice: WorkerChoice | undefined;
   if (wanted) {

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { buildPrompt, createTask, takeOver, updateTask } from "../src/core/actions.js";
 import { recordActivity } from "../src/core/activity.js";
-import { changesSince, sharedContext } from "../src/core/context.js";
+import { changesSince, relevantMemory, sharedContext } from "../src/core/context.js";
+import { setModels } from "../src/core/models.js";
 import { getTask, initStore, saveTask } from "../src/core/store.js";
 import { remember } from "../src/core/vault.js";
 import { AgentBrainMcpServer } from "../src/mcp/server.js";
@@ -48,5 +49,24 @@ describe("shared context", () => {
     expect(changesSince(repo, before, "codex")).toContain("claude-code");
     expect(changesSince(repo, before, "codex")).toContain("Refresh tokens rotate on every use");
     expect(changesSince(repo, before, "claude-code")).toBe("");
+  });
+
+  it("tells the platform/lead which models it can delegate to, but not a tier worker", () => {
+    const { repo, task } = project();
+    setModels(repo, "claude-code", { lead: "opus", workers: [{ name: "sonnet", model: "sonnet" }] });
+    const lead = sharedContext(repo, { taskId: task.id, objective: task.objective, agentId: "claude-code" });
+    expect(lead).toContain("Models you can delegate to");
+    const worker = sharedContext(repo, { taskId: task.id, objective: task.objective, agentId: "claude-code.sonnet" });
+    expect(worker).not.toContain("Models you can delegate to");
+  });
+
+  it("caps relevant memory at 3 notes and 1500 characters total", () => {
+    const { repo } = project();
+    for (let i = 0; i < 6; i++) {
+      remember(repo, { title: `Note ${i} about auth tokens`, text: "x".repeat(600), author: "claude-code" });
+    }
+    const mem = relevantMemory(repo, "auth tokens");
+    expect(mem.length).toBeLessThanOrEqual(1500);
+    expect(mem.match(/^### /gm)?.length).toBeLessThanOrEqual(3);
   });
 });

@@ -4,6 +4,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { startUiServer } from "../src/ui/server.js";
+import { codeRebuilt } from "../src/ui/daemon.js";
 import { createTask } from "../src/core/actions.js";
 import { setModels } from "../src/core/models.js";
 import { initStore, saveSession } from "../src/core/store.js";
@@ -157,5 +158,28 @@ describe("local UI server", () => {
     } finally {
       await server.close();
     }
+  });
+});
+
+describe("codeRebuilt", () => {
+  it("is false until the mtime moves away from the startup mtime", () => {
+    expect(codeRebuilt(100, undefined, { mtimeMs: 100, size: 10 })).toBe(false);
+    expect(codeRebuilt(100, { mtimeMs: 100, size: 10 }, { mtimeMs: 100, size: 10 })).toBe(false);
+  });
+
+  it("is false on the first poll after the mtime changes, with nothing to compare yet", () => {
+    expect(codeRebuilt(100, undefined, { mtimeMs: 200, size: 50 })).toBe(false);
+  });
+
+  it("is false while the file is still being written (size still changing)", () => {
+    expect(codeRebuilt(100, { mtimeMs: 200, size: 30 }, { mtimeMs: 200, size: 50 })).toBe(false);
+  });
+
+  it("is true once the new mtime and size hold across two consecutive polls", () => {
+    expect(codeRebuilt(100, { mtimeMs: 200, size: 50 }, { mtimeMs: 200, size: 50 })).toBe(true);
+  });
+
+  it("is false if the mtime changes again between polls, even with a matching size", () => {
+    expect(codeRebuilt(100, { mtimeMs: 200, size: 50 }, { mtimeMs: 300, size: 50 })).toBe(false);
   });
 });

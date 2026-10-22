@@ -698,6 +698,7 @@ agentbrain status                 # active task, progress, last checkpoint, stal
 agentbrain status --json          # machine-readable JSON for status, task list, log, or route
 agentbrain checkpoint             # snapshot without stopping
 agentbrain log                    # timeline of agent sessions and checkpoints
+agentbrain wait <task-id>...      # block until each task settles (review/done/failed/blocked/handoff); exits 2 on timeout
 agentbrain route [task-id]        # which agent should take the task next, with reasons
 agentbrain queue add <task-id>... # line up tasks for one agent
 agentbrain queue list             # what's queued (queue remove <task-id> to drop one)
