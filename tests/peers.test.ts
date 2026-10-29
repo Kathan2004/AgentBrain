@@ -39,6 +39,8 @@ describe("peers", () => {
     const peer = tempRepo("ab-peer-"); initStore(peer);
     createTask(peer, `Use ghp_${"a".repeat(36)} to push`);
     expect(JSON.stringify(localMachineData(peer))).not.toContain("ghp_a");
+    // Agents that can't take work are listed too, so other machines can see why.
+    for (const w of localMachineData(peer).workers) expect(typeof w.available).toBe("boolean");
   });
 
   it("rejects bad machine names and duplicates", () => {

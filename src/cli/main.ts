@@ -1072,7 +1072,7 @@ function machines(): void {
   const list = remoteMachines(root()).map((m) => {
     const counts: Record<string, number> = {};
     for (const t of m.tasks) counts[t.status] = (counts[t.status] ?? 0) + 1;
-    return { name: m.machine, syncedAt: m.at, tasks: counts, workers: (m.workers ?? []).map((w) => `${m.machine}:${w.id}`) };
+    return { name: m.machine, syncedAt: m.at, tasks: counts, workers: (m.workers ?? []).map((w) => `${m.machine}:${w.id}${w.available === false ? ` (unavailable${w.note ? `: ${w.note}` : ""})` : ""}`) };
   });
   if (flags.json) return console.log(JSON.stringify(list, null, 2));
   if (!list.length) return console.log("No other machines. Join a hub with `agentbrain join <url> --token <peer-token>`.");

@@ -21,7 +21,7 @@ export interface MachineNote { id: string; title: string; markdown: string }
 /** Work one machine asks another to do (`machine:agent`), and what came back: a branch pushed to the shared Git remote. */
 export interface RemoteJob { id: string; from: string; to: string; agent: string; objective: string; base: string; at: string }
 export interface RemoteResult { job: string; machine: string; state: "ready" | "failed"; note: string; at: string }
-export interface MachineData { machine: string; at: string; tasks: MachineTask[]; activity: ActivityEvent[]; notes: MachineNote[]; jobs: RemoteJob[]; results: RemoteResult[]; workers: Array<{ id: string; name: string }> }
+export interface MachineData { machine: string; at: string; tasks: MachineTask[]; activity: ActivityEvent[]; notes: MachineNote[]; jobs: RemoteJob[]; results: RemoteResult[]; workers: Array<{ id: string; name: string; available?: boolean; note?: string }> }
 
 /** This machine's side of remote work, kept in jobs.json. */
 export interface JobBook {
@@ -97,7 +97,7 @@ export function localMachineData(root: string): MachineData {
   const activity = readActivity(root, 100).map((e) => ({ ...e, text: r(e.text) }));
   const book = readJobs(root);
   const jobs = book.out.filter((j) => !j.applied).map(({ task: _task, applied: _applied, ...j }) => ({ ...j, objective: r(j.objective) }));
-  return { machine: machineName(), at: new Date().toISOString(), tasks, activity, notes, jobs, results: book.results.map((x) => ({ ...x, note: r(x.note) })), workers: listWorkers(root).filter((w) => w.available && !w.id.includes(".")).map((w) => ({ id: w.id, name: w.name })) };
+  return { machine: machineName(), at: new Date().toISOString(), tasks, activity, notes, jobs, results: book.results.map((x) => ({ ...x, note: r(x.note) })), workers: listWorkers(root).filter((w) => !w.id.includes(".")).map((w) => ({ id: w.id, name: w.name, available: w.available, ...(w.note ? { note: r(w.note) } : {}) })) };
 }
 
 /** Clamps whatever a peer sent, and puts its own name on it. */
@@ -112,7 +112,7 @@ function clean(machine: string, data: Partial<MachineData>): MachineData {
     notes: list<MachineNote>(data.notes, 50).map((n) => ({ id: text(n?.id, 200), title: text(n?.title, 200), markdown: text(n?.markdown, 8000) })),
     // Ids end up in Git ref names and "from" is always the sender: nothing here is taken on trust.
     jobs: list<RemoteJob>(data.jobs, 50).filter((j) => /^[A-Za-z0-9_-]{1,40}$/.test(String(j?.id)) && /^[0-9a-f]{40}$/.test(String(j?.base))).map((j) => ({ id: j.id, from: machine, to: text(j.to, 40), agent: text(j.agent, 100), objective: text(j.objective, 2000), base: j.base, at: text(j.at, 40) })),
-    workers: list<{ id: string; name: string }>(data.workers, 30).map((w) => ({ id: text(w?.id, 60), name: text(w?.name, 80) })).filter((w) => /^[A-Za-z0-9_.-]+$/.test(w.id) && w.name),
+    workers: list<{ id: string; name: string; available?: boolean; note?: string }>(data.workers, 30).map((w) => ({ id: text(w?.id, 60), name: text(w?.name, 80), available: w?.available !== false, ...(w?.note ? { note: text(w.note, 200) } : {}) })).filter((w) => /^[A-Za-z0-9_.-]+$/.test(w.id) && w.name),
     results: list<RemoteResult>(data.results, 200).filter((x) => /^[A-Za-z0-9_-]{1,40}$/.test(String(x?.job))).map((x) => ({ job: x.job, machine, state: x.state === "ready" ? "ready" : "failed", note: text(x.note, 500), at: text(x.at, 40) })),
   };
 }

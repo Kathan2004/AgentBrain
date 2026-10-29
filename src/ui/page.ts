@@ -159,7 +159,7 @@ function color(id){if(id==='developer')return 'var(--ink)';if(id==='agentbrain'|
 var NAMES={'claude-code':'Claude Code','vscode':'Copilot (VS Code)','codex':'Codex','gemini':'Gemini','cursor':'Cursor','copilot':'Copilot CLI','aider':'Aider','developer':'You','agentbrain':'AgentBrain','council':'Council','ollama':'Local model'};
 function name(id){var i=id.indexOf('.');if(i>0){var p=id.slice(0,i),t=id.slice(i+1);return (NAMES[p]||p)+' · '+t}return NAMES[id]||id}
 /* Tier workers (ids with a dot) are internal: pickers show the platform once. */
-function remoteWorkers(){var out=[];((machinesData&&machinesData.machines)||[]).forEach(function(m){(m.workers||[]).forEach(function(w){out.push({value:m.machine+':'+w.id,label:m.machine+': '+w.name})})});return out}
+function remoteWorkers(){var out=[];((machinesData&&machinesData.machines)||[]).forEach(function(m){(m.workers||[]).forEach(function(w){if(w.available!==false)out.push({value:m.machine+':'+w.id,label:m.machine+': '+w.name})})});return out}
 function pickableWorkers(){return S.workers.filter(function(w){return w.id.indexOf('.')<0})}
 function pickableAgents(){return S.knownAgents.filter(function(a){return a.indexOf('.')<0})}
 /* The models a platform hands work to (its name already carries the lead model), limited to those in use. */
