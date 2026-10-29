@@ -59,6 +59,8 @@ export interface TaskState {
   request?: string;
   /** Worker selected by delegation and when it was selected. */
   delegatedTo?: { worker: string; at: string };
+  /** Taken on for another machine: it is reviewed and merged there, never here. */
+  forMachine?: string;
   /** When autopilot handed on a sent-back task: the `at` of the send-back event, so it happens once per send-back. */
   sentBackResumed?: string;
   /** When autopilot last retried a waiting task (retryWaiting): at most once every 5 minutes. */

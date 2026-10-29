@@ -372,7 +372,17 @@ agentbrain machines [--json]             # the other machines, their tasks and w
 agentbrain leave                         # stop syncing with the hub (same as join --leave)
 ```
 
-Peers push their tasks, recent activity and kept vault notes to the hub and pull everyone else's every 15 seconds; the control room's Machines view shows them, with agents labelled `machine:agent`. Code never moves through the hub, only Git, and everything shared is redacted first. Peer tokens travel in clear text over `http://`, so use a network you trust (a Tailscale tailnet works well) or an `https://` proxy.
+Peers push their tasks, recent activity and kept vault notes to the hub and pull everyone else's every 15 seconds; the control room's Machines view shows them, with agents labelled `machine:agent`. Code never moves through the hub, only Git, and everything shared is redacted first.
+
+Run an agent on another machine with `agentbrain delegate "<task>" --agent <machine>:<agent>` (or pick `machine: agent` in the control room). The other machine works in its own checkout, pushes a branch to the shared `origin`, and this machine fetches it and reviews it like any other result. The task is reviewed and merged only here; the other machine closes its copy without merging. Both machines need the same `origin`, and your commit must be pushed first.
+
+```
+agentbrain accept on | off               # whether other machines may start agents here (off by default)
+```
+
+**Accepting lets peers start agents on this machine with prompts of their own, and those agents run with this machine's permissions setting.** Turn it on only for machines you trust.
+
+Peer tokens travel in clear text over `http://`, so use a network you trust (a Tailscale tailnet works well) or an `https://` proxy.
 
 ## Use it
 

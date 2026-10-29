@@ -346,7 +346,7 @@ export function computeTally(root: string, task: TaskState): Tally {
 
 export function pendingReviews(root: string): TaskState[] {
   return listTasks(root)
-    .filter((t) => t.status === "review")
+    .filter((t) => t.status === "review" && !t.forMachine)
     .sort((a, b) =>
       reviewPriority(b) - reviewPriority(a) ||
       (a.review?.requestedAt ?? a.updatedAt ?? "").localeCompare(b.review?.requestedAt ?? b.updatedAt ?? ""),

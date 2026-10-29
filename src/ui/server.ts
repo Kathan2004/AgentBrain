@@ -30,6 +30,7 @@ import { chatBrief, sharedContext } from "../core/context.js";
 import { claudeBinary, codexBinary, delegate, setDefaultWorker } from "../core/delegate.js";
 import { printAgent, runChat } from "../core/printrun.js";
 import { openUrl } from "../core/platform.js";
+import { collectResults, serveJobs } from "../core/remote.js";
 import { hubExchange, hubLink, listPeers, localMachineData, peerForToken, remoteMachines, syncWithHub } from "../core/peers.js";
 import { connectConnector, detectConnectors, disconnectConnector } from "../core/connectors.js";
 
@@ -391,6 +392,8 @@ export async function startUiServer(
   let syncing = false;
   let lastSyncError: string | undefined;
   const peerTimer = options.self ? setInterval(() => {
+    // The hub gets other machines' jobs and results pushed to it, so it works on them too.
+    try { collectResults(root); serveJobs(root, options.self!); } catch { /* the next tick tries again */ }
     if (syncing || !hubLink(root)) return;
     syncing = true;
     syncWithHub(root).then(() => {

@@ -60,7 +60,7 @@ import { claudeHooksInstalled, handleClaudeHook, installClaudeHooks, uninstallCl
 import { computeTally, faultTolerance, getLead, pendingReviews, readReputation, reviewPolicy, reviewSummary, reviewTask, setChecks, setCouncil, setLead, verifyTask } from "../core/review.js";
 import { defaultNotificationSender, watchNotifications } from "../core/notify.js";
 import { snapshot as liveSnapshot } from "../ui/model.js";
-import { addPeer, hubLink, joinHub, leaveHub, listPeers, remoteMachines, revokePeer, syncWithHub } from "../core/peers.js";
+import { readJobs, writeJobs, addPeer, hubLink, joinHub, leaveHub, listPeers, remoteMachines, revokePeer, syncWithHub } from "../core/peers.js";
 
 const USAGE = `
 AgentBrain 0.15 — one console for every coding agent: delegate, review, remember
@@ -70,6 +70,7 @@ Control plane
                                           connect every agent, stream their activity, open the control room
   agentbrain on --share                   Also let other machines join this control room as peers (listens beyond this machine)
   agentbrain peers [add <name> | revoke <name>]  List, add (prints a one-time peer token) or revoke peers
+  agentbrain accept [on | off]            Let other machines start agents here (agentbrain delegate --agent <machine>:<agent>)
   agentbrain join <url> --token <peer-token>     Join another machine's shared control room; leave: agentbrain join --leave
   agentbrain leave                        Same as join --leave
   agentbrain machines [--json]            Other machines seen through the hub: last sync and task counts
@@ -1050,6 +1051,14 @@ function peers(action?: string, name?: string): void {
   } else throw new Error("Usage: agentbrain peers [list | add <name> | revoke <name>]");
 }
 
+function remoteAccept(setting?: string): void {
+  const cwd = root();
+  const book = readJobs(cwd);
+  if (setting === "on" || setting === "off") writeJobs(cwd, { ...book, accept: setting === "on" });
+  else if (setting) throw new Error("Usage: agentbrain accept [on | off]");
+  console.log(`Other machines ${readJobs(cwd).accept ? "may" : "may not"} start agents here.`);
+}
+
 async function join(url?: string): Promise<void> {
   const cwd = root();
   if (flags.leave) { console.log(leaveHub(cwd) ? "✓ Left the hub" : "  Not joined to a hub"); return; }
@@ -1063,13 +1072,13 @@ function machines(): void {
   const list = remoteMachines(root()).map((m) => {
     const counts: Record<string, number> = {};
     for (const t of m.tasks) counts[t.status] = (counts[t.status] ?? 0) + 1;
-    return { name: m.machine, syncedAt: m.at, tasks: counts };
+    return { name: m.machine, syncedAt: m.at, tasks: counts, workers: (m.workers ?? []).map((w) => `${m.machine}:${w.id}`) };
   });
   if (flags.json) return console.log(JSON.stringify(list, null, 2));
   if (!list.length) return console.log("No other machines. Join a hub with `agentbrain join <url> --token <peer-token>`.");
   for (const m of list) {
     const mins = Math.max(0, Math.round((Date.now() - Date.parse(m.syncedAt)) / 60_000));
-    console.log(`${m.name}  synced ${mins} min ago  ${Object.entries(m.tasks).map(([s, n]) => `${n} ${s}`).join(", ") || "no tasks"}`);
+    console.log(`${m.name}  synced ${mins} min ago  ${Object.entries(m.tasks).map(([s, n]) => `${n} ${s}`).join(", ") || "no tasks"}${m.workers.length ? `  agents: ${m.workers.join(", ")}` : ""}`);
   }
 }
 
@@ -1545,6 +1554,8 @@ async function main(): Promise<void> {
     await on();
   } else if (command === "peers") {
     peers(subcommand, rest[0]);
+  } else if (command === "accept") {
+    remoteAccept(subcommand);
   } else if (command === "join") {
     await join(subcommand);
   } else if (command === "leave") {

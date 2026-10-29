@@ -14,6 +14,7 @@ import { limitReason, quotaReason } from "./limits.js";
 import type { TaskState } from "./state.js";
 import { getProject, getTask, listTasks, saveProject, saveTask } from "./store.js";
 import { addWorktree } from "./worktree.js";
+import { delegateRemote } from "./remote.js";
 import { activeModels, builderFor, ESCALATE_AFTER, escalation } from "./models.js";
 import { localModel, localModelRoom, ollamaBinary, ollamaModels } from "./ollama.js";
 
@@ -360,6 +361,11 @@ export function delegate(
   input: { prompt?: string; taskId?: string; worker?: string; parent?: string; requestedBy?: string; why?: string },
   self: { command: string; args: string[] },
 ): DelegateResult {
+  if (input.worker?.includes(":")) {
+    const { task, job } = delegateRemote(root, { worker: input.worker, ...(input.prompt ? { prompt: input.prompt } : {}), ...(input.taskId ? { taskId: input.taskId } : {}), ...(input.requestedBy ? { requestedBy: input.requestedBy } : {}) });
+    const worker: Worker = { id: input.worker, name: `${job.agent} on ${job.to}`, how: "pull", installed: true, available: true };
+    return { task, worker, why: "it runs on another machine and pushes a branch", log: "" };
+  }
   const mention: { worker?: string; prompt?: string } = input.prompt ? parseMention(input.prompt) : {};
   // An @mention in the prompt beats the selected agent.
   const ranked = rankWorkers(root);
