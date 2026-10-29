@@ -7,7 +7,7 @@ import { createTask, updateTask } from "../src/core/actions.js";
 import { delegate } from "../src/core/delegate.js";
 import { collectResults, serveJobs } from "../src/core/remote.js";
 import { pendingReviews } from "../src/core/review.js";
-import { addPeer, hubLink, joinHub, listPeers, localMachineData, readJobs, writeJobs, remoteMachines, revokePeer, syncWithHub } from "../src/core/peers.js";
+import { addPeer, hubLink, joinHub, listPeers, localMachineData, machineName, readJobs, writeJobs, remoteMachines, revokePeer, syncWithHub } from "../src/core/peers.js";
 import { getTask, initStore } from "../src/core/store.js";
 import { startUiServer } from "../src/ui/server.js";
 import { tempRepo } from "./helpers.js";
@@ -33,6 +33,25 @@ describe("peers", () => {
       await expect(syncWithHub(peer)).rejects.toThrow(/rejected/);
       expect(remoteMachines(hub)).toEqual([]);
     } finally { await server.close(); }
+  });
+
+  it("takes its machine name from the hub, without AGENTBRAIN_MACHINE", async () => {
+    const hub = tempRepo("ab-hub-"); initStore(hub);
+    const peer = tempRepo("ab-peer-"); initStore(peer);
+    const server = await startUiServer(hub, { port: 0, share: true });
+    const saved = process.env.AGENTBRAIN_MACHINE;
+    delete process.env.AGENTBRAIN_MACHINE;
+    try {
+      const { token } = addPeer(hub, "laptop2");
+      joinHub(peer, server.url.split("#")[0], token);
+      await syncWithHub(peer);
+      expect(hubLink(peer)?.name).toBe("laptop2");
+      expect(machineName(peer)).toBe("laptop2");
+      expect(localMachineData(peer).machine).toBe("laptop2");
+    } finally {
+      if (saved !== undefined) process.env.AGENTBRAIN_MACHINE = saved;
+      await server.close();
+    }
   });
 
   it("redacts secrets before anything leaves the machine", () => {

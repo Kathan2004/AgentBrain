@@ -27,7 +27,7 @@ export function delegateRemote(root: string, input: { worker: string; prompt?: s
 
   const task = input.taskId ? getTask(root, input.taskId) : createTask(root, input.prompt ?? "");
   const objective = input.prompt && input.taskId ? input.prompt : task.objective;
-  const job = { id: randomBytes(6).toString("hex"), from: machineName(), to: machine, agent, objective, base, at: new Date().toISOString() };
+  const job = { id: randomBytes(6).toString("hex"), from: machineName(root), to: machine, agent, objective, base, at: new Date().toISOString() };
   const book = readJobs(root);
   writeJobs(root, { ...book, out: [...book.out, { ...job, task: task.id }] });
   const updated = updateTask(root, task.id, { status: "running", next: `Waiting for ${input.worker} to push its branch` });
@@ -40,7 +40,7 @@ export function delegateRemote(root: string, input: { worker: string; prompt?: s
 export function serveJobs(root: string, self: { command: string; args: string[] }): void {
   const book = readJobs(root);
   if (!book.accept) return;
-  const me = machineName();
+  const me = machineName(root);
   for (const job of remoteMachines(root).flatMap((m) => m.jobs ?? [])) {
     if (job.to !== me || book.taken[job.id] || book.results.some((r) => r.job === job.id)) continue;
     const fail = (note: string) => book.results.push({ job: job.id, machine: me, state: "failed", note, at: new Date().toISOString() });

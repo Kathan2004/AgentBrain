@@ -43,8 +43,9 @@ const hubFile = (root: string) => path.join(brainDir(root), "hub.json");
 const remoteDir = (root: string) => path.join(brainDir(root), "remote");
 const hash = (token: string) => createHash("sha256").update(token).digest();
 
-export function machineName(): string {
-  const name = process.env.AGENTBRAIN_MACHINE || os.hostname();
+/** AGENTBRAIN_MACHINE if set, else the name the hub knows this peer by (given root), else the hostname. */
+export function machineName(root?: string): string {
+  const name = process.env.AGENTBRAIN_MACHINE || (root && hubLink(root)?.name) || os.hostname();
   return name.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^[.]+/, "").slice(0, 40) || "machine";
 }
 
@@ -61,7 +62,7 @@ export function listPeers(root: string): Peer[] {
 export function addPeer(root: string, name: string): { peer: Peer; token: string } {
   safeName(name);
   const peers = listPeers(root);
-  if (peers.some((p) => p.name === name) || name === machineName()) throw new Error(`A machine called "${name}" already exists.`);
+  if (peers.some((p) => p.name === name) || name === machineName(root)) throw new Error(`A machine called "${name}" already exists.`);
   const token = randomBytes(24).toString("hex");
   const peer = { name, tokenHash: hash(token).toString("hex"), createdAt: new Date().toISOString() };
   writeJson(peersFile(root), [...peers, peer]);
@@ -97,7 +98,7 @@ export function localMachineData(root: string): MachineData {
   const activity = readActivity(root, 100).map((e) => ({ ...e, text: r(e.text) }));
   const book = readJobs(root);
   const jobs = book.out.filter((j) => !j.applied).map(({ task: _task, applied: _applied, ...j }) => ({ ...j, objective: r(j.objective) }));
-  return { machine: machineName(), at: new Date().toISOString(), tasks, activity, notes, jobs, results: book.results.map((x) => ({ ...x, note: r(x.note) })), workers: listWorkers(root).filter((w) => w.available && !w.id.includes(".")).map((w) => ({ id: w.id, name: w.name })) };
+  return { machine: machineName(root), at: new Date().toISOString(), tasks, activity, notes, jobs, results: book.results.map((x) => ({ ...x, note: r(x.note) })), workers: listWorkers(root).filter((w) => w.available && !w.id.includes(".")).map((w) => ({ id: w.id, name: w.name })) };
 }
 
 /** Clamps whatever a peer sent, and puts its own name on it. */
@@ -133,10 +134,11 @@ export function remoteMachines(root: string): MachineData[] {
 export function hubExchange(root: string, peer: Peer, pushed: Partial<MachineData>): { you: string; machine: string; machines: MachineData[] } {
   storeMachines(root, [clean(peer.name, pushed)], false);
   writeJson(peersFile(root), listPeers(root).map((p) => (p.name === peer.name ? { ...p, lastSeen: new Date().toISOString() } : p)));
-  return { you: peer.name, machine: machineName(), machines: [localMachineData(root), ...remoteMachines(root).filter((m) => m.machine !== peer.name)] };
+  return { you: peer.name, machine: machineName(root), machines: [localMachineData(root), ...remoteMachines(root).filter((m) => m.machine !== peer.name)] };
 }
 
-export interface HubLink { url: string; token: string }
+/** `name` is what the hub calls this peer, learned on the first sync. */
+export interface HubLink { url: string; token: string; name?: string }
 
 export function hubLink(root: string): HubLink | undefined {
   try { return readJson<HubLink>(hubFile(root)); } catch { return undefined; }
@@ -172,6 +174,10 @@ export async function syncWithHub(root: string): Promise<number> {
   if (response.status === 403) throw new Error("The hub rejected this machine's token (revoked?).");
   if (!response.ok) throw new Error(`The hub answered ${response.status}.`);
   const { you, machines } = (await response.json()) as { you: string; machine: string; machines: MachineData[] };
+  if (typeof you === "string" && you !== link.name) {
+    writeJson(hubFile(root), { ...link, name: safeName(you) });
+    fs.chmodSync(hubFile(root), 0o600);
+  }
   const others = (Array.isArray(machines) ? machines : []).filter((m) => typeof m?.machine === "string" && m.machine !== you).map((m) => clean(safeName(m.machine), m));
   storeMachines(root, others, true);
   return others.length;

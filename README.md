@@ -372,6 +372,8 @@ agentbrain machines [--json]             # the other machines, their tasks and w
 agentbrain leave                         # stop syncing with the hub (same as join --leave)
 ```
 
+A peer goes by the name it was added under (`laptop` above), which it learns from the hub on its first sync; nothing needs setting on the peer itself.
+
 Peers push their tasks, recent activity and kept vault notes to the hub and pull everyone else's every 15 seconds; the control room's Machines view shows them, with agents labelled `machine:agent`. Code never moves through the hub, only Git, and everything shared is redacted first.
 
 Run an agent on another machine with `agentbrain delegate "<task>" --agent <machine>:<agent>` (or pick `machine: agent` in the control room). The other machine works in its own checkout, pushes a branch to the shared `origin`, and this machine fetches it and reviews it like any other result. The task is reviewed and merged only here; the other machine closes its copy without merging. Both machines need the same `origin`, and your commit must be pushed first.
