@@ -13,6 +13,8 @@ export interface UiState {
   url: string;
   startedAt: string;
   firstOpened?: string;
+  /** Listening beyond this machine, so peers can join. */
+  share?: boolean;
 }
 
 export function uiStateFile(root: string): string {
@@ -32,9 +34,9 @@ function alive(pid: number): boolean {
  * Written by the server itself once it is listening. Holds the access token, so it is owner-only, and it
  * stays after the server stops so the next start reuses the token (runningUi checks the pid).
  */
-export function writeUiState(root: string, url: string): void {
+export function writeUiState(root: string, url: string, share = false): void {
   const file = uiStateFile(root);
-  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, url, startedAt: new Date().toISOString(), firstOpened: firstOpened(root) ?? new Date().toISOString() } satisfies UiState), { mode: 0o600 });
+  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, url, startedAt: new Date().toISOString(), firstOpened: firstOpened(root) ?? new Date().toISOString(), ...(share ? { share } : {}) } satisfies UiState), { mode: 0o600 });
 }
 
 export function runningUi(root: string): UiState | null {
@@ -47,11 +49,11 @@ export function runningUi(root: string): UiState | null {
 }
 
 /** Starts `agentbrain ui` detached and waits until it reports its URL. */
-export async function startUiDaemon(root: string, command: string, args: string[], timeoutMs = 15_000): Promise<UiState> {
+export async function startUiDaemon(root: string, command: string, args: string[], timeoutMs = 15_000, share = false): Promise<UiState> {
   const existing = runningUi(root);
   if (existing) return existing;
   const log = fs.openSync(path.join(brainDir(root), "ui.log"), "a");
-  const child = spawn(command, [...args, "ui"], { cwd: root, detached: true, stdio: ["ignore", log, log] });
+  const child = spawn(command, [...args, "ui", ...(share ? ["--share"] : [])], { cwd: root, detached: true, stdio: ["ignore", log, log] });
   child.unref();
   fs.closeSync(log);
   const deadline = Date.now() + timeoutMs;
@@ -80,9 +82,9 @@ export function codeRebuilt(startMtimeMs: number, previous: { mtimeMs: number; s
  * itself after a rebuild, so the spawned process is told (via AGENTBRAIN_UI_RESTART) to skip
  * the "already running" check: the process it is replacing is still alive, mid-shutdown.
  */
-export async function restartUiDaemon(root: string, command: string, args: string[], port: number, timeoutMs = 15_000): Promise<UiState> {
+export async function restartUiDaemon(root: string, command: string, args: string[], port: number, share = false, timeoutMs = 15_000): Promise<UiState> {
   const log = fs.openSync(path.join(brainDir(root), "ui.log"), "a");
-  const child = spawn(command, [...args, "ui", "--port", String(port)], {
+  const child = spawn(command, [...args, "ui", "--port", String(port), ...(share ? ["--share"] : [])], {
     cwd: root,
     detached: true,
     stdio: ["ignore", log, log],

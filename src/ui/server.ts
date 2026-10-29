@@ -30,6 +30,7 @@ import { chatBrief, sharedContext } from "../core/context.js";
 import { claudeBinary, codexBinary, delegate, setDefaultWorker } from "../core/delegate.js";
 import { printAgent, runChat } from "../core/printrun.js";
 import { openUrl } from "../core/platform.js";
+import { hubExchange, hubLink, listPeers, localMachineData, peerForToken, remoteMachines, syncWithHub } from "../core/peers.js";
 import { connectConnector, detectConnectors, disconnectConnector } from "../core/connectors.js";
 
 /** Each chat message runs a fresh agent, so the conversation so far rides along with the new message. */
@@ -60,13 +61,13 @@ function outsideRoot(root: string, file: string): boolean {
   return rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel);
 }
 
-function readBody(request: IncomingMessage): Promise<string> {
+function readBody(request: IncomingMessage, limit = 1_000_000): Promise<string> {
   return new Promise((resolve, reject) => {
     let body = "";
     request.setEncoding("utf8");
     request.on("data", (chunk: string) => {
       body += chunk;
-      if (body.length > 1_000_000) reject(new Error("request body too large"));
+      if (body.length > limit) reject(new Error("request body too large"));
     });
     request.on("end", () => resolve(body));
     request.on("error", reject);
@@ -92,6 +93,8 @@ export async function startUiServer(
     self?: { command: string; args: string[] };
     /** How agents' config files should start AgentBrain (connectors). */
     config?: { command: string; args: string[] };
+    /** Listen beyond this machine so peers can join (`agentbrain on --share`). Only the peer endpoint is reachable from there: everything else still needs this machine's Host and the access token. */
+    share?: boolean;
   } = {},
 ): Promise<UiServer> {
   const token = options.token && /^[0-9a-f]{48}$/.test(options.token) ? options.token : randomBytes(24).toString("hex");
@@ -186,6 +189,14 @@ export async function startUiServer(
   const handler = async (request: IncomingMessage, response: ServerResponse) => {
     let url: URL;
     try { url = dashboardUrl(request); } catch { response.writeHead(400).end(); return; }
+    if (url.pathname === "/api/peer/sync" && request.method === "POST") {
+      // Peers have their own revocable token, checked on every push.
+      const given = request.headers["x-agentbrain-peer"];
+      const peer = peerForToken(root, typeof given === "string" ? given : undefined);
+      if (!peer) { response.writeHead(403).end("Forbidden"); return; }
+      try { return json(response, hubExchange(root, peer, JSON.parse(await readBody(request, 5_000_000)))); }
+      catch (error) { return json(response, { error: error instanceof Error ? error.message : String(error) }, 400); }
+    }
     const isApi = url.pathname.startsWith("/api/");
     if (isApi && !authorized(request, url)) { response.writeHead(403).end("Forbidden"); return; }
     if (request.method === "POST" && request.headers.origin && request.headers.origin !== origin()) {
@@ -226,6 +237,10 @@ export async function startUiServer(
         if (url.pathname.endsWith("/disconnect")) return json(response, { ok: true, changed: disconnectConnector(root, body.id) });
         const cmd = options.config ?? options.self ?? { command: "agentbrain", args: [] };
         return json(response, { ok: true, ...connectConnector(root, body.id, cmd.command, [...cmd.args, "mcp"]) });
+      }
+      if (url.pathname === "/api/machines" && request.method === "GET") {
+        const lastSync = remoteMachines(root);
+        return json(response, { self: localMachineData(root).machine, shared: Boolean(options.share), hub: hubLink(root)?.url ?? null, peers: listPeers(root).map((p) => ({ name: p.name, createdAt: p.createdAt, lastSeen: p.lastSeen })), machines: lastSync });
       }
       if (url.pathname === "/api/git" && request.method === "GET") return json(response, await gitGraph(root));
       if (url.pathname === "/api/git/fetch" && request.method === "POST") return json(response, await gitFetch(root));
@@ -353,25 +368,43 @@ export async function startUiServer(
     }
   };
 
+  const bindHost = options.share ? "0.0.0.0" : "127.0.0.1";
   server = createServer((request, response) => { void handler(request, response); });
   await new Promise<void>((resolve, reject) => {
     const onError = (error: NodeJS.ErrnoException) => {
       if (error.code === "EADDRINUSE" && options.port === undefined) {
         // Default port busy: take any free one, and check requests against it.
-        server.listen(0, "127.0.0.1", () => {
+        server.listen(0, bindHost, () => {
           actualPort = (server.address() as { port: number }).port;
           resolve();
         });
       } else reject(error);
     };
     server.once("error", onError);
-    server.listen(actualPort, "127.0.0.1", () => {
+    server.listen(actualPort, bindHost, () => {
       actualPort = (server.address() as { port: number }).port;
       resolve();
     });
   });
   let codeWatchTimer: NodeJS.Timeout | undefined;
+  // Joined to a hub: push this machine's summary and pull the others' every 15 seconds.
+  let syncing = false;
+  let lastSyncError: string | undefined;
+  const peerTimer = options.self ? setInterval(() => {
+    if (syncing || !hubLink(root)) return;
+    syncing = true;
+    syncWithHub(root).then(() => {
+      if (lastSyncError) recordActivity(root, { agent: "agentbrain", kind: "status", text: "Sync with the hub recovered" });
+      lastSyncError = undefined;
+    }, (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message !== lastSyncError) recordActivity(root, { agent: "agentbrain", kind: "status", text: `Sync with the hub failed: ${message}` });
+      lastSyncError = message;
+    }).finally(() => { syncing = false; });
+  }, 15_000) : undefined;
+  peerTimer?.unref();
   const shutdown = async () => {
+    if (peerTimer) clearInterval(peerTimer);
     if (codeWatchTimer) clearInterval(codeWatchTimer);
     stopWatching();
     diskEdits.stop();
@@ -398,7 +431,7 @@ export async function startUiServer(
         void (async () => {
           try {
             await shutdown();
-            await restartUiDaemon(root, self.command, self.args, actualPort);
+            await restartUiDaemon(root, self.command, self.args, actualPort, options.share);
             recordActivity(root, { agent: "agentbrain", kind: "status", text: "Control room restarted on new code" });
           } catch (error) {
             // This process has already shut down: say so, rather than vanish.

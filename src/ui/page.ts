@@ -170,7 +170,7 @@ function workerName(){var w=S.workers.filter(function(x){return x.id===S.worker}
 
 /* ---------- navigation ---------- */
 function setTab(t){view=t==='tasks'?'task':t;localSet('view',view==='task'?'home':view);render()}
-var ICONS={git:'<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10M18 9c0 5-12 3-12 8"/>',home:'<path d="M4 6h16M4 12h10M4 18h7"/><path d="m15 17 2 2 4-4"/>',activity:'<path d="M3 12h4l3-8 4 16 3-8h4"/>',brain:'<circle cx="6" cy="7" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="12" cy="17" r="2"/><path d="M8 7h8M7 9l4 6.5M17 9l-4 6.5"/>',connectors:'<path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v5"/>',settings:'<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>'};
+var ICONS={git:'<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10M18 9c0 5-12 3-12 8"/>',home:'<path d="M4 6h16M4 12h10M4 18h7"/><path d="m15 17 2 2 4-4"/>',activity:'<path d="M3 12h4l3-8 4 16 3-8h4"/>',brain:'<circle cx="6" cy="7" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="12" cy="17" r="2"/><path d="M8 7h8M7 9l4 6.5M17 9l-4 6.5"/>',machines:'<rect x="3" y="4" width="18" height="11" rx="2"/><path d="M8 20h8M12 15v5"/>',connectors:'<path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0z"/><path d="M12 16v5"/>',settings:'<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>'};
 var liveOff=false,lastSide='',lastRail='';
 function dotClass(t){var st=t.status;if(st==='review')return 'rev';if(st==='running'||st==='checkpoint')return 'run';if(st==='handoff'||st==='idle')return 'wait';if(st==='blocked'||st==='failed')return 'bad';return /^Closed/.test(t.nextAction||'')?'closed':'done'}
 function sideItem(t){return '<button class="titem'+(view==='task'&&selectedTask===t.id?' on':'')+'" data-open="'+esc(t.id)+'" title="'+esc(t.objective)+'"><span class="sdot '+dotClass(t)+'"></span><span class="tt">'+esc(shortTitle(t.objective))+'</span><span class="ta">'+esc(ago(t.updatedAt).replace(' ago',''))+'</span></button>'}
@@ -179,7 +179,7 @@ function renderSide(){
   var el=document.getElementById('side');
   var review=S.tasks.filter(function(t){return t.status==='review'});var active=S.tasks.filter(function(t){return ['running','checkpoint','handoff','idle','blocked','failed'].indexOf(t.status)>=0});
   var recent=S.tasks.filter(function(t){return t.status==='done'}).sort(function(a,b){return (b.updatedAt||'').localeCompare(a.updatedAt||'')}).slice(0,8);
-  var tabs=[['home','Tasks'],['activity','Activity'],['brain','Brain'],['git','Git'],['connectors','Connectors'],['settings','Settings']];
+  var tabs=[['home','Tasks'],['activity','Activity'],['brain','Brain'],['git','Git'],['machines','Machines'],['connectors','Connectors'],['settings','Settings']];
   // Built once; afterwards only classes and text change, so nothing is replaced under the pointer.
   if(!el.querySelector('.navs')){
     el.innerHTML='<div class="brand"><span class="mark">✻</span><span class="bname">AgentBrain</span><span class="proj"></span><span class="live" id="live"></span><button class="ptog" id="sideBtn" aria-label="Toggle sidebar"><svg viewBox="0 0 24 24" width="16" height="16"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 4.5v15"/></svg></button></div>'+
@@ -373,6 +373,25 @@ function renderActivity(){
   var st=storyHtml(list,true,true);
   h+=st?'<div class="card" style="padding:4px 16px">'+st+'</div>':'<div class="empty">Nothing yet. What agents think, and the prompts, edits, commands, progress, handoffs and verdicts that follow, show up here.</div>';
   var m=document.getElementById('main');m.innerHTML=h;m.querySelectorAll('[data-af]').forEach(function(b){b.onclick=function(){agentFilter=b.dataset.af||null;renderActivity()}});m.querySelectorAll('.story [data-open]').forEach(function(b){b.onclick=function(){selectedTask=b.dataset.open;detailTab='changes';detailKey='';setTab('tasks')}});m.querySelectorAll('.story .thought').forEach(function(el){if(el.scrollHeight>el.clientHeight+4)el.title='Click to expand';el.onclick=function(){el.classList.toggle('open')}});
+}
+
+/* ---------- machines ---------- */
+var machinesData=null,machinesAt=0;
+function renderMachines(){
+  var m=document.getElementById('main');
+  if(!machinesData||Date.now()-machinesAt>10000){machinesAt=Date.now();api('/api/machines').then(function(d){if(!d||d.error)return;machinesData=d;if(view==='machines')renderMachines()}).catch(function(){})}
+  var d=machinesData;var h='<div class="pagehead"><h1>Machines</h1><span class="sub">other computers sharing this control room; only summaries travel, code moves through Git</span></div>';
+  if(!d){m.innerHTML=h+'<div class="empty">Loading…</div>';return}
+  h+='<div class="card"><div class="title">'+esc(d.self)+' <span class="sub">· this machine'+(d.shared?' · shared as a hub':'')+'</span></div>'+(d.hub?'<div class="sub">Joined to '+esc(d.hub)+'</div>':'')+(!d.shared&&!d.hub?'<div class="sub">Not shared. Run <span class="mono">agentbrain on --share</span> to let other machines join, or <span class="mono">agentbrain join &lt;url&gt; --token &lt;peer-token&gt;</span> to join one.</div>':'')+'</div>';
+  if(d.peers.length)h+='<div class="card"><div class="title">Peers</div>'+d.peers.map(function(p){return '<div class="sub">'+esc(p.name)+' · '+(p.lastSeen?'last seen '+esc(ago(p.lastSeen)):'never connected')+' · revoke with <span class="mono">agentbrain peers revoke '+esc(p.name)+'</span></div>'}).join('')+'</div>';
+  d.machines.forEach(function(x){
+    h+='<div class="card"><div class="title">'+esc(x.machine)+' <span class="sub">· synced '+esc(ago(x.at))+'</span></div>';
+    h+=x.tasks.length?x.tasks.slice(0,30).map(function(t){return '<div class="sub"><b>'+esc(t.status)+'</b> '+esc(t.objective.slice(0,140))+(t.agent?' · '+esc(x.machine+':'+name(t.agent)):'')+'</div>'}).join(''):'<div class="sub">No tasks.</div>';
+    var act=x.activity.slice(-8);if(act.length)h+='<div class="title" style="margin-top:8px">Recent activity</div>'+act.map(function(e){return '<div class="sub">'+esc(x.machine+':'+name(e.agent))+' · '+esc(e.kind)+' · '+esc(e.text.slice(0,140))+'</div>'}).join('');
+    if(x.notes.length)h+='<div class="title" style="margin-top:8px">Notes</div>'+x.notes.map(function(n){return '<div class="sub">'+esc(n.title)+'</div>'}).join('');
+    h+='</div>'});
+  if(!d.machines.length)h+='<div class="empty">No other machine has synced yet.</div>';
+  m.innerHTML=h;
 }
 
 /* ---------- connectors ---------- */
@@ -730,9 +749,9 @@ function applyPanels(){var app=document.querySelector('.app');var chatting=view=
 function toggleSide(){localSet('sideMin',localGet('sideMin')==='1'?'0':'1');applyPanels()}
 function toggleRail(){var chatting=view==='home'&&mode==='chat';var key=chatting?'railChat':'railOff';var off=document.querySelector('.app').classList.contains('rail-off');localSet(key,chatting?(off?'1':'0'):(off?'0':'1'));applyPanels()}
 function render(){if(!S)return;if(pointerDown){pendingRender=true;return}applyPanels();renderSide();renderRail();var mainEl=document.getElementById('main');mainEl.className=view+(view==='home'&&mode==='chat'?' chatmode':'');
-  if(view==='home')renderHome();else if(view==='activity')renderActivity();else if(view==='brain')renderBrainView(!document.getElementById('graph'));else if(view==='connectors')renderConnectors();else if(view==='git')renderGit();else if(view==='settings'){if(!(settings&&settings.dirty))renderSettings()}else renderTask();syncUrl()}
+  if(view==='home')renderHome();else if(view==='activity')renderActivity();else if(view==='brain')renderBrainView(!document.getElementById('graph'));else if(view==='connectors')renderConnectors();else if(view==='git')renderGit();else if(view==='machines')renderMachines();else if(view==='settings'){if(!(settings&&settings.dirty))renderSettings()}else renderTask();syncUrl()}
 // Where you are lives in the address (next to the token), so a reload, Back and Forward keep it.
-var VIEWS={home:1,activity:1,brain:1,connectors:1,git:1,settings:1};var lastRoute='';
+var VIEWS={home:1,activity:1,brain:1,connectors:1,git:1,machines:1,settings:1};var lastRoute='';
 function routeHash(){var h=token?'#token='+encodeURIComponent(token):'#';if(view==='task'&&selectedTask){h+='&task='+encodeURIComponent(selectedTask);if(detailTab&&detailTab!=='changes')h+='&tab='+encodeURIComponent(detailTab)}else if(view!=='home')h+='&v='+encodeURIComponent(view);else if(taskFilter!=='all'&&mode!=='chat')h+='&f='+encodeURIComponent(taskFilter);if(view==='activity'&&agentFilter)h+='&who='+encodeURIComponent(agentFilter);return h}
 function syncUrl(){var h=routeHash();if(h===location.hash||(h==='#'&&!location.hash))return;var where=h.replace(/&tab=.*$|&who=.*$|&f=.*$/,''),was=lastRoute;lastRoute=where;try{if(was&&where!==was)history.pushState(null,'',h);else history.replaceState(null,'',h)}catch(e){}}
 function applyRoute(){var r=parseHash();if(r.task){view='task';selectedTask=r.task;detailTab=r.tab||'changes'}else{view=VIEWS[r.v]?r.v:(r.v?'home':(localGet('view')||'home'));if(!VIEWS[view])view='home'}agentFilter=r.who||null;taskFilter={active:1,review:1}[r.f]?r.f:'all';lastRoute=routeHash().replace(/&tab=.*$|&who=.*$|&f=.*$/,'')}

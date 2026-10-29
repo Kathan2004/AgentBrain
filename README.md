@@ -359,6 +359,21 @@ every tool; and Copilot in VS Code gets `chat.tools.global.autoApprove` in this
 project's `.vscode/settings.json` (never your user settings). Agents can then run
 any command in their worktree without asking: turn it on only for projects you trust.
 
+## Several machines
+
+Share one control room as a hub and let other machines join it as peers:
+
+```
+agentbrain on --share                    # on the hub: listens beyond 127.0.0.1, only with this flag
+agentbrain peers add laptop              # prints laptop's token once; stored only as a hash
+agentbrain join http://hub:4747 --token <peer-token>   # on the other machine
+agentbrain peers list | revoke laptop    # revoking cuts the machine off at once
+agentbrain machines [--json]             # the other machines, their tasks and when they last synced
+agentbrain leave                         # stop syncing with the hub (same as join --leave)
+```
+
+Peers push their tasks, recent activity and kept vault notes to the hub and pull everyone else's every 15 seconds; the control room's Machines view shows them, with agents labelled `machine:agent`. Code never moves through the hub, only Git, and everything shared is redacted first. Peer tokens travel in clear text over `http://`, so use a network you trust (a Tailscale tailnet works well) or an `https://` proxy.
+
 ## Use it
 
 ### Five-minute walkthrough

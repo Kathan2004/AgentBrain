@@ -52,6 +52,12 @@ function sentBackEvent(root: string, task: TaskState): { at: string; by: string 
   return byReview ? { at: last.at, by: last.agent } : null;
 }
 
+/** Sent back by a review and not yet handed to an agent again: autopilot is about to resume it. */
+export function awaitingResume(root: string, task: TaskState): boolean {
+  const sent = sentBackEvent(root, task);
+  return Boolean(sent && task.sentBackResumed !== sent.at);
+}
+
 /**
  * Autopilot for sent-back work: a task a review returned goes back to an
  * agent, the one that did it first when it can (it knows the code). Once per

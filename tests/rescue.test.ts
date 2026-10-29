@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { recordActivity } from "../src/core/activity.js";
 import { createTask, takeOver, updateTask } from "../src/core/actions.js";
 import { autoContinue } from "../src/core/delegate.js";
-import { rescueStalledChats, resumeSentBack, retryWaiting } from "../src/core/rescue.js";
+import { awaitingResume, rescueStalledChats, resumeSentBack, retryWaiting } from "../src/core/rescue.js";
 import { CONFLICT_PREFIX, reviewTask, setLead } from "../src/core/review.js";
 import { getTask, initStore, saveTask } from "../src/core/store.js";
 import { stubAgent, tempRepo } from "./helpers.js";
@@ -58,8 +58,11 @@ describe("sent-back autopilot", () => {
     reviewTask(repo, id, { verdict: "changes", reviewer: "codex", notes: "Add a test" });
     expect(getTask(repo, id).status).toBe("handoff");
     expect(getTask(repo, id).events?.at(-1)?.agent).toBe("codex");
+    // `agentbrain wait` keeps waiting through this gap.
+    expect(awaitingResume(repo, getTask(repo, id))).toBe(true);
 
     expect(resumeSentBack(repo, self)).toEqual([id]);
+    expect(awaitingResume(repo, getTask(repo, id))).toBe(false);
     expect(autoContinue).toHaveBeenCalledWith(repo, id, "codex", "Add a test", self, { prefer: "vscode", sentBack: true });
     // Still handed off (nobody picked it up yet): not handed on again.
     expect(resumeSentBack(repo, self)).toEqual([]);

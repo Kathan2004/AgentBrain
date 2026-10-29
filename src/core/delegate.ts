@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { findOnPath } from "../adapters/process.js";
 import { ACP_AGENTS, builtinAdapter } from "../adapters/registry.js";
-import { createTask } from "./actions.js";
+import { createTask, updateTask } from "./actions.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { brainDir } from "./paths.js";
 import { readReputation } from "./review.js";
@@ -384,6 +384,8 @@ export function delegate(
   const why = input.why ? input.why : named && wanted !== named ? `you gave it to ${choice.worker.name.split(" · ")[0]}, which handed it to its ${busyWith(root, wanted!) ? "strongest" : "free"} ${wanted!.slice(named.length + 1)} model` : wanted ? "you asked for it" : others ? choice.reasons.join(", ") : `the only agent ready (${choice.reasons.join(", ")})`;
 
   let task = input.taskId ? getTask(root, input.taskId) : createTask(root, mention.prompt ?? "", { activate: !input.parent });
+  // Instructions given with an existing task become its next step, so they reach the worker's brief.
+  if (input.taskId && mention.prompt) task = updateTask(root, task.id, { todo: [mention.prompt], next: mention.prompt });
   if (task.waitingSince) { delete task.waitingSince; saveTask(root, task); }
   if (!input.taskId && (input.parent || input.requestedBy)) {
     const request = input.requestedBy ? developerRequest(root, input.requestedBy) : undefined;

@@ -239,6 +239,26 @@ describe("delegation", { timeout: 90_000 }, () => {
     }
   });
 
+  it("keeps instructions given with an existing task as its next step", async () => {
+    const { createTask } = await import("../src/core/actions.js");
+    const repo = tempRepo("agentbrain-delegate-");
+    initStore(repo);
+    const bin = `${repo}-bin`;
+    stubAgent(bin, "gemini", "exit 0");
+    const before = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${before}`;
+    try {
+      const created = createTask(repo, "Ship the mesh");
+      delegate(repo, { taskId: created.id, prompt: "Read peers.json first", worker: "gemini" }, { command: "node", args: [CLI] });
+      const task = getTask(repo, created.id);
+      expect(task.objective).toBe("Ship the mesh");
+      expect(task.remaining).toContain("Read peers.json first");
+      expect(task.nextAction).toBe("Read peers.json first");
+    } finally {
+      process.env.PATH = before;
+    }
+  });
+
   it("explains how to get a worker when none is installed", () => {
     const repo = tempRepo("agentbrain-delegate-");
     initStore(repo);

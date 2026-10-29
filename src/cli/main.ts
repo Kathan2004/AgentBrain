@@ -9,6 +9,7 @@ import { ACP_AGENTS, BUILTIN_AGENTS, acpAgent, builtinAdapter, customAdapter } f
 import { TOOL_KINDS, type ToolKind } from "../adapters/acp.js";
 import { requestStop, runHeadless, sendToSession, sessionControl } from "../core/headless.js";
 import { routeTask } from "../core/routing.js";
+import { awaitingResume } from "../core/rescue.js";
 import { addToQueue, readQueue, removeFromQueue, shiftQueue, SETTLED, waitUntilSettled } from "../core/queue.js";
 import { HOOK_ADAPTERS, handlePlatformHook, installHooksFor, uninstallAllHooks } from "../core/agenthooks.js";
 import { runTui } from "../ui/tui.js";
@@ -59,6 +60,7 @@ import { claudeHooksInstalled, handleClaudeHook, installClaudeHooks, uninstallCl
 import { computeTally, faultTolerance, getLead, pendingReviews, readReputation, reviewPolicy, reviewSummary, reviewTask, setChecks, setCouncil, setLead, verifyTask } from "../core/review.js";
 import { defaultNotificationSender, watchNotifications } from "../core/notify.js";
 import { snapshot as liveSnapshot } from "../ui/model.js";
+import { addPeer, hubLink, joinHub, leaveHub, listPeers, remoteMachines, revokePeer, syncWithHub } from "../core/peers.js";
 
 const USAGE = `
 AgentBrain 0.15 — one console for every coding agent: delegate, review, remember
@@ -66,6 +68,11 @@ AgentBrain 0.15 — one console for every coding agent: delegate, review, rememb
 Control plane
   agentbrain on [--no-open]               Switch AgentBrain on for this repo, from any terminal or agent:
                                           connect every agent, stream their activity, open the control room
+  agentbrain on --share                   Also let other machines join this control room as peers (listens beyond this machine)
+  agentbrain peers [add <name> | revoke <name>]  List, add (prints a one-time peer token) or revoke peers
+  agentbrain join <url> --token <peer-token>     Join another machine's shared control room; leave: agentbrain join --leave
+  agentbrain leave                        Same as join --leave
+  agentbrain machines [--json]            Other machines seen through the hub: last sync and task counts
   agentbrain off                          Stop streaming activity and close the control room
   agentbrain permissions [all | ask]      all: agents AgentBrain starts never ask for approval (incl. Copilot in VS Code)
   agentbrain lead [<agent-id> | --none]   Show or set the lead agent, who reviews every other agent's work
@@ -261,6 +268,9 @@ function parseCli() {
         force: { type: "boolean" },
         json: { type: "boolean" },
         "no-open": { type: "boolean" },
+        share: { type: "boolean" },
+        token: { type: "string" },
+        leave: { type: "boolean" },
         approve: { type: "boolean" },
         changes: { type: "string" },
         verify: { type: "boolean" },
@@ -438,7 +448,8 @@ async function wait(ids: string[]): Promise<void> {
   for (;;) {
     for (const id of [...pending]) {
       const task = getTask(cwd, id);
-      if (wanted.includes(task.status)) {
+      // A send-back is a pause, not an end: autopilot hands it straight back to an agent.
+      if (wanted.includes(task.status) && !awaitingResume(cwd, task)) {
         console.log(`${task.id}\t${task.status}\t${task.agent?.id ?? "-"}`);
         pending.delete(id);
       }
@@ -849,8 +860,8 @@ async function ui(): Promise<void> {
     console.log(`The control room is already running: ${running.url}`);
     return;
   }
-  const server = await startUiServer(cwd, { port, token: previousToken(cwd), self: selfCommand(), config: configCommand() });
-  writeUiState(cwd, server.url);
+  const server = await startUiServer(cwd, { port, token: previousToken(cwd), self: selfCommand(), config: configCommand(), share: flags.share });
+  writeUiState(cwd, server.url, flags.share);
   console.log(server.url);
   const close = () => { void server.close().finally(() => process.exit(0)); };
   process.once("SIGINT", close);
@@ -1009,8 +1020,10 @@ async function on(): Promise<void> {
   }
   const lead = getLead(cwd);
   console.log(lead ? `✓ Lead agent: ${lead}` : "  No lead agent yet: agentbrain lead claude-code   (or pick one in the control room)");
-  const ui = await startUiDaemon(cwd, self.command, self.args);
+  if (flags.share && runningUi(cwd) && !runningUi(cwd)!.share) await stopUiDaemon(cwd);
+  const ui = await startUiDaemon(cwd, self.command, self.args, undefined, flags.share);
   console.log(`✓ Control room: ${ui.url}`);
+  if (flags.share) console.log("✓ Shared: other machines can join with a peer token from `agentbrain peers add <name>`");
   if (!flags["no-open"]) openBrowser(ui.url);
   console.log("\nAgents already open pick up the MCP server after a restart (or a window reload in VS Code / Cursor).");
 }
@@ -1018,6 +1031,46 @@ async function on(): Promise<void> {
 function vault(): void {
   const folder = writeVault(root());
   console.log(`✓ Vault written to ${folder}`);
+}
+
+function peers(action?: string, name?: string): void {
+  const cwd = root();
+  if (action === "add") {
+    if (!name) throw new Error("Usage: agentbrain peers add <name>");
+    const { token } = addPeer(cwd, name);
+    console.log(`✓ Peer ${name} added. Its token is shown once:\n  ${token}\nOn that machine: agentbrain join <this control room's address> --token ${token}`);
+    console.log("The token travels in clear text unless the hub address is https://; share it only on a network you trust.");
+  } else if (action === "revoke") {
+    if (!name) throw new Error("Usage: agentbrain peers revoke <name>");
+    console.log(revokePeer(cwd, name) ? `✓ Revoked ${name}; its token no longer works` : `  No peer called ${name}`);
+  } else if (!action || action === "list") {
+    const list = listPeers(cwd);
+    if (!list.length) console.log("No peers. Add one with `agentbrain peers add <name>`.");
+    for (const p of list) console.log(`${p.name}  added ${p.createdAt}  ${p.lastSeen ? `last seen ${p.lastSeen}` : "never connected"}`);
+  } else throw new Error("Usage: agentbrain peers [list | add <name> | revoke <name>]");
+}
+
+async function join(url?: string): Promise<void> {
+  const cwd = root();
+  if (flags.leave) { console.log(leaveHub(cwd) ? "✓ Left the hub" : "  Not joined to a hub"); return; }
+  if (!url || !flags.token) throw new Error("Usage: agentbrain join <url> --token <peer-token>");
+  joinHub(cwd, url, flags.token);
+  const pulled = await syncWithHub(cwd);
+  console.log(`✓ Joined ${hubLink(cwd)!.url}; pulled ${pulled} other machine${pulled === 1 ? "" : "s"}. The control room keeps syncing while it runs.`);
+}
+
+function machines(): void {
+  const list = remoteMachines(root()).map((m) => {
+    const counts: Record<string, number> = {};
+    for (const t of m.tasks) counts[t.status] = (counts[t.status] ?? 0) + 1;
+    return { name: m.machine, syncedAt: m.at, tasks: counts };
+  });
+  if (flags.json) return console.log(JSON.stringify(list, null, 2));
+  if (!list.length) return console.log("No other machines. Join a hub with `agentbrain join <url> --token <peer-token>`.");
+  for (const m of list) {
+    const mins = Math.max(0, Math.round((Date.now() - Date.parse(m.syncedAt)) / 60_000));
+    console.log(`${m.name}  synced ${mins} min ago  ${Object.entries(m.tasks).map(([s, n]) => `${n} ${s}`).join(", ") || "no tasks"}`);
+  }
 }
 
 async function off(): Promise<void> {
@@ -1490,6 +1543,15 @@ async function main(): Promise<void> {
     await runTui(root());
   } else if (command === "on") {
     await on();
+  } else if (command === "peers") {
+    peers(subcommand, rest[0]);
+  } else if (command === "join") {
+    await join(subcommand);
+  } else if (command === "leave") {
+    flags.leave = true;
+    await join();
+  } else if (command === "machines") {
+    machines();
   } else if (command === "off") {
     await off();
   } else if (command === "permissions") {
