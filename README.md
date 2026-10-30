@@ -350,6 +350,7 @@ By default each agent keeps its own approval prompts. To stop clicking Allow
 
 ```sh
 agentbrain permissions all   # this project only; `agentbrain permissions ask` undoes it
+agentbrain autopilot off     # a run that fails or times out waits for you instead of going to the next agent
 ```
 
 Then Claude Code starts with `--permission-mode bypassPermissions`, Codex with

@@ -17,6 +17,8 @@ export interface ProjectState {
   activeTaskId?: string;
   /** Extra regexes (JavaScript syntax) whose matches are redacted from stored state. */
   redactPatterns?: string[];
+  /** false: a stopped run waits for the developer instead of going to the next agent. */
+  autopilot?: boolean;
   /** Minutes without activity before a running task counts as stalled (default 10). */
   stallMinutes?: number;
   /** Routing preferences for `agentbrain route`: agent ids, best first / never suggest. */

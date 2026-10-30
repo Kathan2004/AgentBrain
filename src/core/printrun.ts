@@ -401,7 +401,13 @@ export async function runPrint(root: string, taskId: string, agent: PrintAgent, 
 
   // Agents often finish without saying so: a clean exit with work on the branch goes to review.
   const finished = getTask(root, taskId);
-  if (!options.plan && code === 0 && finished.status === "running" && finished.agent?.sessionId === me.sessionId && hasWork(workdir, finished.worktree?.base)) {
+  // A clean exit is a result, never a reason to hand on: with no changes (a question, a check) the answer is kept on the task.
+  const mine = finished.agent?.sessionId === me.sessionId && (finished.status === "running" || finished.status === "handoff");
+  if (!options.plan && code === 0 && stopReason === "finished" && mine) {
+    const work = hasWork(workdir, finished.worktree?.base);
+    const answer = lastText.trim().slice(0, 2000);
+    updateTask(root, taskId, { status: "review", agent: me, next: work ? "Review the result" : "Read the answer; no files changed", ...(!work && answer ? { done: [`Answer from ${identity(agent)}: ${answer}`] } : {}) });
+  } else if (!options.plan && code === 0 && finished.status === "running" && finished.agent?.sessionId === me.sessionId && hasWork(workdir, finished.worktree?.base)) {
     updateTask(root, taskId, { status: "review", agent: me, next: "Review the result" });
   }
   const task = getTask(root, taskId);
@@ -410,7 +416,7 @@ export async function runPrint(root: string, taskId: string, agent: PrintAgent, 
   else closeSession(root, me, reason);
   log(`ended: ${stopReason}; task is ${getTask(root, taskId).status}`);
   // Nobody has to be watching: a run that stopped early is handed to the next agent.
-  if (!options.plan && stopReason !== "stopped by the developer" && getTask(root, taskId).status === "handoff") {
+  if (!options.plan && stopReason !== "stopped by the developer" && stopReason !== "finished" && getTask(root, taskId).status === "handoff") {
     try { autoContinue(root, taskId, identity(agent), stopReason, options.cli); } catch { /* the task stays handed off */ }
   }
   return { status: getTask(root, taskId).status, stopReason };

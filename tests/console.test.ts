@@ -348,6 +348,34 @@ echo '{"type":"result","subtype":"success","result":"Added it"}'
     const texts = readActivity(repo).filter((e) => e.agent === "claude-code").map((e) => e.text);
     expect(texts).toContain("Wrote feature.ts");
   });
+
+  it("keeps a clean run's answer and never hands the task on when nothing changed", async () => {
+    const { runPrint } = await import("../src/core/printrun.js");
+    const { createTask } = await import("../src/core/actions.js");
+    const { readActivity } = await import("../src/core/activity.js");
+    const repo = tempRepo("agentbrain-print-");
+    initStore(repo);
+    // Another ready agent, so a hand-on would have somewhere to go.
+    const bin = `${repo}-bin`;
+    stubAgent(bin, "gemini", "exit 0");
+    const before = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${before}`;
+    try {
+      const task = createTask(repo, "What does make_handover.py do?");
+      const fake = `${repo}-claude`;
+      fs.writeFileSync(fake, `#!/usr/bin/env bash
+echo '{"type":"result","subtype":"success","result":"It builds the handover package."}'
+`);
+      fs.chmodSync(fake, 0o755);
+      const result = await runPrint(repo, task.id, { id: "claude-code", command: fake }, { cli: { command: "node", args: [CLI] } });
+      expect(result.status).toBe("review");
+      const t = getTask(repo, task.id);
+      expect(t.completed.join("\n")).toContain("It builds the handover package.");
+      expect(readActivity(repo).some((e) => /^Autopilot/.test(e.text))).toBe(false);
+    } finally {
+      process.env.PATH = before;
+    }
+  });
 });
 
 describe("planning", { timeout: 90_000 }, () => {

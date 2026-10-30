@@ -165,11 +165,17 @@ export function leaveHub(root: string): boolean {
 export async function syncWithHub(root: string): Promise<number> {
   const link = hubLink(root);
   if (!link) throw new Error("Not joined to a hub; run agentbrain join <url> --token <peer-token>.");
-  const response = await fetch(`${link.url}/api/peer/sync`, {
+  const body = JSON.stringify(localMachineData(root));
+  const send = () => fetch(`${link.url}/api/peer/sync`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-agentbrain-peer": link.token },
-    body: JSON.stringify(localMachineData(root)),
+    body,
     signal: AbortSignal.timeout(15_000),
+  });
+  // A kept-alive connection the hub just closed resets on reuse; a sync is safe to repeat once.
+  const response = await send().catch((error: unknown) => {
+    if ((error as { cause?: { code?: string } })?.cause?.code === "ECONNRESET") return send();
+    throw error;
   });
   if (response.status === 403) throw new Error("The hub rejected this machine's token (revoked?).");
   if (!response.ok) throw new Error(`The hub answered ${response.status}.`);

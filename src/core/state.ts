@@ -58,7 +58,7 @@ export interface TaskState {
   /** The developer's own words behind a task an agent wrote the brief for. */
   request?: string;
   /** Worker selected by delegation and when it was selected. */
-  delegatedTo?: { worker: string; at: string };
+  delegatedTo?: { worker: string; at: string; /** The developer or an agent named the worker: autopilot stays on its platform. */ named?: boolean };
   /** Taken on for another machine: it is reviewed and merged there, never here. */
   forMachine?: string;
   /** When autopilot handed on a sent-back task: the `at` of the send-back event, so it happens once per send-back. */

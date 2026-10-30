@@ -398,7 +398,8 @@ export function delegate(
     task = { ...task, ...(input.parent ? { parent: input.parent } : {}), ...(input.requestedBy ? { requestedBy: input.requestedBy } : {}), ...(request ? { request } : {}) };
     saveTask(root, task);
   }
-  task.delegatedTo = { worker: worker.id, at: new Date().toISOString() };
+  const pinned = (Boolean(named) && input.requestedBy !== "agentbrain") || task.delegatedTo?.named;
+  task.delegatedTo = { worker: worker.id, at: new Date().toISOString(), ...(pinned ? { named: true } : {}) };
   saveTask(root, task);
   // Parallel work never collides: each delegated task gets its own checkout.
   if (!task.worktree && isGitRepo(root) && task.status !== "done") task = addWorktree(root, task.id);
@@ -479,7 +480,7 @@ export function autoContinue(
   self: { command: string; args: string[] },
   options: { prefer?: string; sentBack?: boolean } = {},
 ): DelegateResult | null {
-  const project = getProject(root) as { autopilot?: boolean };
+  const project = getProject(root);
   if (project.autopilot === false) return null;
   const task = getTask(root, taskId);
   if (task.status !== "handoff") return null;
@@ -492,7 +493,11 @@ export function autoContinue(
   const handoffs = (task.events ?? []).slice(0, options.sentBack ? -1 : undefined).filter((e) => e.status === "handoff" && e.agent);
   const failedHere = new Set(handoffs.map((e) => e.agent!));
   if (!options.sentBack) failedHere.add(stopped);
-  const ready = rankWorkers(root).filter((c) => c.worker.available && !failedHere.has(c.worker.id) && c.worker.how !== "pull");
+  // A named worker or a model tier keeps the task on its platform (haiku -> sonnet -> the lead), never another vendor's agent.
+  const platformOf = (id: string) => id.split(".")[0];
+  const owner = options.sentBack ? options.prefer ?? task.delegatedTo?.worker ?? stopped : stopped;
+  const stay = task.delegatedTo?.named || owner.includes(".") || (activeModels(root)[platformOf(owner)]?.workers.length ?? 0) > 0 ? platformOf(owner) : null;
+  const ready = rankWorkers(root).filter((c) => c.worker.available && !failedHere.has(c.worker.id) && c.worker.how !== "pull" && (!stay || platformOf(c.worker.id) === stay));
   // A cheaper model whose results keep coming back hands over to the next stronger one on its platform.
   const stronger = options.prefer ? escalation(root, task, options.prefer) : !options.sentBack ? escalation(root, task, stopped) : null;
   // The agent that did the work knows the code: it goes first when it can.

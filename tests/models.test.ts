@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTask, takeOver, writeCheckpoint } from "../src/core/actions.js";
 import { readActivity } from "../src/core/activity.js";
@@ -5,7 +6,7 @@ import { escalation, ladder, modelOf, platformModels, resolveWorker, setModels, 
 import { initStore, getTask, saveTask } from "../src/core/store.js";
 import { addWorktree } from "../src/core/worktree.js";
 import { autoContinue, listWorkers } from "../src/core/delegate.js";
-import { CLI, tempRepo } from "./helpers.js";
+import { CLI, stubAgent, tempRepo } from "./helpers.js";
 
 describe("models", () => {
   describe("setModels validation", () => {
@@ -287,6 +288,26 @@ describe("models", () => {
       expect(result).toBeNull();
       expect(readActivity(repo).at(-1)!.text).toMatch(/no other agent is ready; the task waits/);
     });
+  });
+
+  it("autopilot keeps a tier's task on its platform, never another vendor's agent", () => {
+    const repo = tempRepo("agentbrain-models-");
+    initStore(repo);
+    setModels(repo, "claude-code", { lead: "claude-opus", workers: [{ name: "haiku", model: "claude-haiku" }] });
+    const bin = `${repo}-bin`;
+    stubAgent(bin, "gemini", "exit 0");
+    const before = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${before}`;
+    try {
+      const task = createTask(repo, "Do the thing");
+      takeOver(repo, task.id, { id: "claude-code.haiku", sessionId: "h1" });
+      writeCheckpoint(repo, task.id, { agent: { id: "claude-code.haiku", sessionId: "h1" }, reason: "crashed", status: "handoff" });
+      // Gemini is ready, but the task stays with Claude Code's models (none installed here).
+      expect(autoContinue(repo, task.id, "claude-code.haiku", "crashed", { command: "node", args: [CLI] })).toBeNull();
+      expect(getTask(repo, task.id).delegatedTo).toBeUndefined();
+    } finally {
+      process.env.PATH = before;
+    }
   });
 
   describe("tierGuide", () => {

@@ -76,6 +76,7 @@ Control plane
   agentbrain machines [--json]            Other machines seen through the hub: last sync and task counts
   agentbrain off                          Stop streaming activity and close the control room
   agentbrain permissions [all | ask]      all: agents AgentBrain starts never ask for approval (incl. Copilot in VS Code)
+  agentbrain autopilot [on | off]         on: a run that fails or times out goes to the next agent on its platform; off: it waits for you
   agentbrain lead [<agent-id> | --none]   Show or set the lead agent, who reviews every other agent's work
   agentbrain council <agent>... [--quorum 0.67] | --none
                                           Instead of one lead, a council votes on every result: sealed votes,
@@ -1567,6 +1568,12 @@ async function main(): Promise<void> {
     await off();
   } else if (command === "permissions") {
     permissions(subcommand);
+  } else if (command === "autopilot") {
+    const cwd = root();
+    const project = getProject(cwd);
+    if (subcommand === "on" || subcommand === "off") saveProject(cwd, { ...project, autopilot: subcommand === "on" });
+    else if (subcommand) throw new Error("Usage: agentbrain autopilot [on | off]");
+    console.log(`Autopilot is ${getProject(cwd).autopilot === false ? "off: a stopped run waits for you" : "on: a run that fails, crashes or times out goes to the next agent"}.`);
   } else if (command === "local") {
     local(subcommand);
   } else if (command === "lead") {
