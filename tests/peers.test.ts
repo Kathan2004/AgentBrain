@@ -75,7 +75,7 @@ describe("remote work", () => {
     const sh = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" });
     const hub = tempRepo("ab-hub-"); initStore(hub);
     const bare = fs.mkdtempSync(path.join(os.tmpdir(), "ab-origin-"));
-    sh(bare, "init", "-q", "--bare");
+    sh(bare, "init", "-q", "--bare", "--initial-branch=main");
     sh(hub, "remote", "add", "origin", bare); sh(hub, "push", "-q", "origin", "main");
     const peerDir = fs.mkdtempSync(path.join(os.tmpdir(), "ab-clone-"));
     sh(peerDir, "clone", "-q", bare, "."); initStore(peerDir);
