@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTask, updateTask } from "../src/core/actions.js";
 import { delegate } from "../src/core/delegate.js";
-import { collectResults, serveJobs } from "../src/core/remote.js";
+import { collectResults, pruneRemoteBranches, serveJobs } from "../src/core/remote.js";
 import { pendingReviews } from "../src/core/review.js";
 import { addPeer, hubLink, joinHub, listPeers, localMachineData, machineName, readJobs, writeJobs, remoteMachines, revokePeer, syncWithHub } from "../src/core/peers.js";
 import { getTask, initStore } from "../src/core/store.js";
@@ -112,6 +112,11 @@ describe("remote work", () => {
       expect(done.status).toBe("review");
       expect(done.review?.worker).toBe("laptop:any");
       expect(fs.readFileSync(path.join(done.worktree!.path, "new.txt"), "utf8")).toBe("hi\n");
+      expect(sh(hub, "ls-remote", "--heads", "origin")).toMatch(/agentbrain\/remote\//);
+      updateTask(hub, task.id, { status: "done" });
+      pruneRemoteBranches(hub);
+      expect(sh(hub, "ls-remote", "--heads", "origin")).not.toMatch(/agentbrain\/remote/);
+      expect(readJobs(hub).out[0].branch).toBeUndefined();
     } finally { await server.close(); }
   }, 30_000);
 });

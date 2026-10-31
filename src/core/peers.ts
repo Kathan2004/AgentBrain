@@ -27,7 +27,7 @@ export interface MachineData { machine: string; at: string; tasks: MachineTask[]
 export interface JobBook {
   /** Whether other machines may start agents here. Off until the developer says so. */
   accept: boolean;
-  out: Array<RemoteJob & { task: string; applied?: boolean }>;
+  out: Array<RemoteJob & { task: string; applied?: boolean; branch?: string }>;
   /** Jobs taken on here: job id → local task. */
   taken: Record<string, string>;
   results: RemoteResult[];

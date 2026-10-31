@@ -93,6 +93,7 @@ export function collectResults(root: string): void {
         const task = addWorktree(root, job.task, job.base);
         git(task.worktree!.path, ["fetch", "-q", "origin", branchFor(job)]);
         git(task.worktree!.path, ["merge", "-q", "--ff-only", "FETCH_HEAD"]);
+        job.branch = branchFor(job);
         updateTask(root, job.task, { status: "review", next: "Review the changes" });
         const t = getTask(root, job.task);
         saveTask(root, { ...t, review: { ...(t.review ?? { requestedAt: new Date().toISOString(), votes: [], checks: [], flags: [] }), worker: `${job.to}:${job.agent}` } });
@@ -105,6 +106,19 @@ export function collectResults(root: string): void {
       reported.set(job.id, String(error));
       recordActivity(root, { agent: "agentbrain", task: job.task, kind: "status", text: `Fetching ${job.to}'s result failed: ${error instanceof Error ? error.message : String(error)}` });
     }
+  }
+  if (changed) writeJobs(root, book);
+}
+
+/** Originating side: once a task's result is accepted (done), deletes the branch it came back on from origin. */
+export function pruneRemoteBranches(root: string): void {
+  const book = readJobs(root);
+  let changed = false;
+  for (const job of book.out) {
+    if (!job.branch || getTask(root, job.task).status !== "done") continue;
+    try { git(root, ["push", "-q", "origin", "--delete", job.branch]); } catch { /* already gone */ }
+    delete job.branch;
+    changed = true;
   }
   if (changed) writeJobs(root, book);
 }
